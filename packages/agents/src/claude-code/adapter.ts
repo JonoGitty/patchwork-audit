@@ -12,7 +12,17 @@ import {
 	SqliteStore,
 	loadActivePolicy,
 } from "@patchwork/core";
-import { isAbsolute, relative } from "node:path";
+import { isAbsolute, relative, dirname, join } from "node:path";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	writeFileSync,
+	renameSync,
+	chmodSync,
+	statSync,
+} from "node:fs";
+import { randomBytes } from "node:crypto";
 import { mapClaudeCodeTool } from "./mapper.js";
 import type { ClaudeCodeHookInput, ClaudeCodeHookOutput } from "./types.js";
 
@@ -22,6 +32,108 @@ function getEventsPath(): string {
 
 function getDbPath(): string {
 	return `${process.env.HOME}/.patchwork/db/audit.db`;
+}
+
+// ---------------------------------------------------------------------------
+// SQLite divergence marker — durable record of dual-write failures
+// ---------------------------------------------------------------------------
+
+/** Secure directory mode: owner-only read/write/execute */
+const STATE_DIR_MODE = 0o700;
+/** Secure file mode: owner-only read/write */
+const STATE_FILE_MODE = 0o600;
+
+/** Schema for the divergence marker file. */
+export interface DivergenceMarker {
+	schema_version: 1;
+	failure_count: number;
+	first_failure_at: string;
+	last_failure_at: string;
+	last_error: string;
+}
+
+function getDivergenceMarkerPath(): string {
+	return join(process.env.HOME || "~", ".patchwork", "state", "sqlite-divergence.json");
+}
+
+/** Reconcile permissions to target if they don't match. */
+function reconcileMode(path: string, targetMode: number): void {
+	try {
+		const stat = statSync(path);
+		if ((stat.mode & 0o777) !== targetMode) {
+			chmodSync(path, targetMode);
+		}
+	} catch {
+		// Path disappeared — safe to ignore
+	}
+}
+
+/**
+ * Read the current divergence marker, or null if absent/corrupt.
+ * @internal Exported for testing only.
+ */
+export function readDivergenceMarker(markerPath?: string): DivergenceMarker | null {
+	const p = markerPath || getDivergenceMarkerPath();
+	try {
+		const content = readFileSync(p, "utf-8");
+		const parsed = JSON.parse(content);
+		if (
+			parsed &&
+			parsed.schema_version === 1 &&
+			typeof parsed.failure_count === "number" &&
+			typeof parsed.first_failure_at === "string" &&
+			typeof parsed.last_failure_at === "string" &&
+			typeof parsed.last_error === "string"
+		) {
+			return parsed as DivergenceMarker;
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Write a divergence marker atomically (tmp + rename).
+ * Ensures state dir (0700) and file (0600) permissions.
+ */
+function writeDivergenceMarker(marker: DivergenceMarker, markerPath?: string): void {
+	const p = markerPath || getDivergenceMarkerPath();
+	const dir = dirname(p);
+
+	if (!existsSync(dir)) {
+		mkdirSync(dir, { recursive: true, mode: STATE_DIR_MODE });
+	} else {
+		reconcileMode(dir, STATE_DIR_MODE);
+	}
+
+	// Atomic write: tmp file + rename
+	const tmpPath = p + "." + randomBytes(4).toString("hex") + ".tmp";
+	writeFileSync(tmpPath, JSON.stringify(marker, null, 2) + "\n", { mode: STATE_FILE_MODE });
+	renameSync(tmpPath, p);
+}
+
+/**
+ * Record a SQLite dual-write failure in the divergence marker.
+ * Increments failure_count, preserves first_failure_at, updates last_*.
+ */
+function recordDivergence(errorMessage: string, markerPath?: string): void {
+	const now = new Date().toISOString();
+	const existing = readDivergenceMarker(markerPath);
+
+	const marker: DivergenceMarker = {
+		schema_version: 1,
+		failure_count: existing ? existing.failure_count + 1 : 1,
+		first_failure_at: existing ? existing.first_failure_at : now,
+		last_failure_at: now,
+		last_error: errorMessage,
+	};
+
+	try {
+		writeDivergenceMarker(marker, markerPath);
+	} catch {
+		// Best effort — don't let marker I/O break the hot path
+	}
 }
 
 /** Wraps a primary and optional secondary store for dual-write. */
@@ -40,6 +152,7 @@ function createDualWriter(primary: Store, secondary: Store | null): Store {
 					process.stderr.write(
 						`[patchwork] SQLite write failed (count=${sqliteErrorCount}): ${msg}\n`,
 					);
+					recordDivergence(msg);
 				}
 			}
 		},

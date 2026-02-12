@@ -23,6 +23,10 @@ import {
 	verifySeal,
 	ensureSealKey,
 	readSealKey,
+	ensureKeyring,
+	loadKeyById,
+	deriveSealKeyId,
+	rotateKey,
 } from "@patchwork/core";
 
 const WORKER_PATH = join(
@@ -943,5 +947,238 @@ describe("multi-process seal contention", () => {
 
 		// No lock file leaked
 		expect(existsSync(sealPath + ".lock")).toBe(false);
+	});
+});
+
+describe("seal with keyring", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-seal-keyring-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("seal without --key-file uses keyring and includes key_id", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		const keyringDir = join(tmpDir, "keyring");
+		const sealPath = join(tmpDir, "seals.jsonl");
+		writeJsonl(eventsPath, events);
+
+		const { exitCode } = await runSeal([
+			"--file", eventsPath,
+			"--keyring-dir", keyringDir,
+			"--seal-file", sealPath,
+		]);
+		expect(exitCode).toBeUndefined();
+
+		const sealContent = readFileSync(sealPath, "utf-8").trim();
+		const seal = JSON.parse(sealContent);
+		expect(seal.key_id).toMatch(/^[a-f0-9]{16}$/);
+		expect(seal.signature).toMatch(/^hmac-sha256:[a-f0-9]{64}$/);
+
+		// Keyring should have the key file
+		expect(existsSync(join(keyringDir, `${seal.key_id}.key`))).toBe(true);
+		expect(existsSync(join(keyringDir, "ACTIVE"))).toBe(true);
+	});
+
+	it("seal with --key-file uses legacy mode without key_id", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		const keyPath = join(tmpDir, "keys", "seal.key");
+		const sealPath = join(tmpDir, "seals.jsonl");
+		writeJsonl(eventsPath, events);
+
+		const { exitCode } = await runSeal([
+			"--file", eventsPath,
+			"--key-file", keyPath,
+			"--seal-file", sealPath,
+		]);
+		expect(exitCode).toBeUndefined();
+
+		const sealContent = readFileSync(sealPath, "utf-8").trim();
+		const seal = JSON.parse(sealContent);
+		expect(seal.key_id).toBeUndefined();
+		expect(seal.signature).toMatch(/^hmac-sha256:[a-f0-9]{64}$/);
+	});
+
+	it("verify resolves key_id from keyring", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		const keyringDir = join(tmpDir, "keyring");
+		const sealPath = join(tmpDir, "seals.jsonl");
+		writeJsonl(eventsPath, events);
+
+		// Seal with keyring
+		await runSeal([
+			"--file", eventsPath,
+			"--keyring-dir", keyringDir,
+			"--seal-file", sealPath,
+		]);
+
+		// Verify using keyring
+		const { exitCode } = await runVerify([
+			"--file", eventsPath,
+			"--seal-file", sealPath,
+			"--keyring-dir", keyringDir,
+		]);
+		expect(exitCode).toBeUndefined();
+	});
+
+	it("verify with rotated key still verifies old seals via keyring", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		const keyringDir = join(tmpDir, "keyring");
+		const sealPath = join(tmpDir, "seals.jsonl");
+		writeJsonl(eventsPath, events);
+
+		// Seal with original key
+		await runSeal([
+			"--file", eventsPath,
+			"--keyring-dir", keyringDir,
+			"--seal-file", sealPath,
+		]);
+
+		// Rotate key
+		rotateKey(keyringDir);
+
+		// Verify — should still work because old key is in keyring
+		const { exitCode } = await runVerify([
+			"--file", eventsPath,
+			"--seal-file", sealPath,
+			"--keyring-dir", keyringDir,
+		]);
+		expect(exitCode).toBeUndefined();
+	});
+
+	it("seal after rotation uses the new key", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		const keyringDir = join(tmpDir, "keyring");
+		const sealPath = join(tmpDir, "seals.jsonl");
+		writeJsonl(eventsPath, events);
+
+		// First seal
+		await runSeal([
+			"--file", eventsPath,
+			"--keyring-dir", keyringDir,
+			"--seal-file", sealPath,
+		]);
+
+		const firstSeal = JSON.parse(readFileSync(sealPath, "utf-8").trim().split("\n")[0]);
+		const originalKeyId = firstSeal.key_id;
+
+		// Rotate
+		const { keyId: newKeyId } = rotateKey(keyringDir);
+		expect(newKeyId).not.toBe(originalKeyId);
+
+		// Second seal — should use new key
+		await runSeal([
+			"--file", eventsPath,
+			"--keyring-dir", keyringDir,
+			"--seal-file", sealPath,
+		]);
+
+		const sealLines = readFileSync(sealPath, "utf-8").trim().split("\n");
+		const secondSeal = JSON.parse(sealLines[sealLines.length - 1]);
+		expect(secondSeal.key_id).toBe(newKeyId);
+
+		// Both seals should verify
+		const { exitCode } = await runVerify([
+			"--file", eventsPath,
+			"--seal-file", sealPath,
+			"--keyring-dir", keyringDir,
+		]);
+		expect(exitCode).toBeUndefined();
+	});
+
+	it("verify legacy seal (no key_id) falls back to --key-file", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		const keyPath = join(tmpDir, "keys", "seal.key");
+		const sealPath = join(tmpDir, "seals.jsonl");
+		writeJsonl(eventsPath, events);
+
+		// Seal in legacy mode
+		await runSeal([
+			"--file", eventsPath,
+			"--key-file", keyPath,
+			"--seal-file", sealPath,
+		]);
+
+		// Verify with key-file (legacy)
+		const { exitCode } = await runVerify([
+			"--file", eventsPath,
+			"--seal-file", sealPath,
+			"--key-file", keyPath,
+		]);
+		expect(exitCode).toBeUndefined();
+	});
+});
+
+describe("seal rotate-key subcommand", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-seal-rotate-cmd-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	async function runSealRotate(args: string[]): Promise<{ exitCode: number | undefined; output: string[] }> {
+		vi.resetModules();
+		const { sealCommand } = await import("../../src/commands/seal.js");
+		const output: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		const previousExitCode = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			sealCommand.parse(["node", "seal", "rotate-key", ...args], { from: "node" });
+			return { exitCode: process.exitCode, output };
+		} finally {
+			process.exitCode = previousExitCode;
+			logSpy.mockRestore();
+		}
+	}
+
+	it("creates a new key in the keyring", async () => {
+		const keyringDir = join(tmpDir, "keyring");
+
+		const { exitCode, output } = await runSealRotate(["--keyring-dir", keyringDir]);
+		expect(exitCode).toBeUndefined();
+
+		const joined = output.join("\n");
+		expect(joined).toContain("Key rotated");
+
+		// Keyring should exist with ACTIVE pointer
+		expect(existsSync(join(keyringDir, "ACTIVE"))).toBe(true);
+	});
+
+	it("rotates to a different key", async () => {
+		const keyringDir = join(tmpDir, "keyring");
+		const original = ensureKeyring(keyringDir);
+
+		await runSealRotate(["--keyring-dir", keyringDir]);
+
+		const active = readFileSync(join(keyringDir, "ACTIVE"), "utf-8").trim();
+		expect(active).not.toBe(original.keyId);
+		// Old key still present
+		expect(existsSync(join(keyringDir, `${original.keyId}.key`))).toBe(true);
+	});
+
+	it("JSON output includes key_id", async () => {
+		const keyringDir = join(tmpDir, "keyring");
+
+		const { output } = await runSealRotate(["--keyring-dir", keyringDir, "--json"]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.key_id).toMatch(/^[a-f0-9]{16}$/);
+		expect(parsed.keyring_dir).toBe(keyringDir);
 	});
 });

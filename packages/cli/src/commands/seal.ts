@@ -19,9 +19,11 @@ import {
 	computeSealPayload,
 	signSeal,
 	ensureSealKey,
+	ensureKeyring,
+	rotateKey,
 	type SealRecord,
 } from "@patchwork/core";
-import { EVENTS_PATH, SEAL_KEY_PATH, SEALS_PATH } from "../store.js";
+import { EVENTS_PATH, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH } from "../store.js";
 
 /** Lock constants */
 const SEAL_LOCK_MAX_RETRIES = 20;
@@ -35,15 +37,16 @@ interface SealLockMetadata {
 }
 
 export const sealCommand = new Command("seal")
+	.enablePositionalOptions()
 	.description("HMAC-seal the current chain tip to detect full-log rewrites")
 	.option("--file <path>", "Path to events JSONL file")
-	.option("--key-file <path>", "Path to seal key file")
+	.option("--key-file <path>", "Path to legacy single seal key file (disables keyring)")
+	.option("--keyring-dir <path>", "Path to seal keyring directory")
 	.option("--seal-file <path>", "Path to seals JSONL file")
 	.option("--allow-invalid", "Do not fail on invalid/corrupt event lines")
 	.option("--json", "Output result as JSON")
 	.action((opts) => {
 		const eventsPath = opts.file || EVENTS_PATH;
-		const keyPath = opts.keyFile || SEAL_KEY_PATH;
 		const sealPath = opts.sealFile || SEALS_PATH;
 
 		if (!existsSync(eventsPath)) {
@@ -115,7 +118,19 @@ export const sealCommand = new Command("seal")
 		}
 
 		// Load or create seal key
-		const key = ensureSealKey(keyPath);
+		let key: Buffer;
+		let keyId: string | undefined;
+
+		if (opts.keyFile) {
+			// Legacy single-key mode — no key_id in seal
+			key = ensureSealKey(opts.keyFile);
+		} else {
+			// Keyring mode (default) — key_id included in seal
+			const keyringDir = opts.keyringDir || KEYRING_DIR;
+			const result = ensureKeyring(keyringDir);
+			key = result.key;
+			keyId = result.keyId;
+		}
 
 		// Create seal record
 		const sealedAt = new Date().toISOString();
@@ -127,6 +142,7 @@ export const sealCommand = new Command("seal")
 			tip_hash: tipHash,
 			chained_events: chainResult.chained_events,
 			signature,
+			...(keyId ? { key_id: keyId } : {}),
 		};
 
 		// Locked append
@@ -144,8 +160,32 @@ export const sealCommand = new Command("seal")
 			console.log(`  Tip hash:         ${chalk.dim(tipHash)}`);
 			console.log(`  Chained events:   ${chainResult.chained_events}`);
 			console.log(`  Signature:        ${chalk.dim(signature.slice(0, 30))}...`);
+			if (keyId) {
+				console.log(`  Key ID:           ${chalk.dim(keyId)}`);
+			}
 			console.log();
 			console.log(chalk.green("Seal appended to:"), chalk.dim(sealPath));
+		}
+	});
+
+sealCommand
+	.command("rotate-key")
+	.description("Generate a new seal key and set it as active in the keyring")
+	.option("--keyring-dir <path>", "Path to seal keyring directory")
+	.option("--json", "Output result as JSON")
+	.action((opts) => {
+		const keyringDir = opts.keyringDir || KEYRING_DIR;
+		const { keyId } = rotateKey(keyringDir);
+
+		if (opts.json) {
+			console.log(JSON.stringify({ key_id: keyId, keyring_dir: keyringDir }));
+		} else {
+			console.log(chalk.bold("Key rotated"));
+			console.log();
+			console.log(`  New key ID:       ${chalk.dim(keyId)}`);
+			console.log(`  Keyring:          ${chalk.dim(keyringDir)}`);
+			console.log();
+			console.log(chalk.green("Previous keys remain in the keyring for seal verification."));
 		}
 	});
 

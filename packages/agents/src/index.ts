@@ -1,5 +1,5 @@
 // Claude Code
-export { handleClaudeCodeHook } from "./claude-code/adapter.js";
+export { handleClaudeCodeHook, readDivergenceMarker, type DivergenceMarker } from "./claude-code/adapter.js";
 export { mapClaudeCodeTool } from "./claude-code/mapper.js";
 export { installClaudeCodeHooks, uninstallClaudeCodeHooks } from "./claude-code/installer.js";
 export type {

@@ -6,9 +6,10 @@ import {
 	computeSealPayload,
 	verifySeal,
 	readSealKey,
+	loadKeyById,
 	type SealRecord,
 } from "@patchwork/core";
-import { EVENTS_PATH, SEAL_KEY_PATH, SEALS_PATH } from "../store.js";
+import { EVENTS_PATH, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH } from "../store.js";
 
 /** Structured seal check result for JSON output and policy decisions. */
 interface SealCheckResult {
@@ -44,7 +45,8 @@ export const verifyCommand = new Command("verify")
 	.option("--allow-invalid", "Do not fail verification due to invalid/corrupt event lines")
 	.option("--file <path>", "Path to JSONL file (default: ~/.patchwork/events.jsonl)")
 	.option("--seal-file <path>", "Path to seals JSONL file")
-	.option("--key-file <path>", "Path to seal key file")
+	.option("--key-file <path>", "Path to legacy single seal key file")
+	.option("--keyring-dir <path>", "Path to seal keyring directory")
 	.option("--no-seal-check", "Skip seal verification even if seal file exists")
 	.option("--require-seal", "Fail if no valid seal exists")
 	.option("--max-seal-age-seconds <n>", "Fail if latest seal is older than n seconds (positive integer)")
@@ -235,6 +237,7 @@ function runSealCheck(
 
 	const sealPath = (opts.sealFile as string) || SEALS_PATH;
 	const keyPath = (opts.keyFile as string) || SEAL_KEY_PATH;
+	const keyringDir = (opts.keyringDir as string) || KEYRING_DIR;
 	const requireSeal = opts.requireSeal === true;
 	const strictSealFile = opts.strictSealFile === true;
 
@@ -301,32 +304,47 @@ function runSealCheck(
 
 	const latestSeal = scanResult.seal;
 
-	// Key check
-	if (!existsSync(keyPath)) {
-		return {
-			seal_checked: true,
-			seal_present: true,
-			seal_valid: false,
-			seal_tip_match: false,
-			seal_age_seconds: null,
-			seal_corrupt_lines: scanResult.corrupt_lines,
-			seal_failure_reason: `Seal file exists but key not found at ${keyPath}`,
-		};
+	// Key resolution: keyring by key_id, then legacy key-file fallback
+	let key: Buffer | null = null;
+
+	if (latestSeal.key_id) {
+		// Seal has a key_id — try keyring lookup
+		try {
+			key = loadKeyById(keyringDir, latestSeal.key_id);
+		} catch {
+			// Keyring lookup failed — try legacy key-file as last resort
+		}
 	}
 
-	let key: Buffer;
-	try {
-		key = readSealKey(keyPath);
-	} catch {
-		return {
-			seal_checked: true,
-			seal_present: true,
-			seal_valid: false,
-			seal_tip_match: false,
-			seal_age_seconds: null,
-			seal_corrupt_lines: scanResult.corrupt_lines,
-			seal_failure_reason: `Cannot read seal key at ${keyPath}`,
-		};
+	if (!key) {
+		// Legacy fallback: use --key-file path
+		if (!existsSync(keyPath)) {
+			const reason = latestSeal.key_id
+				? `Key ${latestSeal.key_id} not found in keyring and no legacy key at ${keyPath}`
+				: `Seal file exists but key not found at ${keyPath}`;
+			return {
+				seal_checked: true,
+				seal_present: true,
+				seal_valid: false,
+				seal_tip_match: false,
+				seal_age_seconds: null,
+				seal_corrupt_lines: scanResult.corrupt_lines,
+				seal_failure_reason: reason,
+			};
+		}
+		try {
+			key = readSealKey(keyPath);
+		} catch {
+			return {
+				seal_checked: true,
+				seal_present: true,
+				seal_valid: false,
+				seal_tip_match: false,
+				seal_age_seconds: null,
+				seal_corrupt_lines: scanResult.corrupt_lines,
+				seal_failure_reason: `Cannot read seal key at ${keyPath}`,
+			};
+		}
 	}
 
 	// Signature verification

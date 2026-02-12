@@ -12,6 +12,7 @@ Patchwork is no longer in the "aspirational strategy" stage. Core security contr
 - JSONL locking and stale-lock recovery
 - Tamper-evident hash chaining (`prev_hash` + `event_hash`)
 - HMAC sealing and CLI verification workflows
+- Versioned seal keyring with key IDs and key rotation
 - Privacy-safe defaults for path handling, command redaction, and prompt-size capture
 
 Remaining reality: this is still an audit/observability system, not a hard policy enforcement boundary. Hook timeout behavior and local-key trust are still the main architectural constraints.
@@ -20,18 +21,20 @@ Remaining reality: this is still an audit/observability system, not a hard polic
 
 ### R1. Tamper evidence and integrity
 Status: Partially mitigated
-Current severity: High
+Current severity: Medium
 
 What is implemented:
 - Event-level hash chain fields in schema (`prev_hash`, `event_hash`)
 - Deterministic hashing and chain verification
 - HMAC seal key management and signature verification
+- Key IDs and key rotation in a local keyring model
 - CLI verification with seal policy options
 
 Residual risk:
 - Seals are local-key based; an attacker with both key and data can forge
 - No remote witness / transparency log anchoring
-- No key rotation model
+- Seal records are not chained to each other
+- Legacy seals without `key_id` require legacy key fallback
 
 Evidence:
 - `packages/core/src/schema/event.ts`
@@ -81,14 +84,19 @@ Current severity: Medium
 
 What is implemented:
 - Secondary SQLite failures are now surfaced to stderr with an error counter
+- Durable divergence marker persisted on SQLite secondary write failures
+- `sync db-status` exposes divergence state for operators/CI
+- `sync db` warns when divergence exists and clears marker after rebuild flow
 - Primary JSONL write still succeeds if SQLite is unavailable
 
 Residual risk:
 - Divergence is still possible under SQLite failure/lock pressure
 - Reconciliation is still operational/manual rather than transactional
+- `sync db` currently reports only aggregate failure counts (no per-event failure detail), limiting postmortem precision
 
 Evidence:
 - `packages/agents/src/claude-code/adapter.ts`
+- `packages/cli/src/commands/sync.ts`
 
 ### R5. Idempotency and duplicate event handling
 Status: Partially mitigated
@@ -204,13 +212,13 @@ What it is not yet:
 - Define explicit product mode: `audit-only` vs `best-effort enforcement`
 - Add runtime surfacing when hook execution exceeds policy-safe thresholds
 
-2. Seal trust model hardening
-- Add key IDs + rotation support
-- Add optional external witness anchoring for tip hashes (CI artifact, transparency log, or KMS-backed signer)
+2. Dual-write consistency hardening
+- Add per-event failure diagnostics during `sync db` (event id + error class)
+- Optionally persist sync-run failure summaries for later operator inspection
 
-3. JSONL performance path
-- Add incremental idempotency index or bounded in-memory cache
-- Add streaming read mode for large files
+3. Seal trust model hardening
+- Add optional external witness anchoring for tip hashes (CI artifact, transparency log, or KMS-backed signer)
+- Add seal-to-seal chaining or checkpointing strategy for stronger timeline integrity
 
 4. Privacy lifecycle completeness
 - Add retention policy and purge command

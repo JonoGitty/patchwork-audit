@@ -46,6 +46,10 @@ export {
 	verifySeal,
 	ensureSealKey,
 	readSealKey,
+	deriveSealKeyId,
+	ensureKeyring,
+	loadKeyById,
+	rotateKey,
 	type SealRecord,
 } from "./hash/seal.js";
 

@@ -18,6 +18,10 @@ import {
 	verifySeal,
 	ensureSealKey,
 	readSealKey,
+	deriveSealKeyId,
+	ensureKeyring,
+	loadKeyById,
+	rotateKey,
 } from "../../src/hash/seal.js";
 
 describe("computeSealPayload", () => {
@@ -178,5 +182,182 @@ describe("readSealKey", () => {
 
 		const fileStat = statSync(keyPath);
 		expect(fileStat.mode & 0o777).toBe(0o600);
+	});
+});
+
+describe("deriveSealKeyId", () => {
+	it("returns a 16-char hex string", () => {
+		const key = randomBytes(32);
+		const id = deriveSealKeyId(key);
+		expect(id).toMatch(/^[a-f0-9]{16}$/);
+	});
+
+	it("is deterministic for the same key", () => {
+		const key = randomBytes(32);
+		expect(deriveSealKeyId(key)).toBe(deriveSealKeyId(key));
+	});
+
+	it("differs for different keys", () => {
+		const a = deriveSealKeyId(randomBytes(32));
+		const b = deriveSealKeyId(randomBytes(32));
+		expect(a).not.toBe(b);
+	});
+});
+
+describe("ensureKeyring", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-keyring-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("creates keyring dir with 0700, key file with 0600, and ACTIVE pointer", () => {
+		const keyringDir = join(tmpDir, "seal");
+		const { keyId, key } = ensureKeyring(keyringDir);
+
+		expect(statSync(keyringDir).mode & 0o777).toBe(0o700);
+		expect(statSync(join(keyringDir, `${keyId}.key`)).mode & 0o777).toBe(0o600);
+		expect(statSync(join(keyringDir, "ACTIVE")).mode & 0o777).toBe(0o600);
+		expect(key.length).toBe(32);
+		expect(keyId).toMatch(/^[a-f0-9]{16}$/);
+	});
+
+	it("returns the same key on repeated calls", () => {
+		const keyringDir = join(tmpDir, "seal");
+		const first = ensureKeyring(keyringDir);
+		const second = ensureKeyring(keyringDir);
+
+		expect(second.keyId).toBe(first.keyId);
+		expect(second.key.equals(first.key)).toBe(true);
+	});
+
+	it("ACTIVE pointer contains the key ID", () => {
+		const keyringDir = join(tmpDir, "seal");
+		const { keyId } = ensureKeyring(keyringDir);
+
+		const active = readFileSync(join(keyringDir, "ACTIVE"), "utf-8").trim();
+		expect(active).toBe(keyId);
+	});
+
+	it("key ID matches deriveSealKeyId of the generated key", () => {
+		const keyringDir = join(tmpDir, "seal");
+		const { keyId, key } = ensureKeyring(keyringDir);
+		expect(keyId).toBe(deriveSealKeyId(key));
+	});
+
+	it("throws when ACTIVE points to a missing key file", () => {
+		const keyringDir = join(tmpDir, "seal");
+		mkdirSync(keyringDir, { recursive: true, mode: 0o700 });
+		writeFileSync(join(keyringDir, "ACTIVE"), "nonexistent_id\n", { mode: 0o600 });
+
+		expect(() => ensureKeyring(keyringDir)).toThrow("not found in keyring");
+	});
+
+	it("reconciles insecure keyring dir permissions", () => {
+		const keyringDir = join(tmpDir, "seal");
+		mkdirSync(keyringDir, { recursive: true, mode: 0o755 });
+
+		ensureKeyring(keyringDir);
+
+		expect(statSync(keyringDir).mode & 0o777).toBe(0o700);
+	});
+});
+
+describe("loadKeyById", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-loadkey-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("loads a key by its ID", () => {
+		const keyringDir = join(tmpDir, "seal");
+		const { keyId, key } = ensureKeyring(keyringDir);
+
+		const loaded = loadKeyById(keyringDir, keyId);
+		expect(loaded.equals(key)).toBe(true);
+	});
+
+	it("throws when key ID does not exist", () => {
+		const keyringDir = join(tmpDir, "seal");
+		mkdirSync(keyringDir, { recursive: true, mode: 0o700 });
+
+		expect(() => loadKeyById(keyringDir, "nonexistent123")).toThrow("not found in keyring");
+	});
+
+	it("reconciles insecure key file permissions", () => {
+		const keyringDir = join(tmpDir, "seal");
+		const { keyId } = ensureKeyring(keyringDir);
+
+		chmodSync(join(keyringDir, `${keyId}.key`), 0o644);
+		loadKeyById(keyringDir, keyId);
+
+		expect(statSync(join(keyringDir, `${keyId}.key`)).mode & 0o777).toBe(0o600);
+	});
+});
+
+describe("rotateKey", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-rotate-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("generates a new key different from the original", () => {
+		const keyringDir = join(tmpDir, "seal");
+		const original = ensureKeyring(keyringDir);
+		const rotated = rotateKey(keyringDir);
+
+		expect(rotated.keyId).not.toBe(original.keyId);
+		expect(rotated.key.equals(original.key)).toBe(false);
+	});
+
+	it("updates ACTIVE pointer to new key", () => {
+		const keyringDir = join(tmpDir, "seal");
+		ensureKeyring(keyringDir);
+		const { keyId } = rotateKey(keyringDir);
+
+		const active = readFileSync(join(keyringDir, "ACTIVE"), "utf-8").trim();
+		expect(active).toBe(keyId);
+	});
+
+	it("preserves the old key file for verification of older seals", () => {
+		const keyringDir = join(tmpDir, "seal");
+		const original = ensureKeyring(keyringDir);
+		rotateKey(keyringDir);
+
+		// Old key still exists and is loadable
+		const oldKey = loadKeyById(keyringDir, original.keyId);
+		expect(oldKey.equals(original.key)).toBe(true);
+	});
+
+	it("ensureKeyring returns the rotated key after rotation", () => {
+		const keyringDir = join(tmpDir, "seal");
+		ensureKeyring(keyringDir);
+		const rotated = rotateKey(keyringDir);
+
+		const current = ensureKeyring(keyringDir);
+		expect(current.keyId).toBe(rotated.keyId);
+		expect(current.key.equals(rotated.key)).toBe(true);
+	});
+
+	it("creates keyring dir if it does not exist", () => {
+		const keyringDir = join(tmpDir, "new-seal");
+		const { keyId } = rotateKey(keyringDir);
+
+		expect(existsSync(join(keyringDir, `${keyId}.key`))).toBe(true);
+		expect(statSync(keyringDir).mode & 0o777).toBe(0o700);
 	});
 });
