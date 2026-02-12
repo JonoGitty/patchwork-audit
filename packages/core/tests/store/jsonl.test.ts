@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
 	appendFileSync,
 	chmodSync,
@@ -525,6 +525,84 @@ describe("JsonlStore", () => {
 			}
 			expect(s.readAll()).toHaveLength(20);
 			expect(existsSync(filePath + ".lock")).toBe(false);
+		});
+	});
+
+	describe("idempotency index", () => {
+		it("first keyed append builds index from existing file and dedups correctly", () => {
+			const filePath = join(tmpDir, "idx-existing.jsonl");
+			const s1 = new JsonlStore(filePath);
+			s1.append(makeEvent({ id: "evt_pre", idempotency_key: "key_pre" }));
+
+			// New instance — fresh cache, must rebuild index from file
+			const s2 = new JsonlStore(filePath);
+			s2.append(makeEvent({ id: "evt_dup", idempotency_key: "key_pre" }));
+
+			const events = s2.readAll();
+			expect(events).toHaveLength(1);
+			expect(events[0].id).toBe("evt_pre");
+		});
+
+		it("repeated keyed appends avoid full parse rescans", () => {
+			const filePath = join(tmpDir, "idx-rescan.jsonl");
+			const s = new JsonlStore(filePath);
+			const parseSpy = vi.spyOn(s as any, "parseFile");
+
+			s.append(makeEvent({ id: "evt_1", idempotency_key: "k1" }));
+			expect(parseSpy).toHaveBeenCalledTimes(1);
+
+			s.append(makeEvent({ id: "evt_2", idempotency_key: "k2" }));
+			expect(parseSpy).toHaveBeenCalledTimes(1); // no re-parse
+
+			s.append(makeEvent({ id: "evt_3", idempotency_key: "k3" }));
+			expect(parseSpy).toHaveBeenCalledTimes(1); // still no re-parse
+
+			// Verify data independently (readAll also calls parseFile)
+			parseSpy.mockRestore();
+			expect(s.readAll()).toHaveLength(3);
+		});
+
+		it("mtime-change reconciliation catches keys appended by external writer", () => {
+			const filePath = join(tmpDir, "idx-external.jsonl");
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent({ id: "evt_1", idempotency_key: "k1" }));
+
+			// External writer appends a keyed event (different store instance)
+			const ext = new JsonlStore(filePath);
+			ext.append(makeEvent({ id: "evt_ext", idempotency_key: "k_ext" }));
+
+			// Original store tries same key — mtime changed, should rebuild and dedup
+			s.append(makeEvent({ id: "evt_dup", idempotency_key: "k_ext" }));
+
+			expect(s.readAll()).toHaveLength(2);
+		});
+
+		it("unkeyed events still append normally with index in place", () => {
+			const filePath = join(tmpDir, "idx-unkeyed.jsonl");
+			const s = new JsonlStore(filePath);
+
+			// Build index via keyed append
+			s.append(makeEvent({ id: "evt_k", idempotency_key: "k1" }));
+
+			// Unkeyed appends should still work
+			s.append(makeEvent({ id: "evt_u1" }));
+			s.append(makeEvent({ id: "evt_u2" }));
+
+			expect(s.readAll()).toHaveLength(3);
+		});
+
+		it("hash chain remains correct across cached appends", () => {
+			const filePath = join(tmpDir, "idx-chain.jsonl");
+			const s = new JsonlStore(filePath);
+
+			s.append(makeEvent({ id: "evt_c1" }));
+			s.append(makeEvent({ id: "evt_c2" }));
+			s.append(makeEvent({ id: "evt_c3" }));
+
+			const raw = readFileSync(filePath, "utf-8").trim().split("\n").map(JSON.parse);
+			expect(raw[0].prev_hash).toBeNull();
+			expect(raw[1].prev_hash).toBe(raw[0].event_hash);
+			expect(raw[2].prev_hash).toBe(raw[1].event_hash);
 		});
 	});
 

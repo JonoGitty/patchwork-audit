@@ -75,6 +75,15 @@ export class JsonlStore implements Store {
 	/** Count of corrupt/invalid lines skipped during the last read operation. */
 	lastReadErrors = 0;
 
+	/** In-memory idempotency index. null = uninitialized (lazy). */
+	private dedupIndex: Set<string> | null = null;
+	/** Cached event_hash of the last chained event. */
+	private lastHashCache: string | null = null;
+	/** File mtime (ms) when cache was last built/updated. null = no file. */
+	private cacheMtimeMs: number | null = null;
+	/** Count of corrupt/invalid lines when cache was last built. */
+	private cacheErrorCount = 0;
+
 	constructor(private readonly filePath: string) {
 		const dir = dirname(filePath);
 		if (!existsSync(dir)) {
@@ -100,25 +109,26 @@ export class JsonlStore implements Store {
 		const lockPath = this.filePath + ".lock";
 
 		this.withLock(lockPath, () => {
-			const { events: existing, errors } = this.parseFile();
-			if (errors > 0) {
+			// Build or refresh cached index (inside lock for correctness)
+			this.ensureIndex();
+
+			if (this.cacheErrorCount > 0) {
 				throw new Error(
-					`Refusing to append to corrupted audit log: ${errors} invalid/corrupt line(s) detected. Run "patchwork verify" to inspect.`,
+					`Refusing to append to corrupted audit log: ${this.cacheErrorCount} invalid/corrupt line(s) detected. Run "patchwork verify" to inspect.`,
 				);
 			}
 
-			// Dedup by idempotency_key INSIDE the lock to prevent TOCTOU races
+			// Dedup by idempotency_key — O(1) Set lookup
 			if (event.idempotency_key) {
-				if (existing.some((e) => e.idempotency_key === event.idempotency_key)) {
+				if (this.dedupIndex!.has(event.idempotency_key)) {
 					return; // Already recorded — skip silently
 				}
 			}
 
-			// Compute hash chain: prev_hash from last chained event, then event_hash
-			const lastChainedHash = this.getLastChainedHash(existing);
+			// Compute hash chain: prev_hash from cached tip, then event_hash
 			const chained = {
 				...event,
-				prev_hash: lastChainedHash,
+				prev_hash: this.lastHashCache,
 			} as Record<string, unknown>;
 			chained.event_hash = computeEventHash(chained);
 
@@ -128,6 +138,13 @@ export class JsonlStore implements Store {
 			if (isNew) {
 				chmodSync(this.filePath, FILE_MODE);
 			}
+
+			// Update cached state before releasing lock
+			if (event.idempotency_key) {
+				this.dedupIndex!.add(event.idempotency_key);
+			}
+			this.lastHashCache = chained.event_hash as string;
+			this.cacheMtimeMs = this.fileMtimeMs();
 		});
 	}
 
@@ -194,6 +211,41 @@ export class JsonlStore implements Store {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Build or refresh the in-memory idempotency index and cached chain tip.
+	 * Called inside the lock critical section.
+	 * Rebuilds from disk when: (a) first call, or (b) file mtime changed
+	 * since last build (another process wrote new data).
+	 */
+	private ensureIndex(): void {
+		const currentMtime = this.fileMtimeMs();
+		if (this.dedupIndex !== null && this.cacheMtimeMs === currentMtime) {
+			return; // cache is current — no re-parse needed
+		}
+
+		const { events, errors } = this.parseFile();
+		this.cacheErrorCount = errors;
+
+		this.dedupIndex = new Set<string>();
+		for (const e of events) {
+			if (e.idempotency_key) {
+				this.dedupIndex.add(e.idempotency_key);
+			}
+		}
+
+		this.lastHashCache = this.getLastChainedHash(events);
+		this.cacheMtimeMs = currentMtime;
+	}
+
+	/** Get file mtime in ms, or null if file does not exist. */
+	private fileMtimeMs(): number | null {
+		try {
+			return statSync(this.filePath).mtimeMs;
+		} catch {
+			return null;
+		}
 	}
 
 	/** Parse file with schema validation, returning valid events and error count. */

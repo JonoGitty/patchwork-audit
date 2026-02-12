@@ -173,15 +173,17 @@ Evidence:
 - `packages/agents/src/claude-code/installer.ts`
 
 ### R10. JSONL scaling (`readAll()` and dedup scans)
-Status: Open
-Current severity: Medium
+Status: Partially mitigated
+Current severity: Low
 
 Current state:
-- JSONL reads and dedup checks still depend on full-file scans in key paths
-- Works for present scale, but asymptotic behavior remains O(n) per operation in some flows
+- Append-path keyed dedup now uses an in-memory idempotency index with mtime-based reconciliation
+- Full-file parsing is no longer required on every keyed append in steady state
+- `readAll()`/query-style read paths still parse the full file
 
 Impact:
-- Slower CLI and append operations as logs grow
+- Read-heavy CLI operations can still slow as logs grow
+- Cross-process cache coherence depends on mtime resolution
 
 Evidence:
 - `packages/core/src/store/jsonl.ts`
