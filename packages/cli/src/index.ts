@@ -13,6 +13,7 @@ import { exportCommand } from "./commands/export.js";
 import { searchCommand } from "./commands/search.js";
 import { diffCommand } from "./commands/diff.js";
 import { statsCommand } from "./commands/stats.js";
+import { verifyCommand } from "./commands/verify.js";
 
 const program = new Command();
 
@@ -35,5 +36,6 @@ program.addCommand(exportCommand);
 program.addCommand(searchCommand);
 program.addCommand(diffCommand);
 program.addCommand(statsCommand);
+program.addCommand(verifyCommand);
 
 program.parse();

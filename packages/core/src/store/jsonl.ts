@@ -12,9 +12,11 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
+import { randomUUID } from "node:crypto";
 import { AuditEventSchema } from "../schema/event.js";
 import type { AuditEvent } from "../schema/event.js";
 import type { EventFilter, Store } from "./types.js";
+import { computeEventHash } from "../hash/chain.js";
 
 /** Secure directory mode: owner-only read/write/execute */
 const DIR_MODE = 0o700;
@@ -29,6 +31,37 @@ const LOCK_RETRY_DELAY_MS = 10;
 const LOCK_STALE_THRESHOLD_MS = 5_000;
 /** Cached hostname for lock ownership checks. */
 const LOCK_HOSTNAME = hostname();
+/** Maximum allowed clock skew before treating created_at_ms as invalid (ms). */
+const LOCK_FUTURE_SKEW_MS = 60_000;
+
+/**
+ * @internal Lock I/O operations, injectable for deterministic testing.
+ * Default implementations use real fs / helpers; tests can override
+ * individual operations via _setLockIO().
+ */
+interface LockIO {
+	openLock(path: string): number;
+	unlinkLock(path: string): void;
+	sleep(ms: number): void;
+	isStale(lockPath: string, thresholdMs: number): boolean;
+}
+
+const defaultLockIO: LockIO = {
+	openLock: (path) => openSync(path, "wx"),
+	unlinkLock: (path) => unlinkSync(path),
+	sleep: (ms) => sleepSync(ms),
+	isStale: (path, ms) => isLockStale(path, ms),
+};
+
+let lockIO: LockIO = defaultLockIO;
+
+/** @internal For testing only. Override lock I/O operations. Pass null to restore defaults. */
+export function _setLockIO(overrides: Partial<LockIO> | null): void {
+	lockIO =
+		overrides === null
+			? defaultLockIO
+			: { ...defaultLockIO, ...overrides };
+}
 
 /**
  * Append-only JSONL store for audit events.
@@ -64,18 +97,26 @@ export class JsonlStore implements Store {
 			);
 		}
 
-		const line = JSON.stringify(event) + "\n";
 		const lockPath = this.filePath + ".lock";
 
 		this.withLock(lockPath, () => {
 			// Dedup by idempotency_key INSIDE the lock to prevent TOCTOU races
+			const existing = this.readAllRaw();
 			if (event.idempotency_key) {
-				const existing = this.readAllRaw();
 				if (existing.some((e) => e.idempotency_key === event.idempotency_key)) {
 					return; // Already recorded — skip silently
 				}
 			}
 
+			// Compute hash chain: prev_hash from last chained event, then event_hash
+			const lastChainedHash = this.getLastChainedHash(existing);
+			const chained = {
+				...event,
+				prev_hash: lastChainedHash,
+			} as Record<string, unknown>;
+			chained.event_hash = computeEventHash(chained);
+
+			const line = JSON.stringify(chained) + "\n";
 			const isNew = !existsSync(this.filePath);
 			appendFileSync(this.filePath, line, "utf-8");
 			if (isNew) {
@@ -157,6 +198,17 @@ export class JsonlStore implements Store {
 			.filter((e): e is AuditEvent => e !== null);
 	}
 
+	/** Get the event_hash of the last chained event, or null if none. */
+	private getLastChainedHash(events: AuditEvent[]): string | null {
+		for (let i = events.length - 1; i >= 0; i--) {
+			const h = (events[i] as Record<string, unknown>).event_hash;
+			if (typeof h === "string") {
+				return h;
+			}
+		}
+		return null;
+	}
+
 	/** Parse file with schema validation, returning valid events and error count. */
 	private parseFile(): { events: AuditEvent[]; errors: number } {
 		if (!existsSync(this.filePath)) {
@@ -193,30 +245,28 @@ export class JsonlStore implements Store {
 	 * Only reclaims locks that are stale (holder dead or age > threshold).
 	 */
 	private withLock(lockPath: string, fn: () => void): void {
-		const token =
-			Math.random().toString(36).slice(2) +
-			Math.random().toString(36).slice(2);
+		const token = randomUUID();
 		let fd: number | null = null;
 		let acquired = false;
 
 		for (let attempt = 0; attempt < LOCK_MAX_RETRIES; attempt++) {
 			try {
-				fd = openSync(lockPath, "wx");
+				fd = lockIO.openLock(lockPath);
 				acquired = true;
 				break;
 			} catch (err: unknown) {
 				const code = (err as NodeJS.ErrnoException).code;
 				if (code === "EEXIST") {
 					// Check if lock is stale before continuing to spin
-					if (isLockStale(lockPath, LOCK_STALE_THRESHOLD_MS)) {
+					if (lockIO.isStale(lockPath, LOCK_STALE_THRESHOLD_MS)) {
 						try {
-							unlinkSync(lockPath);
+							lockIO.unlinkLock(lockPath);
 						} catch {
 							// Another process beat us — retry loop will handle it
 						}
 						continue;
 					}
-					sleepSync(LOCK_RETRY_DELAY_MS);
+					lockIO.sleep(LOCK_RETRY_DELAY_MS);
 					continue;
 				}
 				throw err;
@@ -225,13 +275,36 @@ export class JsonlStore implements Store {
 
 		if (!acquired) {
 			// Final stale check — only reclaim if definitively stale
-			if (isLockStale(lockPath, LOCK_STALE_THRESHOLD_MS)) {
-				try {
-					unlinkSync(lockPath);
-				} catch {
-					// Already removed
+			if (lockIO.isStale(lockPath, LOCK_STALE_THRESHOLD_MS)) {
+				// Bounded retry: another process may recreate the lock between
+				// our unlink and open, causing an EEXIST race.
+				const FINAL_RECLAIM_ATTEMPTS = 3;
+				let reclaimSuccess = false;
+				for (let r = 0; r < FINAL_RECLAIM_ATTEMPTS; r++) {
+					try {
+						lockIO.unlinkLock(lockPath);
+					} catch {
+						// Already removed by another process
+					}
+					try {
+						fd = lockIO.openLock(lockPath);
+						reclaimSuccess = true;
+						break;
+					} catch (reclaimErr: unknown) {
+						if (
+							(reclaimErr as NodeJS.ErrnoException).code !==
+							"EEXIST"
+						) {
+							throw reclaimErr;
+						}
+						lockIO.sleep(LOCK_RETRY_DELAY_MS);
+					}
 				}
-				fd = openSync(lockPath, "wx");
+				if (!reclaimSuccess) {
+					throw new Error(
+						`Failed to acquire lock ${lockPath} after final reclaim (contention during stale recovery)`,
+					);
+				}
 			} else {
 				throw new Error(
 					`Failed to acquire lock ${lockPath} after ${LOCK_MAX_RETRIES} retries (lock held by active process)`,
@@ -344,6 +417,18 @@ function isLockStale(lockPath: string, thresholdMs: number): boolean {
 	if (meta.hostname === LOCK_HOSTNAME) {
 		if (!isProcessAlive(meta.pid)) {
 			return true; // Holder is dead — stale regardless of age
+		}
+	}
+
+	// Guard against future timestamps (clock skew or tampered metadata).
+	// If created_at_ms is more than LOCK_FUTURE_SKEW_MS in the future,
+	// the metadata is untrustworthy — fall back to mtime.
+	if (meta.created_at_ms > Date.now() + LOCK_FUTURE_SKEW_MS) {
+		try {
+			const stat = statSync(lockPath);
+			return Date.now() - stat.mtimeMs > thresholdMs;
+		} catch {
+			return false;
 		}
 	}
 

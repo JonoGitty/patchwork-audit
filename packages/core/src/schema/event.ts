@@ -92,6 +92,10 @@ export const AuditEventSchema = z.object({
 
 	// Provenance
 	provenance: ProvenanceSchema.optional(),
+
+	// Tamper-evident hash chain
+	prev_hash: z.string().nullable().optional(),
+	event_hash: z.string().optional(),
 });
 
 export type AuditEvent = z.infer<typeof AuditEventSchema>;

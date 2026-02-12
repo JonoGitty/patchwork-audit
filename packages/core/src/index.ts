@@ -34,6 +34,12 @@ export { SENSITIVE_GLOBS, matchesGlob } from "./risk/sensitive.js";
 
 // Hash
 export { hashContent, hashFile } from "./hash/content.js";
+export {
+	canonicalize,
+	computeEventHash,
+	verifyChain,
+	type ChainVerification,
+} from "./hash/chain.js";
 
 // ID
 export { generateEventId, generateSessionId } from "./id/ulid.js";

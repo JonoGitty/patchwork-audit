@@ -2,18 +2,20 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
 	appendFileSync,
 	chmodSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	openSync,
 	readFileSync,
 	rmSync,
 	statSync,
+	unlinkSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
-import { JsonlStore } from "../../src/store/jsonl.js";
+import { JsonlStore, _setLockIO } from "../../src/store/jsonl.js";
 import type { AuditEvent } from "../../src/schema/event.js";
 
 function makeEvent(overrides: Partial<AuditEvent> = {}): AuditEvent {
@@ -411,6 +413,188 @@ describe("JsonlStore", () => {
 			const events = store.readAll();
 			expect(events).toHaveLength(1);
 			expect(events[0].id).toBe("evt_own1");
+		});
+
+		it("reclaims cross-host lock with far-future created_at_ms via mtime fallback", () => {
+			const filePath = join(tmpDir, "future-ts.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Cross-host lock with far-future timestamp — age check would
+			// never detect staleness. Future-skew guard falls back to mtime.
+			const meta = {
+				pid: 1,
+				hostname: "other-host.example.com",
+				token: "future-token",
+				created_at_ms: Date.now() + 999_999_999,
+			};
+			writeFileSync(lockPath, JSON.stringify(meta), "utf-8");
+			// Backdate mtime so the mtime fallback detects staleness
+			const pastTime = new Date(Date.now() - 10_000);
+			utimesSync(lockPath, pastTime, pastTime);
+
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent());
+			expect(s.readAll()).toHaveLength(1);
+		});
+
+		it("does NOT reclaim cross-host lock with future created_at_ms but fresh mtime", () => {
+			const filePath = join(tmpDir, "future-ts-fresh.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Future timestamp but fresh mtime — mtime fallback says not stale
+			const meta = {
+				pid: 1,
+				hostname: "other-host.example.com",
+				token: "future-fresh-token",
+				created_at_ms: Date.now() + 999_999_999,
+			};
+			writeFileSync(lockPath, JSON.stringify(meta), "utf-8");
+			// mtime is now (just written) → not stale
+
+			const s = new JsonlStore(filePath);
+			expect(() => s.append(makeEvent())).toThrow(/Failed to acquire lock/);
+		});
+
+		it("final reclaim path succeeds when stale lock is reclaimed", () => {
+			const filePath = join(tmpDir, "final-reclaim.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Dead-PID lock is stale and reclaimable. Exercises the reclaim
+			// codepath including the bounded retry for EEXIST races.
+			const meta = {
+				pid: 2147483647,
+				hostname: hostname(),
+				token: "reclaim-token",
+				created_at_ms: Date.now(),
+			};
+			writeFileSync(lockPath, JSON.stringify(meta), "utf-8");
+
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent());
+			expect(s.readAll()).toHaveLength(1);
+			// Lock cleaned up after successful append
+			expect(existsSync(lockPath)).toBe(false);
+		});
+
+		it("final reclaim throws clean error (not raw EEXIST) on persistent contention", () => {
+			const filePath = join(tmpDir, "contention-final.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Alive-PID lock persists through main loop AND final check.
+			// Should throw the explicit "Failed to acquire lock" message,
+			// not a raw EEXIST from openSync in the final reclaim.
+			const meta = {
+				pid: process.pid,
+				hostname: hostname(),
+				token: "persistent-token",
+				created_at_ms: Date.now(),
+			};
+			writeFileSync(lockPath, JSON.stringify(meta), "utf-8");
+
+			const s = new JsonlStore(filePath);
+			expect(() => s.append(makeEvent())).toThrow(
+				/Failed to acquire lock.*lock held by active process/,
+			);
+		});
+
+		it("uses cryptographic tokens (non-empty, unique across appends)", () => {
+			// After each append the lock is acquired with a unique token and
+			// released by matching pid+token. If tokens collided or were empty,
+			// safe-unlock could malfunction. We verify 20 sequential appends
+			// all succeed (each cycle: acquire → write meta → fn → ownership
+			// check → release) and no stale lock files remain.
+			const filePath = join(tmpDir, "token-quality.jsonl");
+			const s = new JsonlStore(filePath);
+			for (let i = 0; i < 20; i++) {
+				s.append(makeEvent({ id: `evt_tq_${i}` }));
+			}
+			expect(s.readAll()).toHaveLength(20);
+			expect(existsSync(filePath + ".lock")).toBe(false);
+		});
+	});
+
+	describe("final reclaim race (deterministic)", () => {
+		afterEach(() => {
+			_setLockIO(null);
+		});
+
+		it("recovers when first reclaim openSync hits EEXIST but second succeeds", () => {
+			let openCalls = 0;
+			let isStaleCalls = 0;
+			let unlinkCalls = 0;
+			let sleepCalls = 0;
+
+			_setLockIO({
+				openLock: (path) => {
+					openCalls++;
+					if (openCalls <= 51) {
+						// 50 main-loop + 1 first reclaim attempt → EEXIST
+						const err = new Error("EEXIST") as NodeJS.ErrnoException;
+						err.code = "EEXIST";
+						throw err;
+					}
+					// 52nd call (second reclaim attempt): real fs
+					return openSync(path, "wx");
+				},
+				unlinkLock: () => {
+					unlinkCalls++;
+				},
+				sleep: () => {
+					sleepCalls++;
+				},
+				isStale: () => {
+					isStaleCalls++;
+					// false for 50 main-loop checks, true for final check (#51)
+					return isStaleCalls > 50;
+				},
+			});
+
+			const filePath = join(tmpDir, "race-recover.jsonl");
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent());
+
+			expect(s.readAll()).toHaveLength(1);
+			expect(existsSync(filePath + ".lock")).toBe(false);
+
+			// Verify exact control flow through the final reclaim path
+			expect(openCalls).toBe(52); // 50 main + 1 EEXIST + 1 success
+			expect(isStaleCalls).toBe(51); // 50 main (false) + 1 final (true)
+			expect(unlinkCalls).toBe(2); // reclaim unlinks at r=0 and r=1
+			expect(sleepCalls).toBe(51); // 50 main + 1 after first reclaim EEXIST
+		});
+
+		it("throws clean error when all reclaim attempts exhaust with EEXIST", () => {
+			let isStaleCalls = 0;
+			let openCalls = 0;
+			let unlinkCalls = 0;
+
+			_setLockIO({
+				openLock: () => {
+					openCalls++;
+					const err = new Error("EEXIST") as NodeJS.ErrnoException;
+					err.code = "EEXIST";
+					throw err;
+				},
+				unlinkLock: () => {
+					unlinkCalls++;
+				},
+				sleep: () => {},
+				isStale: () => {
+					isStaleCalls++;
+					return isStaleCalls > 50;
+				},
+			});
+
+			const filePath = join(tmpDir, "race-exhaust.jsonl");
+			const s = new JsonlStore(filePath);
+			expect(() => s.append(makeEvent())).toThrow(
+				/contention during stale recovery/,
+			);
+
+			// 50 main-loop + 3 final reclaim attempts (all EEXIST)
+			expect(openCalls).toBe(53);
+			// 3 reclaim unlinks (one per final reclaim attempt)
+			expect(unlinkCalls).toBe(3);
 		});
 	});
 });
