@@ -163,6 +163,12 @@ Three packages:
 - **CSV** — Import into spreadsheets, BI tools, databases
 - **SARIF** — Static Analysis Results Interchange Format, import into GitHub Code Scanning, Snyk, or any SARIF-compatible security tool
 
+## Development Test Log
+
+- Run `pnpm test:log` to execute tests and append a timestamped summary to `docs/TEST_LOG.md`.
+- Run `pnpm hooks:install` once to enable the repo `pre-push` hook that runs `pnpm test:log` automatically before each push.
+- CI runs `pnpm test:log` on the Node 22 job and uploads `docs/TEST_LOG.md` as a workflow artifact.
+
 ## License
 
 Business Source License 1.1 — free for individual and non-competing commercial use. Converts to Apache 2.0 after 3 years.
