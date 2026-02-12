@@ -12,14 +12,23 @@ import {
 	closeSync,
 	unlinkSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir, hostname } from "node:os";
+import { spawn, type ChildProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
 	computeEventHash,
 	computeSealPayload,
 	signSeal,
+	verifySeal,
 	ensureSealKey,
+	readSealKey,
 } from "@patchwork/core";
+
+const WORKER_PATH = join(
+	dirname(fileURLToPath(import.meta.url)),
+	"_seal-lock-worker.mjs",
+);
 
 function makeChainedEvents(count: number): Record<string, unknown>[] {
 	const events: Record<string, unknown>[] = [];
@@ -792,5 +801,151 @@ describe("verify with corrupt seal file", () => {
 		const parsed = JSON.parse(output.join(""));
 		expect(parsed.seal.seal_valid).toBe(true);
 		expect(parsed.seal.seal_corrupt_lines).toBe(0);
+	});
+});
+
+describe("multi-process seal contention", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-seal-multiproc-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function spawnWorker(
+		args: Record<string, string>,
+	): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+		return new Promise((resolve) => {
+			const childArgs = [WORKER_PATH];
+			for (const [key, value] of Object.entries(args)) {
+				childArgs.push(`--${key}`, value);
+			}
+			const child = spawn(process.execPath, childArgs);
+			let stdout = "";
+			let stderr = "";
+			child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+			child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+			child.on("close", (code) => {
+				resolve({ exitCode: code ?? 1, stdout, stderr });
+			});
+		});
+	}
+
+	const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+	it("two seal writers race without corruption", { timeout: 15000 }, async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		const keyPath = join(tmpDir, "keys", "seal.key");
+		const sealPath = join(tmpDir, "seals.jsonl");
+		writeJsonl(eventsPath, events);
+		ensureSealKey(keyPath);
+		writeFileSync(sealPath, "", { mode: 0o600 });
+
+		// Spawn two workers simultaneously
+		const [a, b] = await Promise.all([
+			spawnWorker({
+				"seal-path": sealPath,
+				"events-path": eventsPath,
+				"key-path": keyPath,
+			}),
+			spawnWorker({
+				"seal-path": sealPath,
+				"events-path": eventsPath,
+				"key-path": keyPath,
+			}),
+		]);
+
+		// Both should succeed
+		expect(a.exitCode, `Worker A stderr: ${a.stderr}`).toBe(0);
+		expect(b.exitCode, `Worker B stderr: ${b.stderr}`).toBe(0);
+
+		// Seal file should have exactly 2 valid lines
+		const sealContent = readFileSync(sealPath, "utf-8");
+		const sealLines = sealContent.split("\n").filter((l) => l.trim().length > 0);
+		expect(sealLines.length).toBe(2);
+
+		// Cryptographically verify each seal record against the shared key
+		const key = readSealKey(keyPath);
+		for (const line of sealLines) {
+			const seal = JSON.parse(line);
+			expect(seal.tip_hash).toBe(events[events.length - 1].event_hash);
+			expect(typeof seal.chained_events).toBe("number");
+			expect(typeof seal.sealed_at).toBe("string");
+
+			const payload = computeSealPayload(seal.tip_hash, seal.chained_events, seal.sealed_at);
+			expect(verifySeal(payload, seal.signature, key)).toBe(true);
+		}
+
+		// Two distinct timestamps (serialized, not interleaved)
+		const seals = sealLines.map((l) => JSON.parse(l));
+		expect(seals[0].sealed_at).not.toBe(seals[1].sealed_at);
+
+		// No lock file leaked
+		expect(existsSync(sealPath + ".lock")).toBe(false);
+
+		// Verify accepts the seals (end-to-end)
+		const { exitCode: verifyExit } = await runVerify([
+			"--file", eventsPath,
+			"--seal-file", sealPath,
+			"--key-file", keyPath,
+		]);
+		expect(verifyExit).toBeUndefined();
+	});
+
+	it("second writer fails cleanly when first holds lock", { timeout: 15000 }, async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		const keyPath = join(tmpDir, "keys", "seal.key");
+		const sealPath = join(tmpDir, "seals.jsonl");
+		writeJsonl(eventsPath, events);
+		ensureSealKey(keyPath);
+		writeFileSync(sealPath, "", { mode: 0o600 });
+
+		// Worker A: holds lock for 2s inside critical section
+		const workerA = spawnWorker({
+			"seal-path": sealPath,
+			"events-path": eventsPath,
+			"key-path": keyPath,
+			"hold-ms": "2000",
+		});
+
+		// Poll until Worker A has acquired the lock (deterministic sync point)
+		const lockPath = sealPath + ".lock";
+		const deadline = Date.now() + 5000;
+		while (!existsSync(lockPath)) {
+			if (Date.now() > deadline) throw new Error("Worker A did not acquire lock in time");
+			await sleep(50);
+		}
+
+		// Worker B: short retry budget (~300ms), will time out
+		const workerB = await spawnWorker({
+			"seal-path": sealPath,
+			"events-path": eventsPath,
+			"key-path": keyPath,
+			"max-retries": "5",
+		});
+
+		// Worker B should have failed with contention error
+		expect(workerB.exitCode).toBe(1);
+		expect(workerB.stderr).toContain("contention");
+
+		// Wait for Worker A to complete
+		const resultA = await workerA;
+		expect(resultA.exitCode).toBe(0);
+
+		// Only Worker A's seal should be in the file
+		const sealContent = readFileSync(sealPath, "utf-8");
+		const sealLines = sealContent.split("\n").filter((l) => l.trim().length > 0);
+		expect(sealLines.length).toBe(1);
+
+		const seal = JSON.parse(sealLines[0]);
+		expect(seal.signature).toMatch(/^hmac-sha256:[a-f0-9]{64}$/);
+
+		// No lock file leaked
+		expect(existsSync(sealPath + ".lock")).toBe(false);
 	});
 });
