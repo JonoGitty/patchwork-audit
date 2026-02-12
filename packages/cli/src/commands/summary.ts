@@ -1,9 +1,6 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { join } from "node:path";
-import { JsonlStore } from "@patchwork/core";
-
-const EVENTS_PATH = join(process.env.HOME || "~", ".patchwork", "events.jsonl");
+import { getReadStore } from "../store.js";
 
 export const summaryCommand = new Command("summary")
 	.description("Summarize AI agent activity")
@@ -11,7 +8,7 @@ export const summaryCommand = new Command("summary")
 	.option("--today", "Today's activity (default)")
 	.option("--week", "This week's activity")
 	.action((opts) => {
-		const store = new JsonlStore(EVENTS_PATH);
+		const store = getReadStore();
 		let events = store.readAll();
 
 		if (opts.session) {

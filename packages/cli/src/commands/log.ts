@@ -1,10 +1,8 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { JsonlStore, type AuditEvent } from "@patchwork/core";
+import type { AuditEvent } from "@patchwork/core";
 import { formatEvent, formatEventCompact } from "../output/formatter.js";
-import { join } from "node:path";
-
-const EVENTS_PATH = join(process.env.HOME || "~", ".patchwork", "events.jsonl");
+import { getReadStore } from "../store.js";
 
 export const logCommand = new Command("log")
 	.description("View recent audit events")
@@ -19,7 +17,7 @@ export const logCommand = new Command("log")
 	.option("--json", "Output as JSON")
 	.option("--compact", "Compact one-line format")
 	.action((opts) => {
-		const store = new JsonlStore(EVENTS_PATH);
+		const store = getReadStore();
 
 		let events = store.query({
 			agent: opts.agent,

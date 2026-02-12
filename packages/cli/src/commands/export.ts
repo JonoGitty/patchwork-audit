@@ -1,10 +1,8 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { JsonlStore } from "@patchwork/core";
+import { writeFileSync } from "node:fs";
 import type { AuditEvent } from "@patchwork/core";
-import { join } from "node:path";
-
-const EVENTS_PATH = join(process.env.HOME || "~", ".patchwork", "events.jsonl");
+import { getReadStore } from "../store.js";
 
 export const exportCommand = new Command("export")
 	.description("Export audit events in various formats")
@@ -14,7 +12,7 @@ export const exportCommand = new Command("export")
 	.option("--risk <level>", "Minimum risk level")
 	.option("-o, --output <file>", "Write to file instead of stdout")
 	.action((opts) => {
-		const store = new JsonlStore(EVENTS_PATH);
+		const store = getReadStore();
 		let events = store.query({
 			sessionId: opts.session,
 			minRisk: opts.risk,
@@ -41,7 +39,7 @@ export const exportCommand = new Command("export")
 		}
 
 		if (opts.output) {
-			require("node:fs").writeFileSync(opts.output, output, "utf-8");
+			writeFileSync(opts.output, output, "utf-8");
 			console.error(chalk.green(`Exported ${events.length} events to ${opts.output}`));
 		} else {
 			console.log(output);

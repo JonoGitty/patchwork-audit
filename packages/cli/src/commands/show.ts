@@ -1,17 +1,14 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { join } from "node:path";
-import { JsonlStore } from "@patchwork/core";
 import { formatEvent } from "../output/formatter.js";
 import { riskColor } from "../output/colors.js";
-
-const EVENTS_PATH = join(process.env.HOME || "~", ".patchwork", "events.jsonl");
+import { getReadStore } from "../store.js";
 
 export const showCommand = new Command("show")
 	.description("Show full detail for an event or session")
 	.argument("<id>", "Event ID (evt_...) or session ID (ses_...)")
 	.action((id: string) => {
-		const store = new JsonlStore(EVENTS_PATH);
+		const store = getReadStore();
 		const events = store.readAll();
 
 		// Event by ID

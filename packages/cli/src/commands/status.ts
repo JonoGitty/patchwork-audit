@@ -1,12 +1,8 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { JsonlStore } from "@patchwork/core";
 import { detectInstalledAgents } from "@patchwork/agents";
-
-const DATA_DIR = join(process.env.HOME || "~", ".patchwork");
-const EVENTS_PATH = join(DATA_DIR, "events.jsonl");
+import { getReadStore, DATA_DIR, EVENTS_PATH } from "../store.js";
 
 export const statusCommand = new Command("status")
 	.description("Show Patchwork configuration and stats")
@@ -28,7 +24,7 @@ export const statusCommand = new Command("status")
 
 		// Event stats
 		if (existsSync(EVENTS_PATH)) {
-			const store = new JsonlStore(EVENTS_PATH);
+			const store = getReadStore();
 			const events = store.readAll();
 			const sessions = new Set(events.map((e) => e.session_id));
 			const lastEvent = events[events.length - 1];

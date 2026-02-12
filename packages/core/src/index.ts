@@ -23,7 +23,9 @@ export {
 export { SessionSchema, type Session } from "./schema/session.js";
 
 // Store
-export { JsonlStore, type EventFilter } from "./store/jsonl.js";
+export { JsonlStore } from "./store/jsonl.js";
+export { SqliteStore } from "./store/sqlite.js";
+export type { EventFilter, Store, SearchableStore } from "./store/types.js";
 
 // Risk
 export { classifyRisk } from "./risk/classifier.js";

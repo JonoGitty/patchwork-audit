@@ -5,7 +5,4 @@ export default defineConfig({
 	format: ["esm"],
 	dts: true,
 	external: ["better-sqlite3"],
-	banner: {
-		js: "#!/usr/bin/env node",
-	},
 });

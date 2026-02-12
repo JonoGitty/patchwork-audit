@@ -1,12 +1,13 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AuditEvent } from "../schema/event.js";
+import type { EventFilter, Store } from "./types.js";
 
 /**
  * Append-only JSONL store for audit events.
  * Design principle from Tool Factory: thread-safe, immutable, greppable.
  */
-export class JsonlStore {
+export class JsonlStore implements Store {
 	constructor(private readonly filePath: string) {
 		const dir = dirname(filePath);
 		if (!existsSync(dir)) {
@@ -77,15 +78,4 @@ export class JsonlStore {
 	get path(): string {
 		return this.filePath;
 	}
-}
-
-export interface EventFilter {
-	agent?: string;
-	action?: string;
-	minRisk?: string;
-	sessionId?: string;
-	since?: Date;
-	targetGlob?: string;
-	projectName?: string;
-	limit?: number;
 }

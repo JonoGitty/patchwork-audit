@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 /**
  * SHA-256 content hashing for audit integrity.
@@ -12,7 +13,6 @@ export function hashContent(content: string | Buffer): string {
 
 export function hashFile(filePath: string): string | null {
 	try {
-		const { readFileSync } = require("node:fs");
 		const content = readFileSync(filePath);
 		return hashContent(content);
 	} catch {

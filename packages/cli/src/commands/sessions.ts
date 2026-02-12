@@ -1,16 +1,14 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { join } from "node:path";
-import { JsonlStore, type AuditEvent } from "@patchwork/core";
-
-const EVENTS_PATH = join(process.env.HOME || "~", ".patchwork", "events.jsonl");
+import type { AuditEvent } from "@patchwork/core";
+import { getReadStore } from "../store.js";
 
 export const sessionsCommand = new Command("sessions")
 	.description("List recent AI agent sessions")
 	.option("-n, --limit <n>", "Number of sessions to show", "10")
 	.option("--agent <agent>", "Filter by agent")
 	.action((opts) => {
-		const store = new JsonlStore(EVENTS_PATH);
+		const store = getReadStore();
 		const events = store.readAll();
 
 		// Group by session

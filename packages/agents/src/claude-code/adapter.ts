@@ -1,5 +1,6 @@
 import {
 	type AuditEvent,
+	type Store,
 	type Target,
 	classifyRisk,
 	evaluatePolicy,
@@ -7,6 +8,7 @@ import {
 	generateSessionId,
 	hashContent,
 	JsonlStore,
+	SqliteStore,
 	loadActivePolicy,
 } from "@patchwork/core";
 import { mapClaudeCodeTool } from "./mapper.js";
@@ -16,6 +18,30 @@ function getEventsPath(): string {
 	return `${process.env.HOME}/.patchwork/events.jsonl`;
 }
 
+function getDbPath(): string {
+	return `${process.env.HOME}/.patchwork/db/audit.db`;
+}
+
+/** Wraps a primary and optional secondary store for dual-write. */
+function createDualWriter(primary: Store, secondary: Store | null): Store {
+	return {
+		append(event: AuditEvent) {
+			primary.append(event);
+			if (secondary) {
+				try {
+					secondary.append(event);
+				} catch {
+					// SQLite write failure is non-fatal — JSONL is source of truth
+				}
+			}
+		},
+		readAll: () => primary.readAll(),
+		readRecent: (limit: number) => primary.readRecent(limit),
+		query: (filter) => primary.query(filter),
+		get path() { return primary.path; },
+	};
+}
+
 /**
  * Handles a Claude Code hook event.
  * Reads JSON from stdin, normalizes to AuditEvent, stores it.
@@ -23,7 +49,14 @@ function getEventsPath(): string {
  * Returns an optional hook output (for PreToolUse allow/deny).
  */
 export function handleClaudeCodeHook(input: ClaudeCodeHookInput): ClaudeCodeHookOutput | null {
-	const store = new JsonlStore(getEventsPath());
+	const jsonlStore = new JsonlStore(getEventsPath());
+	let sqliteStore: SqliteStore | null = null;
+	try {
+		sqliteStore = new SqliteStore(getDbPath());
+	} catch {
+		// SQLite unavailable — proceed with JSONL only
+	}
+	const store = createDualWriter(jsonlStore, sqliteStore);
 	const hookEvent = input.hook_event_name;
 
 	switch (hookEvent) {
@@ -57,7 +90,7 @@ export function handleClaudeCodeHook(input: ClaudeCodeHookInput): ClaudeCodeHook
 	}
 }
 
-function handleSessionStart(store: JsonlStore, input: ClaudeCodeHookInput): null {
+function handleSessionStart(store: Store, input: ClaudeCodeHookInput): null {
 	const event = buildEvent(input, {
 		action: "session_start",
 	});
@@ -65,7 +98,7 @@ function handleSessionStart(store: JsonlStore, input: ClaudeCodeHookInput): null
 	return null;
 }
 
-function handleSessionEnd(store: JsonlStore, input: ClaudeCodeHookInput): null {
+function handleSessionEnd(store: Store, input: ClaudeCodeHookInput): null {
 	const event = buildEvent(input, {
 		action: "session_end",
 	});
@@ -73,7 +106,7 @@ function handleSessionEnd(store: JsonlStore, input: ClaudeCodeHookInput): null {
 	return null;
 }
 
-function handlePromptSubmit(store: JsonlStore, input: ClaudeCodeHookInput): null {
+function handlePromptSubmit(store: Store, input: ClaudeCodeHookInput): null {
 	const event = buildEvent(input, {
 		action: "prompt_submit",
 		target: {
@@ -91,7 +124,7 @@ function handlePromptSubmit(store: JsonlStore, input: ClaudeCodeHookInput): null
 	return null;
 }
 
-function handlePreToolUse(store: JsonlStore, input: ClaudeCodeHookInput): ClaudeCodeHookOutput {
+function handlePreToolUse(store: Store, input: ClaudeCodeHookInput): ClaudeCodeHookOutput {
 	const toolName = input.tool_name || "unknown";
 	const toolInput = input.tool_input || {};
 	const mapped = mapClaudeCodeTool(toolName, toolInput);
@@ -134,7 +167,7 @@ function handlePreToolUse(store: JsonlStore, input: ClaudeCodeHookInput): Claude
 }
 
 function handlePostToolUse(
-	store: JsonlStore,
+	store: Store,
 	input: ClaudeCodeHookInput,
 	overrideStatus?: "failed",
 ): null {
@@ -181,7 +214,7 @@ function handlePostToolUse(
 	return null;
 }
 
-function handleSubagentStart(store: JsonlStore, input: ClaudeCodeHookInput): null {
+function handleSubagentStart(store: Store, input: ClaudeCodeHookInput): null {
 	const event = buildEvent(input, {
 		action: "subagent_start",
 		target: {
@@ -193,7 +226,7 @@ function handleSubagentStart(store: JsonlStore, input: ClaudeCodeHookInput): nul
 	return null;
 }
 
-function handleSubagentStop(store: JsonlStore, input: ClaudeCodeHookInput): null {
+function handleSubagentStop(store: Store, input: ClaudeCodeHookInput): null {
 	const event = buildEvent(input, {
 		action: "subagent_stop",
 		target: {

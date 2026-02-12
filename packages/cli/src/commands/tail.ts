@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { watch, existsSync, readFileSync, statSync } from "node:fs";
+import { watch, existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { formatEvent, formatEventCompact } from "../output/formatter.js";
 import type { AuditEvent } from "@patchwork/core";
@@ -36,10 +36,10 @@ export const tailCommand = new Command("tail")
 			if (currentSize <= lastSize) return;
 
 			// Read only new bytes
-			const fd = require("node:fs").openSync(filePath, "r");
+			const fd = openSync(filePath, "r");
 			const newBytes = Buffer.alloc(currentSize - lastSize);
-			require("node:fs").readSync(fd, newBytes, 0, newBytes.length, lastSize);
-			require("node:fs").closeSync(fd);
+			readSync(fd, newBytes, 0, newBytes.length, lastSize);
+			closeSync(fd);
 			lastSize = currentSize;
 
 			buffer += newBytes.toString("utf-8");
