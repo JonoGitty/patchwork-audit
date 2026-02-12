@@ -84,6 +84,108 @@ export type PolicyDecision = {
 
 const RISK_ORDER = ["none", "low", "medium", "high", "critical"];
 
+// ---------------------------------------------------------------------------
+// Regex safety guard — prevents ReDoS from user-supplied policy patterns
+// ---------------------------------------------------------------------------
+
+const MAX_POLICY_REGEX_LENGTH = 256;
+
+/** Backreferences: \1, \2, ... \9 */
+const BACKREFERENCE_RE = /\\[1-9]/;
+
+/** Lookbehind constructs: (?<=...) and (?<!...) */
+const LOOKBEHIND_RE = /\(\?<[!=]/;
+
+/**
+ * Check whether a policy regex pattern is safe to evaluate.
+ * Rejects patterns that could cause catastrophic backtracking (ReDoS):
+ * - Overlong patterns (> 256 chars)
+ * - Nested quantifiers (e.g. (a+)+, ([a-z]*)*)
+ * - Backreferences (\1, \2, ...)
+ * - Lookbehind constructs ((?<=...), (?<!...))
+ * - Syntactically invalid regex
+ */
+export function isSafePolicyRegex(pattern: string): boolean {
+	if (pattern.length > MAX_POLICY_REGEX_LENGTH) return false;
+	if (BACKREFERENCE_RE.test(pattern)) return false;
+	if (LOOKBEHIND_RE.test(pattern)) return false;
+	if (hasNestedQuantifiers(pattern)) return false;
+
+	// Final check: must be syntactically valid
+	try {
+		new RegExp(pattern);
+	} catch {
+		return false;
+	}
+
+	return true;
+}
+
+/**
+ * Detect nested quantifiers that risk catastrophic backtracking.
+ * Finds quantified groups whose body contains a quantifier:
+ * (a+)+, ([a-z]*)+, ((x+))*, etc.
+ */
+function hasNestedQuantifiers(pattern: string): boolean {
+	const n = pattern.length;
+
+	for (let i = 0; i < n; i++) {
+		const ch = pattern[i];
+
+		// Skip escaped characters
+		if (ch === "\\") { i++; continue; }
+
+		// Skip character classes entirely
+		if (ch === "[") {
+			i++;
+			while (i < n && pattern[i] !== "]") {
+				if (pattern[i] === "\\") i++;
+				i++;
+			}
+			continue;
+		}
+
+		if (ch === "(") {
+			// Scan forward from this open-paren, tracking depth
+			let depth = 1;
+			let innerQuantifier = false;
+			let j = i + 1;
+
+			while (j < n && depth > 0) {
+				const c = pattern[j];
+				if (c === "\\") { j += 2; continue; }
+				if (c === "[") {
+					j++;
+					while (j < n && pattern[j] !== "]") {
+						if (pattern[j] === "\\") j++;
+						j++;
+					}
+					j++;
+					continue;
+				}
+				if (c === "(") depth++;
+				else if (c === ")") {
+					depth--;
+					if (depth === 0) break;
+				} else if (c === "+" || c === "*") {
+					innerQuantifier = true;
+				}
+				j++;
+			}
+
+			// j is at the closing ')' — check if followed by a quantifier
+			if (depth === 0 && innerQuantifier) {
+				const next = j + 1 < n ? pattern[j + 1] : "";
+				if (next === "+" || next === "*" || next === "?" || next === "{") {
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
 export interface PolicyEvalInput {
 	action: string;
 	risk_level: string;
@@ -246,6 +348,7 @@ function matchesCommandRule(
 		return true;
 	}
 	if (rule.regex) {
+		if (!isSafePolicyRegex(rule.regex)) return false;
 		try {
 			return new RegExp(rule.regex).test(command);
 		} catch {

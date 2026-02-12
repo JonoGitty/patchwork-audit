@@ -12,6 +12,7 @@ import {
 	SqliteStore,
 	loadActivePolicy,
 } from "@patchwork/core";
+import { isAbsolute, relative } from "node:path";
 import { mapClaudeCodeTool } from "./mapper.js";
 import type { ClaudeCodeHookInput, ClaudeCodeHookOutput } from "./types.js";
 
@@ -115,6 +116,7 @@ function handleSessionEnd(store: Store, input: ClaudeCodeHookInput): null {
 }
 
 function handlePromptSubmit(store: Store, input: ClaudeCodeHookInput): null {
+	const capturePromptSize = process.env.PATCHWORK_CAPTURE_PROMPT_SIZE === "1";
 	const event = buildEvent(input, {
 		action: "prompt_submit",
 		target: {
@@ -123,7 +125,9 @@ function handlePromptSubmit(store: Store, input: ClaudeCodeHookInput): null {
 		content: input.prompt
 			? {
 					hash: hashContent(input.prompt),
-					size_bytes: Buffer.byteLength(input.prompt, "utf-8"),
+					...(capturePromptSize
+						? { size_bytes: Buffer.byteLength(input.prompt, "utf-8") }
+						: {}),
 					redacted: true,
 				}
 			: undefined,
@@ -246,6 +250,63 @@ function handleSubagentStop(store: Store, input: ClaudeCodeHookInput): null {
 	return null;
 }
 
+// ---------------------------------------------------------------------------
+// Privacy-safe target processing
+// ---------------------------------------------------------------------------
+
+/** Patterns for secret-bearing CLI flags (--password, --token, --api-key, etc.). */
+const SECRET_FLAG_RE = /(--(password|token|api[-_]?key|secret|auth[-_]?token|access[-_]?token|private[-_]?key)[= ])(\S+)/gi;
+
+/** Authorization header pattern. */
+const BEARER_RE = /(Authorization:\s*Bearer\s+)\S+/gi;
+
+/** Common API key shapes (e.g. sk-...). */
+const INLINE_SECRET_RE = /\b(sk-[a-zA-Z0-9_-]{20,})\b/g;
+
+/**
+ * Redact obvious secret-bearing tokens from a command string.
+ * Preserves command structure; replaces sensitive values with [REDACTED].
+ */
+export function redactCommand(command: string): string {
+	let result = command;
+	result = result.replace(SECRET_FLAG_RE, "$1[REDACTED]");
+	result = result.replace(BEARER_RE, "$1[REDACTED]");
+	result = result.replace(INLINE_SECRET_RE, "[REDACTED]");
+	return result;
+}
+
+/**
+ * Process a target for privacy-safe storage:
+ * - Convert absolute paths to relative (when under cwd)
+ * - Strip abs_path unless PATCHWORK_CAPTURE_ABS_PATH=1
+ * - Redact secrets in commands
+ */
+function processTarget(target: Target | undefined, cwd: string): Target | undefined {
+	if (!target) return undefined;
+
+	const result = { ...target };
+
+	// Relative-path-first: convert to relative when path is under cwd
+	if (result.path && isAbsolute(result.path)) {
+		const rel = relative(cwd, result.path);
+		if (rel && !rel.startsWith("..")) {
+			result.path = rel;
+		}
+	}
+
+	// Strip abs_path by default
+	if (process.env.PATCHWORK_CAPTURE_ABS_PATH !== "1") {
+		delete result.abs_path;
+	}
+
+	// Redact secrets in commands
+	if (result.command) {
+		result.command = redactCommand(result.command);
+	}
+
+	return result;
+}
+
 interface PartialEvent {
 	action: string;
 	status?: AuditEvent["status"];
@@ -278,11 +339,15 @@ function buildIdempotencyKey(input: ClaudeCodeHookInput, action: string): string
 }
 
 function buildEvent(input: ClaudeCodeHookInput, partial: PartialEvent): AuditEvent {
-	const target: Target | undefined = partial.target
+	// Build raw target for risk classification (needs original absolute paths)
+	const rawTarget: Target | undefined = partial.target
 		? { type: partial.target.type || "file", ...partial.target }
 		: undefined;
 
-	const risk = classifyRisk(partial.action, target);
+	const risk = classifyRisk(partial.action, rawTarget);
+
+	// Process target for privacy-safe storage (relativize, redact, strip abs_path)
+	const target = processTarget(rawTarget, input.cwd);
 
 	return {
 		schema_version: CURRENT_SCHEMA_VERSION,

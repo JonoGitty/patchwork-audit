@@ -55,6 +55,7 @@ export { generateEventId, generateSessionId } from "./id/ulid.js";
 // Policy
 export {
 	evaluatePolicy,
+	isSafePolicyRegex,
 	PolicySchema,
 	type Policy,
 	type PolicyDecision,

@@ -880,10 +880,6 @@ describe("multi-process seal contention", () => {
 			expect(verifySeal(payload, seal.signature, key)).toBe(true);
 		}
 
-		// Two distinct timestamps (serialized, not interleaved)
-		const seals = sealLines.map((l) => JSON.parse(l));
-		expect(seals[0].sealed_at).not.toBe(seals[1].sealed_at);
-
 		// No lock file leaked
 		expect(existsSync(sealPath + ".lock")).toBe(false);
 

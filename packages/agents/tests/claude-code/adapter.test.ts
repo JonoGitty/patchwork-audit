@@ -328,6 +328,186 @@ describe("handleClaudeCodeHook", () => {
 			expect(stat.mode & 0o777).toBe(0o700);
 		});
 	});
+
+	describe("privacy-safe defaults", () => {
+		let savedAbsPath: string | undefined;
+		let savedPromptSize: string | undefined;
+
+		beforeEach(() => {
+			savedAbsPath = process.env.PATCHWORK_CAPTURE_ABS_PATH;
+			savedPromptSize = process.env.PATCHWORK_CAPTURE_PROMPT_SIZE;
+			delete process.env.PATCHWORK_CAPTURE_ABS_PATH;
+			delete process.env.PATCHWORK_CAPTURE_PROMPT_SIZE;
+		});
+
+		afterEach(() => {
+			if (savedAbsPath !== undefined) process.env.PATCHWORK_CAPTURE_ABS_PATH = savedAbsPath;
+			else delete process.env.PATCHWORK_CAPTURE_ABS_PATH;
+			if (savedPromptSize !== undefined) process.env.PATCHWORK_CAPTURE_PROMPT_SIZE = savedPromptSize;
+			else delete process.env.PATCHWORK_CAPTURE_PROMPT_SIZE;
+		});
+
+		it("stores file paths relative to cwd by default", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					cwd: "/Users/test/my-project",
+					tool_name: "Read",
+					tool_input: { file_path: "/Users/test/my-project/src/index.ts" },
+					tool_response: { content: "code" },
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].target.path).toBe("src/index.ts");
+		});
+
+		it("keeps absolute path when file is outside cwd", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					cwd: "/Users/test/my-project",
+					tool_name: "Read",
+					tool_input: { file_path: "/etc/hosts" },
+					tool_response: { content: "data" },
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].target.path).toBe("/etc/hosts");
+		});
+
+		it("omits abs_path by default", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					cwd: "/Users/test/my-project",
+					tool_name: "Write",
+					tool_input: { file_path: "/Users/test/my-project/file.ts", content: "x" },
+					tool_response: { output: "ok" },
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].target.abs_path).toBeUndefined();
+		});
+
+		it("includes abs_path when PATCHWORK_CAPTURE_ABS_PATH=1", () => {
+			process.env.PATCHWORK_CAPTURE_ABS_PATH = "1";
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					cwd: "/Users/test/my-project",
+					tool_name: "Write",
+					tool_input: { file_path: "/Users/test/my-project/file.ts", content: "x" },
+					tool_response: { output: "ok" },
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].target.abs_path).toBe("/Users/test/my-project/file.ts");
+		});
+
+		it("redacts --password values in commands", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					tool_name: "Bash",
+					tool_input: { command: "mysql --password=secret123 -u root" },
+					tool_response: { stdout: "ok" },
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].target.command).toBe("mysql --password=[REDACTED] -u root");
+		});
+
+		it("redacts --token values in commands", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					tool_name: "Bash",
+					tool_input: { command: "gh auth login --token ghp_abc123" },
+					tool_response: { stdout: "ok" },
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].target.command).toBe("gh auth login --token [REDACTED]");
+		});
+
+		it("redacts --api-key and --secret values in commands", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					tool_name: "Bash",
+					tool_input: { command: "cli --api-key abc123 --secret xyz789" },
+					tool_response: { stdout: "ok" },
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].target.command).toBe("cli --api-key [REDACTED] --secret [REDACTED]");
+		});
+
+		it("redacts Authorization Bearer tokens in commands", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					tool_name: "Bash",
+					tool_input: { command: 'curl -H "Authorization: Bearer mytoken123" https://api.example.com' },
+					tool_response: { stdout: "ok" },
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].target.command).toContain("Authorization: Bearer [REDACTED]");
+			expect(events[0].target.command).not.toContain("mytoken123");
+		});
+
+		it("redacts inline API key shapes (sk-...) in commands", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					tool_name: "Bash",
+					tool_input: { command: "curl https://api.openai.com -d sk-proj-abcdefghijklmnopqrstuvwx" },
+					tool_response: { stdout: "ok" },
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].target.command).not.toMatch(/sk-[a-zA-Z0-9_-]{20,}/);
+			expect(events[0].target.command).toContain("[REDACTED]");
+		});
+
+		it("preserves non-secret commands unchanged", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					tool_name: "Bash",
+					tool_input: { command: "npm test && echo done" },
+					tool_response: { stdout: "ok" },
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].target.command).toBe("npm test && echo done");
+		});
+
+		it("omits prompt size_bytes by default", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "UserPromptSubmit",
+					prompt: "Fix the bug",
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].content.hash).toMatch(/^sha256:/);
+			expect(events[0].content.size_bytes).toBeUndefined();
+		});
+
+		it("includes prompt size_bytes when PATCHWORK_CAPTURE_PROMPT_SIZE=1", () => {
+			process.env.PATCHWORK_CAPTURE_PROMPT_SIZE = "1";
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "UserPromptSubmit",
+					prompt: "Fix the bug",
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].content.size_bytes).toBe(Buffer.byteLength("Fix the bug", "utf-8"));
+		});
+	});
 });
 
 function readEvents(homeDir: string): any[] {
