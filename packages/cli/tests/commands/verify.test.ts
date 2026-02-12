@@ -130,6 +130,7 @@ describe("verify command", () => {
 		const parsed = JSON.parse(output.join(""));
 		expect(parsed.seal).toBeDefined();
 		expect(parsed.seal.seal_checked).toBe(false);
+		expect(parsed.seal.seal_corrupt_lines).toBe(0);
 		expect(parsed.seal.seal_failure_reason).toBeNull();
 	});
 
@@ -146,7 +147,75 @@ describe("verify command", () => {
 		expect(parsed.seal.seal_valid).toBe(false);
 		expect(parsed.seal.seal_tip_match).toBe(false);
 		expect(parsed.seal.seal_age_seconds).toBeNull();
+		expect(parsed.seal.seal_corrupt_lines).toBe(0);
 		// No failure reason since --require-seal not set
 		expect(parsed.seal.seal_failure_reason).toBeNull();
+	});
+});
+
+describe("verify --max-seal-age-seconds input validation", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-maxage-validate-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	const invalidInputs = [
+		{ value: "0", label: "zero" },
+		{ value: "-1", label: "negative" },
+		{ value: "3.5", label: "decimal" },
+		{ value: "abc", label: "non-numeric" },
+		{ value: "", label: "empty string" },
+		{ value: "1e5", label: "scientific notation" },
+	];
+
+	for (const { value, label } of invalidInputs) {
+		it(`rejects invalid --max-seal-age-seconds: ${label} ("${value}")`, async () => {
+			const events = makeChainedEvents(2);
+			const filePath = join(tmpDir, "events.jsonl");
+			writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+			const { exitCode, output } = await runVerify([
+				"--file", filePath,
+				"--no-seal-check",
+				"--max-seal-age-seconds", value,
+			]);
+			expect(exitCode).toBe(1);
+			const joined = output.join("\n");
+			expect(joined).toContain("Invalid --max-seal-age-seconds");
+		});
+	}
+
+	it("rejects invalid --max-seal-age-seconds in JSON mode", async () => {
+		const events = makeChainedEvents(2);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--json",
+			"--max-seal-age-seconds", "abc",
+		]);
+		expect(exitCode).toBe(1);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.error).toContain("Invalid --max-seal-age-seconds");
+	});
+
+	it("accepts valid positive integer --max-seal-age-seconds", async () => {
+		const events = makeChainedEvents(2);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		// With --no-seal-check the max-age flag is parsed but seal check skipped
+		const { exitCode } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--max-seal-age-seconds", "3600",
+		]);
+		expect(exitCode).toBeUndefined();
 	});
 });
