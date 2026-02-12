@@ -167,18 +167,24 @@ Evidence:
 - `packages/cli/tests/commands/seal.test.ts`
 
 ### R9. Hook timeout allow-by-default behavior
-Status: Open
-Current severity: High
+Status: Partially mitigated
+Current severity: Medium
 
 Current state:
-- Hook timeouts remain in installer configuration (`PreToolUse` 1000ms)
-- If hook execution is delayed or terminated, enforcement guarantees are limited by host behavior
+- PreToolUse timeout increased to 1500ms
+- Optional fail-closed mode exists for PreToolUse parse/handler errors (`PATCHWORK_PRETOOL_FAIL_CLOSED=1`)
+- PreToolUse latency warning exists (`PATCHWORK_PRETOOL_WARN_MS`, default 800ms)
+- `patchwork init claude-code` now supports install-time options for both controls (`--pretool-fail-closed`, `--pretool-warn-ms`)
 
 Why this remains important:
-- Policy is best-effort unless execution semantics are made fail-closed by architecture
+- Default behavior is still fail-open unless fail-closed env mode is explicitly enabled
+- Process-level timeouts/crashes still rely on host behavior and are not fully controlled by Patchwork
+- Latency signal is stderr-only and not a structured policy-enforcement telemetry channel
 
 Evidence:
+- `packages/cli/src/commands/hook.ts`
 - `packages/agents/src/claude-code/installer.ts`
+- `packages/cli/tests/commands/hook.test.ts`
 
 ### R10. JSONL scaling (`readAll()` and dedup scans)
 Status: Partially mitigated
@@ -209,8 +215,8 @@ What it is not yet:
 ## 4. Recommended Next Work (Priority Order)
 
 1. Enforcement semantics hardening
-- Define explicit product mode: `audit-only` vs `best-effort enforcement`
-- Add runtime surfacing when hook execution exceeds policy-safe thresholds
+- Promote fail-closed behavior from env flag to explicit product/policy mode (with safe rollout)
+- Add structured hook latency/enforcement telemetry output suitable for CI policy gates
 
 2. Dual-write consistency hardening
 - Add per-event failure diagnostics during `sync db` (event id + error class)

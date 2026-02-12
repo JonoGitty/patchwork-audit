@@ -5,19 +5,82 @@ const CLAUDE_SETTINGS_DIR = join(process.env.HOME || "~", ".claude");
 const CLAUDE_SETTINGS_PATH = join(CLAUDE_SETTINGS_DIR, "settings.json");
 
 /**
+ * Matches any command that contains "patchwork hook" — with or without
+ * leading env-var prefixes like `PATCHWORK_PRETOOL_FAIL_CLOSED=1`.
+ */
+const PATCHWORK_HOOK_RE = /\bpatchwork hook\b/;
+
+/** Valid policy modes for PreToolUse enforcement. */
+export type PolicyMode = "audit" | "fail-closed";
+
+/** Options that control PreToolUse enforcement behavior. */
+export interface InstallOptions {
+	policyMode?: PolicyMode;
+	pretoolFailClosed?: boolean;
+	pretoolWarnMs?: number;
+	pretoolTelemetryJson?: boolean;
+}
+
+/**
  * Hook definitions that Patchwork installs into Claude Code's settings.json.
  *
  * These call `patchwork hook <event>` which reads JSON on stdin and
  * writes the normalized audit event to ~/.patchwork/events.jsonl.
  */
-function buildHooks(binPath?: string) {
+/**
+ * Resolve whether fail-closed is enabled from options.
+ * `policyMode` takes precedence over the legacy `pretoolFailClosed` flag.
+ * Returns an error string if both are provided and conflict.
+ */
+export function resolveFailClosed(options?: InstallOptions): { enabled: boolean; error?: string } {
+	if (!options) return { enabled: false };
+
+	const modeSet = options.policyMode !== undefined;
+	const legacySet = options.pretoolFailClosed !== undefined;
+
+	if (modeSet && legacySet) {
+		const modeWants = options.policyMode === "fail-closed";
+		const legacyWants = !!options.pretoolFailClosed;
+		if (modeWants !== legacyWants) {
+			return {
+				enabled: false,
+				error: "Conflicting options: --policy-mode and --pretool-fail-closed disagree. Use one or the other.",
+			};
+		}
+		// Both agree — policyMode wins (no conflict)
+		return { enabled: modeWants };
+	}
+
+	if (modeSet) return { enabled: options.policyMode === "fail-closed" };
+	if (legacySet) return { enabled: !!options.pretoolFailClosed };
+	return { enabled: false };
+}
+
+function buildHooks(binPath?: string, options?: InstallOptions) {
 	const cmd = binPath || "patchwork";
+
+	// Build env prefix for PreToolUse command
+	const { enabled: failClosed } = resolveFailClosed(options);
+	const envParts: string[] = [];
+	if (failClosed) {
+		envParts.push("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
+	}
+	if (options?.pretoolWarnMs !== undefined) {
+		envParts.push(`PATCHWORK_PRETOOL_WARN_MS=${options.pretoolWarnMs}`);
+	}
+	if (options?.pretoolTelemetryJson) {
+		envParts.push("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
+	}
+	const preToolCmd = envParts.length > 0
+		? `${envParts.join(" ")} ${cmd} hook pre-tool`
+		: `${cmd} hook pre-tool`;
+
 	return {
 		PreToolUse: [
 			{
 				type: "command",
-				command: `${cmd} hook pre-tool`,
-				timeout: 1000,
+				command: preToolCmd,
+				timeout: 1500,
 			},
 		],
 		PostToolUse: [
@@ -76,6 +139,7 @@ export interface InstallResult {
 	success: boolean;
 	settingsPath: string;
 	hooksInstalled: string[];
+	hooksUpdated: string[];
 	error?: string;
 }
 
@@ -86,12 +150,28 @@ export interface InstallResult {
  * - Merges hooks into existing settings (preserving user's other settings)
  * - Appends to existing hook arrays (doesn't overwrite user hooks)
  */
-export function installClaudeCodeHooks(projectPath?: string, binPath?: string): InstallResult {
+export function installClaudeCodeHooks(
+	projectPath?: string,
+	binPath?: string,
+	options?: InstallOptions,
+): InstallResult {
 	const settingsPath = projectPath
 		? join(projectPath, ".claude", "settings.json")
 		: CLAUDE_SETTINGS_PATH;
 
 	const settingsDir = join(settingsPath, "..");
+
+	// Check for conflicting options before any I/O
+	const resolved = resolveFailClosed(options);
+	if (resolved.error) {
+		return {
+			success: false,
+			settingsPath,
+			hooksInstalled: [],
+			hooksUpdated: [],
+			error: resolved.error,
+		};
+	}
 
 	try {
 		if (!existsSync(settingsDir)) {
@@ -108,19 +188,29 @@ export function installClaudeCodeHooks(projectPath?: string, binPath?: string): 
 		// Merge hooks
 		const existingHooks = (settings.hooks || {}) as Record<string, unknown[]>;
 		const hooksInstalled: string[] = [];
-		const PATCHWORK_HOOKS = buildHooks(binPath);
+		const hooksUpdated: string[] = [];
+		const PATCHWORK_HOOKS = buildHooks(binPath, options);
 
 		for (const [eventName, hookDefs] of Object.entries(PATCHWORK_HOOKS)) {
 			const existing = existingHooks[eventName] || [];
+			const desiredCmd = hookDefs[0].command;
 
-			// Check if patchwork hooks already installed
-			const alreadyInstalled = existing.some(
-				(h: any) => typeof h.command === "string" && h.command.startsWith("patchwork hook"),
+			// Find existing patchwork hook entry (handles env-prefixed commands)
+			const patchworkIdx = existing.findIndex(
+				(h: any) => typeof h.command === "string" && PATCHWORK_HOOK_RE.test(h.command),
 			);
 
-			if (!alreadyInstalled) {
+			if (patchworkIdx === -1) {
+				// No patchwork hook yet — append
 				existingHooks[eventName] = [...existing, ...hookDefs];
 				hooksInstalled.push(eventName);
+			} else {
+				// Patchwork hook exists — check if command needs updating
+				const current = existing[patchworkIdx] as any;
+				if (current.command !== desiredCmd) {
+					current.command = desiredCmd;
+					hooksUpdated.push(eventName);
+				}
 			}
 		}
 
@@ -133,12 +223,14 @@ export function installClaudeCodeHooks(projectPath?: string, binPath?: string): 
 			success: true,
 			settingsPath,
 			hooksInstalled,
+			hooksUpdated,
 		};
 	} catch (err) {
 		return {
 			success: false,
 			settingsPath,
 			hooksInstalled: [],
+			hooksUpdated: [],
 			error: err instanceof Error ? err.message : String(err),
 		};
 	}
@@ -154,7 +246,7 @@ export function uninstallClaudeCodeHooks(projectPath?: string): InstallResult {
 
 	try {
 		if (!existsSync(settingsPath)) {
-			return { success: true, settingsPath, hooksInstalled: [] };
+			return { success: true, settingsPath, hooksInstalled: [], hooksUpdated: [] };
 		}
 
 		const content = readFileSync(settingsPath, "utf-8");
@@ -164,7 +256,7 @@ export function uninstallClaudeCodeHooks(projectPath?: string): InstallResult {
 
 		for (const [eventName, hookList] of Object.entries(hooks)) {
 			const filtered = hookList.filter(
-				(h: any) => !(typeof h.command === "string" && h.command.startsWith("patchwork hook")),
+				(h: any) => !(typeof h.command === "string" && PATCHWORK_HOOK_RE.test(h.command)),
 			);
 			if (filtered.length !== hookList.length) {
 				removed.push(eventName);
@@ -179,12 +271,13 @@ export function uninstallClaudeCodeHooks(projectPath?: string): InstallResult {
 		settings.hooks = hooks;
 		writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
 
-		return { success: true, settingsPath, hooksInstalled: removed };
+		return { success: true, settingsPath, hooksInstalled: removed, hooksUpdated: [] };
 	} catch (err) {
 		return {
 			success: false,
 			settingsPath,
 			hooksInstalled: [],
+			hooksUpdated: [],
 			error: err instanceof Error ? err.message : String(err),
 		};
 	}
