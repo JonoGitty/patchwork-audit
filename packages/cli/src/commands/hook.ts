@@ -1,6 +1,9 @@
 import { Command } from "commander";
+import { existsSync, mkdirSync, appendFileSync, chmodSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 import { handleClaudeCodeHook } from "@patchwork/agents";
 import type { ClaudeCodeHookInput } from "@patchwork/agents";
+import { PRETOOL_TELEMETRY_PATH } from "../store.js";
 
 /** Fail-closed deny response for PreToolUse internal errors. */
 const FAIL_CLOSED_DENY = {
@@ -66,6 +69,12 @@ export const hookCommand = new Command("hook")
 		emitPreToolTelemetry(isPreTool, telemetryJson, startMs, failClosed, outcome, reason);
 	});
 
+const TELEMETRY_DIR_MODE = 0o700;
+const TELEMETRY_FILE_MODE = 0o600;
+
+/** Valid telemetry destination values. */
+type TelemetryDest = "stderr" | "file" | "both";
+
 /**
  * Emit latency warning and/or structured telemetry for PreToolUse.
  */
@@ -95,11 +104,58 @@ function emitPreToolTelemetry(
 			outcome,
 			reason,
 		};
-		process.stderr.write(JSON.stringify(record) + "\n");
+		const line = JSON.stringify(record) + "\n";
+		const dest = parseTelemetryDest(process.env.PATCHWORK_PRETOOL_TELEMETRY_DEST);
+		const toStderr = dest === "stderr" || dest === "both";
+		const toFile = dest === "file" || dest === "both";
+
+		if (toStderr) {
+			process.stderr.write(line);
+		}
+		if (toFile) {
+			appendTelemetryFile(line);
+		}
+		// If dest is "file" only, we already wrote to file and skip stderr JSON.
+		// But if neither branch ran (shouldn't happen), fall through silently.
 	} else if (warnTriggered) {
 		process.stderr.write(
 			`[patchwork] PreToolUse hook took ${elapsedMs}ms (threshold: ${warnMs}ms)\n`,
 		);
+	}
+}
+
+/** Parse and validate the telemetry dest env var. */
+function parseTelemetryDest(raw: string | undefined): TelemetryDest {
+	if (raw === "file" || raw === "both") return raw;
+	return "stderr"; // default
+}
+
+/** Reconcile file/dir permissions if they don't match target. */
+function reconcileTelemetryMode(path: string, targetMode: number): void {
+	try {
+		const stat = statSync(path);
+		if ((stat.mode & 0o777) !== targetMode) {
+			chmodSync(path, targetMode);
+		}
+	} catch {
+		// Path disappeared — safe to ignore
+	}
+}
+
+/** Append one JSON line to the telemetry file with secure permissions. */
+function appendTelemetryFile(line: string): void {
+	const filePath = process.env.PATCHWORK_PRETOOL_TELEMETRY_FILE || PRETOOL_TELEMETRY_PATH;
+	try {
+		const dir = dirname(filePath);
+		if (!existsSync(dir)) {
+			mkdirSync(dir, { recursive: true, mode: TELEMETRY_DIR_MODE });
+		} else {
+			reconcileTelemetryMode(dir, TELEMETRY_DIR_MODE);
+		}
+		appendFileSync(filePath, line, { mode: TELEMETRY_FILE_MODE });
+		reconcileTelemetryMode(filePath, TELEMETRY_FILE_MODE);
+	} catch {
+		process.stderr.write("[patchwork] telemetry file write failed\n");
 	}
 }
 

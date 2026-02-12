@@ -13,12 +13,17 @@ const PATCHWORK_HOOK_RE = /\bpatchwork hook\b/;
 /** Valid policy modes for PreToolUse enforcement. */
 export type PolicyMode = "audit" | "fail-closed";
 
+/** Valid telemetry destination values. */
+export type TelemetryDest = "stderr" | "file" | "both";
+
 /** Options that control PreToolUse enforcement behavior. */
 export interface InstallOptions {
 	policyMode?: PolicyMode;
 	pretoolFailClosed?: boolean;
 	pretoolWarnMs?: number;
 	pretoolTelemetryJson?: boolean;
+	pretoolTelemetryDest?: TelemetryDest;
+	pretoolTelemetryFile?: string;
 }
 
 /**
@@ -70,6 +75,12 @@ function buildHooks(binPath?: string, options?: InstallOptions) {
 	}
 	if (options?.pretoolTelemetryJson) {
 		envParts.push("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
+	}
+	if (options?.pretoolTelemetryDest) {
+		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_DEST=${options.pretoolTelemetryDest}`);
+	}
+	if (options?.pretoolTelemetryFile) {
+		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_FILE=${options.pretoolTelemetryFile}`);
 	}
 	const preToolCmd = envParts.length > 0
 		? `${envParts.join(" ")} ${cmd} hook pre-tool`

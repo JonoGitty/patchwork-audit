@@ -87,16 +87,20 @@ What is implemented:
 - Durable divergence marker persisted on SQLite secondary write failures
 - `sync db-status` exposes divergence state for operators/CI
 - `sync db` warns when divergence exists and clears marker after rebuild flow
+- `sync db` now captures per-event append failure diagnostics (event id/timestamp/action/error class)
+- `sync db` persists a structured last-failure report (`sync-db-last-failures.json`) and clears stale reports on full success
 - Primary JSONL write still succeeds if SQLite is unavailable
 
 Residual risk:
 - Divergence is still possible under SQLite failure/lock pressure
 - Reconciliation is still operational/manual rather than transactional
-- `sync db` currently reports only aggregate failure counts (no per-event failure detail), limiting postmortem precision
+- Sync failure report is best-effort and can be lost if state path is not writable
+- Report currently stores only the latest failed run (no rotation/history)
 
 Evidence:
 - `packages/agents/src/claude-code/adapter.ts`
 - `packages/cli/src/commands/sync.ts`
+- `packages/cli/src/store.ts`
 
 ### R5. Idempotency and duplicate event handling
 Status: Partially mitigated
@@ -175,15 +179,21 @@ Current state:
 - Optional fail-closed mode exists for PreToolUse parse/handler errors (`PATCHWORK_PRETOOL_FAIL_CLOSED=1`)
 - PreToolUse latency warning exists (`PATCHWORK_PRETOOL_WARN_MS`, default 800ms)
 - `patchwork init claude-code` now supports install-time options for both controls (`--pretool-fail-closed`, `--pretool-warn-ms`)
+- Explicit policy mode is supported at install time (`--policy-mode audit|fail-closed`)
+- Structured PreToolUse telemetry JSON is supported (`PATCHWORK_PRETOOL_TELEMETRY_JSON=1` / `--pretool-telemetry-json`)
+- Telemetry sink routing is supported (`PATCHWORK_PRETOOL_TELEMETRY_DEST=stderr|file|both`, optional `PATCHWORK_PRETOOL_TELEMETRY_FILE`)
+- Strict install profile is supported (`--strict-profile`: fail-closed + telemetry + 500ms warn by default)
 
 Why this remains important:
-- Default behavior is still fail-open unless fail-closed env mode is explicitly enabled
+- Default behavior is still fail-open unless fail-closed mode is explicitly chosen
 - Process-level timeouts/crashes still rely on host behavior and are not fully controlled by Patchwork
-- Latency signal is stderr-only and not a structured policy-enforcement telemetry channel
+- Telemetry file sink is append-only with no built-in rotation/history controls
 
 Evidence:
 - `packages/cli/src/commands/hook.ts`
 - `packages/agents/src/claude-code/installer.ts`
+- `packages/cli/src/commands/init.ts`
+- `packages/cli/src/store.ts`
 - `packages/cli/tests/commands/hook.test.ts`
 
 ### R10. JSONL scaling (`readAll()` and dedup scans)
@@ -215,12 +225,12 @@ What it is not yet:
 ## 4. Recommended Next Work (Priority Order)
 
 1. Enforcement semantics hardening
-- Promote fail-closed behavior from env flag to explicit product/policy mode (with safe rollout)
-- Add structured hook latency/enforcement telemetry output suitable for CI policy gates
+- Add telemetry retention/rotation controls for file sink deployments
+- Consider promoting strict-profile semantics into installer API for non-CLI callers
 
 2. Dual-write consistency hardening
-- Add per-event failure diagnostics during `sync db` (event id + error class)
-- Optionally persist sync-run failure summaries for later operator inspection
+- Add report history/rotation strategy for `sync-db-last-failures.json`
+- Consider optional retry/backoff policy for transient SQLite failures during `sync db`
 
 3. Seal trust model hardening
 - Add optional external witness anchoring for tip hashes (CI artifact, transparency log, or KMS-backed signer)

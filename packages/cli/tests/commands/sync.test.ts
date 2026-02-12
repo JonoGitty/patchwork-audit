@@ -6,6 +6,7 @@ import {
 	writeFileSync,
 	readFileSync,
 	existsSync,
+	statSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -228,6 +229,66 @@ describe("sync db clears marker", () => {
 		// Marker should still exist — sync did not complete (no events)
 		expect(existsSync(markerPath)).toBe(true);
 	});
+
+	it("C: successful sync clears stale failure report", async () => {
+		const patchworkDir = join(tmpDir, ".patchwork");
+		mkdirSync(patchworkDir, { recursive: true, mode: 0o700 });
+		const eventsPath = join(patchworkDir, "events.jsonl");
+		const event = {
+			id: "evt_report_clear",
+			schema_version: 1,
+			session_id: "ses_report",
+			timestamp: "2026-01-01T00:00:00.000Z",
+			agent: "claude-code",
+			action: "file_read",
+			status: "completed",
+			risk: { level: "low", flags: [] },
+		};
+		writeFileSync(eventsPath, JSON.stringify(event) + "\n", "utf-8");
+
+		// Plant a stale failure report from a previous failed sync
+		const reportPath = join(patchworkDir, "state", "sync-db-last-failures.json");
+		mkdirSync(join(patchworkDir, "state"), { recursive: true, mode: 0o700 });
+		writeFileSync(reportPath, JSON.stringify({ schema_version: 1, stale: true }), { mode: 0o600 });
+		expect(existsSync(reportPath)).toBe(true);
+
+		const { exitCode } = await runSyncDb();
+		expect(exitCode).toBeUndefined();
+
+		// Stale report should be cleaned up on successful sync
+		expect(existsSync(reportPath)).toBe(false);
+	});
+
+	it("D: divergence marker only cleared on full success (zero append failures)", async () => {
+		const patchworkDir = join(tmpDir, ".patchwork");
+		mkdirSync(patchworkDir, { recursive: true, mode: 0o700 });
+		const eventsPath = join(patchworkDir, "events.jsonl");
+		const event = {
+			id: "evt_full_success",
+			schema_version: 1,
+			session_id: "ses_full",
+			timestamp: "2026-01-01T00:00:00.000Z",
+			agent: "claude-code",
+			action: "file_read",
+			status: "completed",
+			risk: { level: "low", flags: [] },
+		};
+		writeFileSync(eventsPath, JSON.stringify(event) + "\n", "utf-8");
+
+		// Marker present before sync
+		const markerPath = join(patchworkDir, "state", "sqlite-divergence.json");
+		writeMarker(markerPath);
+		expect(existsSync(markerPath)).toBe(true);
+
+		const { exitCode, output } = await runSyncDb();
+		expect(exitCode).toBeUndefined();
+
+		// Marker cleared only because zero append failures
+		expect(existsSync(markerPath)).toBe(false);
+		const joined = output.join("\n");
+		expect(joined).toContain("Cleared divergence marker");
+		expect(joined).not.toContain("Divergence marker preserved");
+	});
 });
 
 describe("sync db partial rebuild failure", () => {
@@ -337,5 +398,41 @@ describe("sync db partial rebuild failure", () => {
 		// No marker present — but failures should still set exitCode=1
 		const { exitCode } = await runSyncDbWithFailingAppend();
 		expect(exitCode).toBe(1);
+	});
+
+	it("A: persists failure report with expected schema on append failure", async () => {
+		setupEventsFile();
+		const reportPath = join(tmpDir, ".patchwork", "state", "sync-db-last-failures.json");
+
+		await runSyncDbWithFailingAppend();
+
+		expect(existsSync(reportPath)).toBe(true);
+		const report = JSON.parse(readFileSync(reportPath, "utf-8"));
+		expect(report.schema_version).toBe(1);
+		expect(report.created_at).toBeTruthy();
+		expect(report.total_events).toBe(2);
+		expect(report.inserted).toBe(0);
+		expect(report.append_failures).toBe(2);
+		expect(report.failures).toHaveLength(2);
+		// Check first failure diagnostic
+		expect(report.failures[0].event_id).toBe("evt_f1");
+		expect(report.failures[0].error_class).toBe("SQLITE_IOERR");
+		expect(report.failures[0].error_message).toContain("disk I/O error");
+		expect(report.failures[0].action).toBe("file_read");
+		expect(report.failures[0].timestamp).toBeTruthy();
+	});
+
+	it("B: failure report has secure permissions (0o600 file, 0o700 dir)", async () => {
+		setupEventsFile();
+		const stateDir = join(tmpDir, ".patchwork", "state");
+		const reportPath = join(stateDir, "sync-db-last-failures.json");
+
+		await runSyncDbWithFailingAppend();
+
+		expect(existsSync(reportPath)).toBe(true);
+		const fileStat = statSync(reportPath);
+		expect(fileStat.mode & 0o777).toBe(0o600);
+		const dirStat = statSync(stateDir);
+		expect(dirStat.mode & 0o777).toBe(0o700);
 	});
 });

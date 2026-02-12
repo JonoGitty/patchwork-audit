@@ -9,6 +9,8 @@ const SEAL_KEY_PATH = join(DATA_DIR, "keys", "seal.key");
 const KEYRING_DIR = join(DATA_DIR, "keys", "seal");
 const SEALS_PATH = join(DATA_DIR, "seals.jsonl");
 const DIVERGENCE_MARKER_PATH = join(DATA_DIR, "state", "sqlite-divergence.json");
+const SYNC_REPORT_PATH = join(DATA_DIR, "state", "sync-db-last-failures.json");
+const PRETOOL_TELEMETRY_PATH = join(DATA_DIR, "telemetry", "pretool.jsonl");
 
 export function getReadStore(): Store {
 	if (existsSync(DB_PATH)) {
@@ -32,4 +34,4 @@ export function getSearchStore(): SearchableStore | null {
 	return null;
 }
 
-export { EVENTS_PATH, DB_PATH, DATA_DIR, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH, DIVERGENCE_MARKER_PATH };
+export { EVENTS_PATH, DB_PATH, DATA_DIR, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH, DIVERGENCE_MARKER_PATH, SYNC_REPORT_PATH, PRETOOL_TELEMETRY_PATH };

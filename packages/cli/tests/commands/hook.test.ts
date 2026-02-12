@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Readable, Writable } from "node:stream";
+import { mkdtempSync, rmSync, readFileSync, existsSync, statSync, mkdirSync, chmodSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 /**
  * Helper: run `patchwork hook <event>` with controlled stdin, capturing stdout/stderr.
@@ -193,5 +196,108 @@ describe("hook PreToolUse structured telemetry", () => {
 		} finally {
 			Date.now = origDateNow;
 		}
+	});
+});
+
+describe("hook PreToolUse telemetry file sink", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-telemetry-sink-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("A: writes valid JSON line to file when dest=file", async () => {
+		const telemetryFile = join(tmpDir, "telemetry", "pretool.jsonl");
+
+		const { stderr } = await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+		});
+
+		// stderr should NOT have JSON telemetry (dest=file only)
+		const stderrLines = stderr.trim().split("\n").filter(Boolean);
+		for (const line of stderrLines) {
+			let parsed: any;
+			try { parsed = JSON.parse(line); } catch { continue; }
+			expect(parsed.event).not.toBe("PreToolUse");
+		}
+
+		// File should have exactly one valid JSON line
+		expect(existsSync(telemetryFile)).toBe(true);
+		const content = readFileSync(telemetryFile, "utf-8").trim();
+		const record = JSON.parse(content);
+		expect(record.event).toBe("PreToolUse");
+		expect(typeof record.ts).toBe("string");
+		expect(typeof record.elapsed_ms).toBe("number");
+		expect(record.outcome).toBe("internal_error");
+	});
+
+	it("B: writes to both stderr and file when dest=both", async () => {
+		const telemetryFile = join(tmpDir, "telemetry", "pretool.jsonl");
+
+		const { stderr } = await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "both",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+		});
+
+		// stderr should have JSON telemetry
+		const stderrLines = stderr.trim().split("\n").filter(Boolean);
+		const stderrRecord = JSON.parse(stderrLines[stderrLines.length - 1]);
+		expect(stderrRecord.event).toBe("PreToolUse");
+
+		// File should also have telemetry
+		expect(existsSync(telemetryFile)).toBe(true);
+		const fileRecord = JSON.parse(readFileSync(telemetryFile, "utf-8").trim());
+		expect(fileRecord.event).toBe("PreToolUse");
+	});
+
+	it("C: file/dir permissions are enforced (0o600/0o700)", async () => {
+		const telemetryFile = join(tmpDir, "telemetry", "pretool.jsonl");
+
+		await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+		});
+
+		expect(existsSync(telemetryFile)).toBe(true);
+		const fileStat = statSync(telemetryFile);
+		expect(fileStat.mode & 0o777).toBe(0o600);
+		const dirStat = statSync(join(tmpDir, "telemetry"));
+		expect(dirStat.mode & 0o777).toBe(0o700);
+	});
+
+	it("D: file write failure does not change allow/deny output path", async () => {
+		// Point to a path that cannot be written (dir is a regular file)
+		const blockingFile = join(tmpDir, "blocker");
+		mkdirSync(tmpDir, { recursive: true });
+		// Create a regular file where the dir should be, making mkdir fail
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(join(tmpDir, "blocker"), "not-a-dir");
+		const telemetryFile = join(tmpDir, "blocker", "sub", "pretool.jsonl");
+
+		const { stdout, stderr } = await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+		});
+
+		// Fail-closed deny should still be emitted on stdout
+		const parsed = JSON.parse(stdout);
+		expect(parsed.allow).toBe(false);
+		expect(parsed.reason).toContain("fail-closed");
+
+		// stderr should contain the warning about failed write
+		expect(stderr).toContain("telemetry file write failed");
 	});
 });

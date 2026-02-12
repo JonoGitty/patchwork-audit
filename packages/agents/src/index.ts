@@ -7,6 +7,7 @@ export {
 	resolveFailClosed,
 	type InstallOptions,
 	type PolicyMode,
+	type TelemetryDest,
 } from "./claude-code/installer.js";
 export type {
 	ClaudeCodeHookInput,

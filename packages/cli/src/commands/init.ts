@@ -1,26 +1,33 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { installClaudeCodeHooks, detectInstalledAgents } from "@patchwork/agents";
-import type { InstallOptions, PolicyMode } from "@patchwork/agents";
+import type { InstallOptions, PolicyMode, TelemetryDest } from "@patchwork/agents";
 
 const VALID_POLICY_MODES = ["audit", "fail-closed"] as const;
+const VALID_TELEMETRY_DESTS = ["stderr", "file", "both"] as const;
 
 interface InitOpts {
 	project?: string;
+	strictProfile?: true;
 	policyMode?: string;
 	pretoolFailClosed?: true;
 	pretoolWarnMs?: string;
 	pretoolTelemetryJson?: true;
+	pretoolTelemetryDest?: string;
+	pretoolTelemetryFile?: string;
 }
 
 export const initCommand = new Command("init")
 	.description("Install Patchwork hooks for AI coding agents")
 	.argument("[agent]", "Agent to configure: claude-code, codex, or all")
 	.option("--project <path>", "Install project-level hooks instead of global")
+	.option("--strict-profile", "Strict enforcement: fail-closed + telemetry + warn at 500ms")
 	.option("--policy-mode <mode>", "Policy mode: audit (default) or fail-closed")
 	.option("--pretool-fail-closed", "Enable fail-closed mode for PreToolUse hooks (legacy)")
 	.option("--pretool-warn-ms <ms>", "Latency warning threshold for PreToolUse (ms)")
 	.option("--pretool-telemetry-json", "Emit structured JSON telemetry for PreToolUse")
+	.option("--pretool-telemetry-dest <dest>", "Telemetry destination: stderr (default), file, or both")
+	.option("--pretool-telemetry-file <path>", "File path for telemetry JSONL output")
 	.action((agent: string | undefined, opts: InitOpts) => {
 		const installOpts = buildInstallOptions(opts);
 		if (!installOpts) return; // validation error already printed
@@ -73,6 +80,14 @@ export const initCommand = new Command("init")
 function buildInstallOptions(opts: InitOpts): InstallOptions | null {
 	const installOpts: InstallOptions = {};
 
+	// Apply strict profile defaults first — explicit flags override below
+	if (opts.strictProfile) {
+		installOpts.policyMode = "fail-closed";
+		installOpts.pretoolTelemetryJson = true;
+		installOpts.pretoolWarnMs = 500;
+	}
+
+	// Explicit --policy-mode overrides strict default
 	if (opts.policyMode !== undefined) {
 		if (!VALID_POLICY_MODES.includes(opts.policyMode as PolicyMode)) {
 			console.log(chalk.red(`Invalid --policy-mode: "${opts.policyMode}" (must be "audit" or "fail-closed")`));
@@ -86,6 +101,7 @@ function buildInstallOptions(opts: InitOpts): InstallOptions | null {
 		installOpts.pretoolFailClosed = true;
 	}
 
+	// Explicit --pretool-warn-ms overrides strict default
 	if (opts.pretoolWarnMs !== undefined) {
 		const ms = Number(opts.pretoolWarnMs);
 		if (!Number.isInteger(ms) || ms < 0) {
@@ -98,6 +114,27 @@ function buildInstallOptions(opts: InitOpts): InstallOptions | null {
 
 	if (opts.pretoolTelemetryJson) {
 		installOpts.pretoolTelemetryJson = true;
+	}
+
+	if (opts.pretoolTelemetryDest !== undefined) {
+		if (!VALID_TELEMETRY_DESTS.includes(opts.pretoolTelemetryDest as TelemetryDest)) {
+			console.log(chalk.red(`Invalid --pretool-telemetry-dest: "${opts.pretoolTelemetryDest}" (must be "stderr", "file", or "both")`));
+			process.exitCode = 1;
+			return null;
+		}
+		installOpts.pretoolTelemetryDest = opts.pretoolTelemetryDest as TelemetryDest;
+	}
+
+	if (opts.pretoolTelemetryFile !== undefined) {
+		installOpts.pretoolTelemetryFile = opts.pretoolTelemetryFile;
+	}
+
+	// Print strict profile summary
+	if (opts.strictProfile) {
+		const mode = installOpts.policyMode || "fail-closed";
+		const warn = installOpts.pretoolWarnMs ?? 500;
+		const telemetry = installOpts.pretoolTelemetryJson ? "on" : "off";
+		console.log(chalk.cyan(`  Strict profile: mode=${mode}, warn=${warn}ms, telemetry=${telemetry}`));
 	}
 
 	return installOpts;
