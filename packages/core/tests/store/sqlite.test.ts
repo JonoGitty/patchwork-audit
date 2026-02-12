@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, existsSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SqliteStore } from "../../src/store/sqlite.js";
@@ -214,6 +214,100 @@ describe("SqliteStore", () => {
 		it("searches by action", () => {
 			const results = store.search("file_write");
 			expect(results).toHaveLength(1);
+		});
+	});
+
+	describe("file permissions", () => {
+		it("creates directory with 0700", () => {
+			const subDir = join(tmpDir, "secure-db");
+			const s = new SqliteStore(join(subDir, "audit.db"));
+			const stat = statSync(subDir);
+			expect(stat.mode & 0o777).toBe(0o700);
+			s.close();
+		});
+
+		it("creates DB file with 0600", () => {
+			const dbPath = join(tmpDir, "secure-db2", "audit.db");
+			const s = new SqliteStore(dbPath);
+			const stat = statSync(dbPath);
+			expect(stat.mode & 0o777).toBe(0o600);
+			s.close();
+		});
+
+		it("corrects insecure existing directory permissions on init", () => {
+			const subDir = join(tmpDir, "insecure-dir");
+			mkdirSync(subDir, { mode: 0o755 });
+			expect(statSync(subDir).mode & 0o777).toBe(0o755);
+
+			const s = new SqliteStore(join(subDir, "audit.db"));
+			expect(statSync(subDir).mode & 0o777).toBe(0o700);
+			s.close();
+		});
+
+		it("corrects insecure existing DB file permissions on init", () => {
+			// Create a DB first with correct perms, then widen them
+			const subDir = join(tmpDir, "insecure-file");
+			mkdirSync(subDir, { mode: 0o700 });
+			const dbPath = join(subDir, "audit.db");
+			const s1 = new SqliteStore(dbPath);
+			s1.close();
+			chmodSync(dbPath, 0o644);
+			expect(statSync(dbPath).mode & 0o777).toBe(0o644);
+
+			// Re-opening should fix it
+			const s2 = new SqliteStore(dbPath);
+			expect(statSync(dbPath).mode & 0o777).toBe(0o600);
+			s2.close();
+		});
+	});
+
+	describe("schema validation", () => {
+		it("rejects invalid event on append", () => {
+			const bad = { id: "x" } as unknown as AuditEvent;
+			expect(() => store.append(bad)).toThrow(/Invalid event/);
+		});
+
+		it("reports read errors for corrupt raw_json", () => {
+			// Insert a valid event first
+			store.append(makeEvent());
+
+			// Manually insert corrupt raw_json via raw SQL
+			(store as any).db.prepare(
+				`INSERT INTO events (id, session_id, timestamp, agent, action, status, risk_level, raw_json)
+				 VALUES ('evt_corrupt', 'ses_x', '2026-01-01T00:00:00.000Z', 'claude-code', 'file_read', 'completed', 'low', '{"broken":true}')`
+			).run();
+
+			const events = store.readAll();
+			expect(events).toHaveLength(1); // only the valid one
+			expect(store.lastReadErrors).toBe(1);
+		});
+	});
+
+	describe("schema_version and idempotency_key", () => {
+		it("accepts schema_version: 1", () => {
+			const event = makeEvent({ schema_version: 1 });
+			store.append(event);
+			const events = store.readAll();
+			expect(events[0].schema_version).toBe(1);
+		});
+
+		it("accepts schema_version: undefined (backward compat)", () => {
+			const event = makeEvent();
+			store.append(event);
+			const events = store.readAll();
+			expect(events[0].schema_version).toBeUndefined();
+		});
+
+		it("rejects schema_version: 2 (unknown future version)", () => {
+			const event = makeEvent({ schema_version: 2 as any });
+			expect(() => store.append(event)).toThrow(/Invalid event/);
+		});
+
+		it("stores and retrieves idempotency_key", () => {
+			const event = makeEvent({ idempotency_key: "ses_test:PostToolUse:file_read:tu_123" });
+			store.append(event);
+			const events = store.readAll();
+			expect(events[0].idempotency_key).toBe("ses_test:PostToolUse:file_read:tu_123");
 		});
 	});
 });

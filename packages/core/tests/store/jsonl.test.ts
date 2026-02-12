@@ -1,7 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { JsonlStore } from "../../src/store/jsonl.js";
 import type { AuditEvent } from "../../src/schema/event.js";
 
@@ -117,6 +128,289 @@ describe("JsonlStore", () => {
 			);
 			const results = store.query({ projectName: "my-project" });
 			expect(results).toHaveLength(1);
+		});
+	});
+
+	describe("file permissions", () => {
+		it("creates directory with 0700", () => {
+			const subDir = join(tmpDir, "secure", "nested");
+			new JsonlStore(join(subDir, "events.jsonl"));
+			const stat = statSync(subDir);
+			expect(stat.mode & 0o777).toBe(0o700);
+		});
+
+		it("creates file with 0600 on first write", () => {
+			const filePath = join(tmpDir, "events.jsonl");
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent());
+			const stat = statSync(filePath);
+			expect(stat.mode & 0o777).toBe(0o600);
+		});
+
+		it("corrects insecure existing directory permissions on init", () => {
+			const subDir = join(tmpDir, "insecure");
+			mkdirSync(subDir, { mode: 0o755 });
+			expect(statSync(subDir).mode & 0o777).toBe(0o755);
+
+			// Opening store should fix permissions
+			new JsonlStore(join(subDir, "events.jsonl"));
+			expect(statSync(subDir).mode & 0o777).toBe(0o700);
+		});
+
+		it("corrects insecure existing file permissions on init", () => {
+			const filePath = join(tmpDir, "insecure.jsonl");
+			// Create the file with permissive mode
+			appendFileSync(filePath, '{"dummy": true}\n', "utf-8");
+			chmodSync(filePath, 0o644);
+			expect(statSync(filePath).mode & 0o777).toBe(0o644);
+
+			// Opening store should fix permissions
+			new JsonlStore(filePath);
+			expect(statSync(filePath).mode & 0o777).toBe(0o600);
+		});
+
+		it("is safe when data file does not exist yet", () => {
+			const filePath = join(tmpDir, "nonexistent.jsonl");
+			// Should not throw
+			const s = new JsonlStore(filePath);
+			expect(s.readAll()).toEqual([]);
+		});
+	});
+
+	describe("schema validation", () => {
+		it("rejects invalid event on append", () => {
+			const bad = { id: "x" } as unknown as AuditEvent;
+			expect(() => store.append(bad)).toThrow(/Invalid event/);
+		});
+
+		it("skips corrupt JSONL lines on read", () => {
+			const filePath = join(tmpDir, "events.jsonl");
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent({ action: "file_read" }));
+
+			// Manually append corrupt line
+			appendFileSync(filePath, "NOT_VALID_JSON\n", "utf-8");
+			appendFileSync(filePath, '{"id":"x"}\n', "utf-8"); // valid JSON but invalid schema
+
+			s.append(makeEvent({ action: "file_write" }));
+
+			const events = s.readAll();
+			expect(events).toHaveLength(2); // only the 2 valid events
+			expect(s.lastReadErrors).toBe(2); // 1 parse error + 1 schema error
+		});
+
+		it("counts errors accurately for empty file", () => {
+			store.readAll();
+			expect(store.lastReadErrors).toBe(0);
+		});
+	});
+
+	describe("idempotency dedup", () => {
+		it("deduplicates events by idempotency_key", () => {
+			const event = makeEvent({ idempotency_key: "ses_test:PostToolUse:file_read:tu_123" });
+			store.append(event);
+			store.append({ ...event, id: "evt_different_id" });
+
+			const events = store.readAll();
+			expect(events).toHaveLength(1);
+		});
+
+		it("allows events without idempotency_key (backward compat)", () => {
+			store.append(makeEvent());
+			store.append(makeEvent());
+			const events = store.readAll();
+			expect(events).toHaveLength(2);
+		});
+
+		it("allows events with different idempotency_keys", () => {
+			store.append(makeEvent({ idempotency_key: "key_1" }));
+			store.append(makeEvent({ idempotency_key: "key_2" }));
+			const events = store.readAll();
+			expect(events).toHaveLength(2);
+		});
+
+		it("concurrent appends with same idempotency_key result in one event", () => {
+			// Simulates two sequential appends with the same key (dedup inside lock)
+			const key = "ses_x:PostToolUse:file_write:tu_99";
+			const e1 = makeEvent({ id: "evt_first", idempotency_key: key });
+			const e2 = makeEvent({ id: "evt_second", idempotency_key: key });
+			store.append(e1);
+			store.append(e2);
+			const events = store.readAll();
+			expect(events).toHaveLength(1);
+			expect(events[0].id).toBe("evt_first");
+		});
+	});
+
+	describe("file locking", () => {
+		it("handles sequential appends under lock", () => {
+			for (let i = 0; i < 20; i++) {
+				store.append(makeEvent({ action: `action_${i}` as any }));
+			}
+			const events = store.readAll();
+			expect(events).toHaveLength(20);
+		});
+
+		it("cleans up lock file after append", () => {
+			const filePath = join(tmpDir, "locked.jsonl");
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent());
+			const { existsSync } = require("node:fs");
+			expect(existsSync(filePath + ".lock")).toBe(false);
+		});
+
+		it("recovers from stale lock file (age > threshold)", () => {
+			const filePath = join(tmpDir, "stale.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Create a lock file and backdate its mtime to make it stale
+			openSync(lockPath, "wx");
+			const pastTime = new Date(Date.now() - 10_000); // 10 seconds ago
+			utimesSync(lockPath, pastTime, pastTime);
+
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent());
+			const events = s.readAll();
+			expect(events).toHaveLength(1);
+		});
+
+		it("does NOT break a fresh lock held by another process", () => {
+			const filePath = join(tmpDir, "active.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Create a fresh (non-stale) lock file — mtime is now
+			openSync(lockPath, "wx");
+
+			const s = new JsonlStore(filePath);
+			// Should throw rather than blindly unlinking the fresh lock
+			expect(() => s.append(makeEvent())).toThrow(/Failed to acquire lock/);
+		});
+
+		it("produces valid JSONL after rapid sequential appends", () => {
+			const filePath = join(tmpDir, "rapid.jsonl");
+			const s = new JsonlStore(filePath);
+
+			for (let i = 0; i < 50; i++) {
+				s.append(makeEvent({ id: `evt_rapid_${i}`, action: `action_${i % 5}` as any }));
+			}
+
+			const events = s.readAll();
+			expect(events).toHaveLength(50);
+
+			const raw = readFileSync(filePath, "utf-8");
+			const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+			expect(lines).toHaveLength(50);
+			for (const line of lines) {
+				expect(() => JSON.parse(line)).not.toThrow();
+			}
+		});
+	});
+
+	describe("lock ownership", () => {
+		it("reclaims lock held by dead process (PID liveness check)", () => {
+			const filePath = join(tmpDir, "dead-pid.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Create lock with structured metadata pointing to a non-existent PID
+			const meta = {
+				pid: 2147483647, // Very high PID unlikely to exist
+				hostname: hostname(),
+				token: "dead-process-token",
+				created_at_ms: Date.now(), // Recent — age check alone would NOT reclaim
+			};
+			writeFileSync(lockPath, JSON.stringify(meta), "utf-8");
+
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent());
+			expect(s.readAll()).toHaveLength(1);
+		});
+
+		it("does NOT reclaim lock held by alive process on same host", () => {
+			const filePath = join(tmpDir, "alive-pid.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Create lock with current process's PID (definitely alive)
+			const meta = {
+				pid: process.pid,
+				hostname: hostname(),
+				token: "alive-process-token",
+				created_at_ms: Date.now(),
+			};
+			writeFileSync(lockPath, JSON.stringify(meta), "utf-8");
+
+			const s = new JsonlStore(filePath);
+			expect(() => s.append(makeEvent())).toThrow(/Failed to acquire lock/);
+		});
+
+		it("falls back to mtime when lock metadata is corrupt (stale by mtime)", () => {
+			const filePath = join(tmpDir, "corrupt-meta.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Write non-JSON content with old mtime → should be reclaimed
+			writeFileSync(lockPath, "NOT_JSON", "utf-8");
+			const pastTime = new Date(Date.now() - 10_000);
+			utimesSync(lockPath, pastTime, pastTime);
+
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent());
+			expect(s.readAll()).toHaveLength(1);
+		});
+
+		it("does NOT reclaim corrupt lock with fresh mtime", () => {
+			const filePath = join(tmpDir, "corrupt-fresh.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Non-JSON content but fresh mtime → not stale → throw
+			writeFileSync(lockPath, "NOT_JSON", "utf-8");
+
+			const s = new JsonlStore(filePath);
+			expect(() => s.append(makeEvent())).toThrow(/Failed to acquire lock/);
+		});
+
+		it("does NOT reclaim cross-host lock under age threshold", () => {
+			const filePath = join(tmpDir, "cross-host.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Lock from different host with fresh timestamp
+			const meta = {
+				pid: 1,
+				hostname: "other-host.example.com",
+				token: "cross-host-token",
+				created_at_ms: Date.now(),
+			};
+			writeFileSync(lockPath, JSON.stringify(meta), "utf-8");
+
+			const s = new JsonlStore(filePath);
+			expect(() => s.append(makeEvent())).toThrow(/Failed to acquire lock/);
+		});
+
+		it("reclaims cross-host lock that exceeds age threshold", () => {
+			const filePath = join(tmpDir, "cross-host-stale.jsonl");
+			const lockPath = filePath + ".lock";
+
+			// Lock from different host with old timestamp
+			const meta = {
+				pid: 1,
+				hostname: "other-host.example.com",
+				token: "cross-host-stale-token",
+				created_at_ms: Date.now() - 10_000, // 10s ago, well past 5s threshold
+			};
+			writeFileSync(lockPath, JSON.stringify(meta), "utf-8");
+
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent());
+			expect(s.readAll()).toHaveLength(1);
+		});
+
+		it("concurrent dedup still works under ownership-safe locking", () => {
+			const key = "ses_own:PostToolUse:file_write:tu_lock";
+			const e1 = makeEvent({ id: "evt_own1", idempotency_key: key });
+			const e2 = makeEvent({ id: "evt_own2", idempotency_key: key });
+			store.append(e1);
+			store.append(e2);
+			const events = store.readAll();
+			expect(events).toHaveLength(1);
+			expect(events[0].id).toBe("evt_own1");
 		});
 	});
 });

@@ -1,12 +1,19 @@
 import Database from "better-sqlite3";
-import { existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
+import { AuditEventSchema } from "../schema/event.js";
 import type { AuditEvent } from "../schema/event.js";
 import type { EventFilter, SearchableStore } from "./types.js";
+
+/** Secure directory mode: owner-only read/write/execute */
+const DIR_MODE = 0o700;
+/** Secure file mode: owner-only read/write */
+const FILE_MODE = 0o600;
 
 /**
  * SQLite-backed indexed read layer for audit events.
  * JSONL remains source of truth; SQLite provides fast queries + FTS5 search.
+ * Reconciles dir/file permissions on init.
  */
 export class SqliteStore implements SearchableStore {
 	private db: Database.Database;
@@ -14,10 +21,18 @@ export class SqliteStore implements SearchableStore {
 	constructor(private readonly dbPath: string) {
 		const dir = dirname(dbPath);
 		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
+			mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+		} else {
+			reconcileMode(dir, DIR_MODE);
 		}
 
+		const isNew = !existsSync(dbPath);
 		this.db = new Database(dbPath);
+		if (isNew) {
+			chmodSync(dbPath, FILE_MODE);
+		} else {
+			reconcileMode(dbPath, FILE_MODE);
+		}
 		this.db.pragma("journal_mode = WAL");
 		this.db.pragma("synchronous = NORMAL");
 		this.migrate();
@@ -144,7 +159,16 @@ export class SqliteStore implements SearchableStore {
 		};
 	}
 
+	/** Count of invalid rows skipped during the last read operation. */
+	lastReadErrors = 0;
+
 	append(event: AuditEvent): void {
+		const result = AuditEventSchema.safeParse(event);
+		if (!result.success) {
+			throw new Error(
+				`Invalid event: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ")}`,
+			);
+		}
 		this.insertStmt().run(this.flattenEvent(event));
 	}
 
@@ -152,14 +176,35 @@ export class SqliteStore implements SearchableStore {
 		const rows = this.db
 			.prepare("SELECT raw_json FROM events ORDER BY timestamp ASC")
 			.all() as Array<{ raw_json: string }>;
-		return rows.map((r) => JSON.parse(r.raw_json) as AuditEvent);
+		return this.parseRows(rows);
 	}
 
 	readRecent(limit: number): AuditEvent[] {
 		const rows = this.db
 			.prepare("SELECT raw_json FROM events ORDER BY timestamp DESC LIMIT ?")
 			.all(limit) as Array<{ raw_json: string }>;
-		return rows.reverse().map((r) => JSON.parse(r.raw_json) as AuditEvent);
+		return this.parseRows(rows).reverse();
+	}
+
+	/** Parse raw_json rows with schema validation, skipping invalid entries. */
+	private parseRows(rows: Array<{ raw_json: string }>): AuditEvent[] {
+		const events: AuditEvent[] = [];
+		let errors = 0;
+		for (const r of rows) {
+			try {
+				const raw = JSON.parse(r.raw_json);
+				const result = AuditEventSchema.safeParse(raw);
+				if (result.success) {
+					events.push(result.data);
+				} else {
+					errors++;
+				}
+			} catch {
+				errors++;
+			}
+		}
+		this.lastReadErrors = errors;
+		return events;
 	}
 
 	query(filter: EventFilter): AuditEvent[] {
@@ -209,9 +254,6 @@ export class SqliteStore implements SearchableStore {
 		sql += " ORDER BY timestamp ASC";
 
 		if (filter.limit) {
-			// Get last N by using a subquery
-			sql = `SELECT raw_json FROM (${sql}) sub ORDER BY raw_json`;
-			// Actually, to get the last N events we need a different approach
 			sql = `SELECT raw_json FROM events`;
 			if (conditions.length > 0) {
 				sql += ` WHERE ${conditions.join(" AND ")}`;
@@ -219,11 +261,11 @@ export class SqliteStore implements SearchableStore {
 			sql += " ORDER BY timestamp DESC LIMIT @limit";
 			params.limit = filter.limit;
 			const rows = this.db.prepare(sql).all(params) as Array<{ raw_json: string }>;
-			return rows.reverse().map((r) => JSON.parse(r.raw_json) as AuditEvent);
+			return this.parseRows(rows).reverse();
 		}
 
 		const rows = this.db.prepare(sql).all(params) as Array<{ raw_json: string }>;
-		return rows.map((r) => JSON.parse(r.raw_json) as AuditEvent);
+		return this.parseRows(rows);
 	}
 
 	search(query: string, limit = 50): AuditEvent[] {
@@ -236,7 +278,7 @@ export class SqliteStore implements SearchableStore {
 				LIMIT @limit`,
 			)
 			.all({ query, limit }) as Array<{ raw_json: string }>;
-		return rows.map((r) => JSON.parse(r.raw_json) as AuditEvent);
+		return this.parseRows(rows);
 	}
 
 	close(): void {
@@ -245,5 +287,17 @@ export class SqliteStore implements SearchableStore {
 
 	get path(): string {
 		return this.dbPath;
+	}
+}
+
+/** Chmod path to target mode if current mode doesn't match. Safe if path doesn't exist. */
+function reconcileMode(path: string, targetMode: number): void {
+	try {
+		const stat = statSync(path);
+		if ((stat.mode & 0o777) !== targetMode) {
+			chmodSync(path, targetMode);
+		}
+	} catch {
+		// Path disappeared between check and chmod — safe to ignore
 	}
 }

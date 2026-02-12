@@ -198,6 +198,136 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[0].session_id).toBe("ses_abc");
 		expect(events[1].session_id).toBe("ses_abc");
 	});
+
+	describe("schema_version and idempotency_key", () => {
+		it("sets schema_version on generated events", () => {
+			handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
+			const events = readEvents(tmpDir);
+			expect(events[0].schema_version).toBe(1);
+		});
+
+		it("generates idempotency_key for tool events with tool_use_id", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "PostToolUse",
+					session_id: "ses_xyz",
+					tool_name: "Read",
+					tool_input: { file_path: "/test.ts" },
+					tool_use_id: "tu_abc",
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].idempotency_key).toBe("ses_xyz:PostToolUse:file_read:tu_abc");
+		});
+
+		it("generates idempotency_key for SessionStart (unique per session)", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "SessionStart",
+					session_id: "ses_xyz",
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].idempotency_key).toBe("ses_xyz:SessionStart:session_start");
+		});
+
+		it("omits idempotency_key for UserPromptSubmit (not unique per session)", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "UserPromptSubmit",
+					session_id: "ses_xyz",
+					prompt: "hello",
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].idempotency_key).toBeUndefined();
+		});
+
+		it("omits idempotency_key for SubagentStart (not unique per session)", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "SubagentStart",
+					session_id: "ses_xyz",
+					subagent_type: "Explore",
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events[0].idempotency_key).toBeUndefined();
+		});
+
+		it("retains multiple UserPromptSubmit events in the same session", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "UserPromptSubmit",
+					session_id: "ses_multi",
+					prompt: "First prompt",
+				}),
+			);
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "UserPromptSubmit",
+					session_id: "ses_multi",
+					prompt: "Second prompt",
+				}),
+			);
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "UserPromptSubmit",
+					session_id: "ses_multi",
+					prompt: "Third prompt",
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events).toHaveLength(3);
+			expect(events[0].action).toBe("prompt_submit");
+			expect(events[1].action).toBe("prompt_submit");
+			expect(events[2].action).toBe("prompt_submit");
+		});
+
+		it("retains multiple SubagentStart events in the same session", () => {
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "SubagentStart",
+					session_id: "ses_subagents",
+					subagent_type: "Explore",
+				}),
+			);
+			handleClaudeCodeHook(
+				makeInput({
+					hook_event_name: "SubagentStart",
+					session_id: "ses_subagents",
+					subagent_type: "Plan",
+				}),
+			);
+			const events = readEvents(tmpDir);
+			expect(events).toHaveLength(2);
+		});
+
+		it("deduplicates on retry with same idempotency_key", () => {
+			const input = makeInput({
+				hook_event_name: "PostToolUse",
+				session_id: "ses_retry",
+				tool_name: "Write",
+				tool_input: { file_path: "/test.ts", content: "hello" },
+				tool_use_id: "tu_retry1",
+				tool_response: { output: "ok" },
+			});
+			handleClaudeCodeHook(input);
+			handleClaudeCodeHook(input);
+
+			const events = readEvents(tmpDir);
+			expect(events).toHaveLength(1);
+		});
+	});
+
+	describe("directory permissions", () => {
+		it("creates .patchwork directory with 0700", () => {
+			handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
+			const { statSync } = require("node:fs");
+			const stat = statSync(join(tmpDir, ".patchwork"));
+			expect(stat.mode & 0o777).toBe(0o700);
+		});
+	});
 });
 
 function readEvents(homeDir: string): any[] {

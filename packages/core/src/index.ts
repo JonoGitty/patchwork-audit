@@ -1,6 +1,7 @@
 // Schema
 export {
 	AuditEventSchema,
+	CURRENT_SCHEMA_VERSION,
 	type AuditEvent,
 	type Action,
 	type Target,

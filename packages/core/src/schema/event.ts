@@ -57,11 +57,17 @@ export const ProvenanceSchema = z.object({
 	raw_output: z.record(z.unknown()).optional(),
 });
 
+export const CURRENT_SCHEMA_VERSION = 1;
+
 export const AuditEventSchema = z.object({
+	// Schema — accepts undefined (legacy) or literal 1 (current); rejects unknown future versions
+	schema_version: z.literal(1).optional(),
+
 	// Identity
 	id: z.string(),
 	session_id: z.string(),
 	timestamp: z.string().datetime(),
+	idempotency_key: z.string().optional(),
 
 	// Agent
 	agent: AgentType,

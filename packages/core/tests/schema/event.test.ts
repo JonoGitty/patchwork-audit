@@ -102,4 +102,43 @@ describe("AuditEventSchema", () => {
 			expect(result.success).toBe(true);
 		}
 	});
+
+	describe("schema_version contract", () => {
+		const minimalEvent = {
+			id: "evt_01",
+			session_id: "ses_01",
+			timestamp: "2026-02-12T14:30:00.123Z",
+			agent: "claude-code",
+			action: "session_start",
+			risk: { level: "none", flags: [] },
+		};
+
+		it("accepts schema_version: undefined (legacy events)", () => {
+			const result = AuditEventSchema.safeParse(minimalEvent);
+			expect(result.success).toBe(true);
+			if (result.success) {
+				expect(result.data.schema_version).toBeUndefined();
+			}
+		});
+
+		it("accepts schema_version: 1", () => {
+			const result = AuditEventSchema.safeParse({ ...minimalEvent, schema_version: 1 });
+			expect(result.success).toBe(true);
+		});
+
+		it("rejects schema_version: 2", () => {
+			const result = AuditEventSchema.safeParse({ ...minimalEvent, schema_version: 2 });
+			expect(result.success).toBe(false);
+		});
+
+		it("rejects schema_version: 0", () => {
+			const result = AuditEventSchema.safeParse({ ...minimalEvent, schema_version: 0 });
+			expect(result.success).toBe(false);
+		});
+
+		it("rejects schema_version: 'one' (string)", () => {
+			const result = AuditEventSchema.safeParse({ ...minimalEvent, schema_version: "one" });
+			expect(result.success).toBe(false);
+		});
+	});
 });

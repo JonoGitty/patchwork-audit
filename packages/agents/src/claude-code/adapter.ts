@@ -2,6 +2,7 @@ import {
 	type AuditEvent,
 	type Store,
 	type Target,
+	CURRENT_SCHEMA_VERSION,
 	classifyRisk,
 	evaluatePolicy,
 	generateEventId,
@@ -24,14 +25,20 @@ function getDbPath(): string {
 
 /** Wraps a primary and optional secondary store for dual-write. */
 function createDualWriter(primary: Store, secondary: Store | null): Store {
+	let sqliteErrorCount = 0;
+
 	return {
 		append(event: AuditEvent) {
 			primary.append(event);
 			if (secondary) {
 				try {
 					secondary.append(event);
-				} catch {
-					// SQLite write failure is non-fatal — JSONL is source of truth
+				} catch (err: unknown) {
+					sqliteErrorCount++;
+					const msg = err instanceof Error ? err.message : String(err);
+					process.stderr.write(
+						`[patchwork] SQLite write failed (count=${sqliteErrorCount}): ${msg}\n`,
+					);
 				}
 			}
 		},
@@ -53,8 +60,9 @@ export function handleClaudeCodeHook(input: ClaudeCodeHookInput): ClaudeCodeHook
 	let sqliteStore: SqliteStore | null = null;
 	try {
 		sqliteStore = new SqliteStore(getDbPath());
-	} catch {
-		// SQLite unavailable — proceed with JSONL only
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`[patchwork] SQLite store unavailable, using JSONL only: ${msg}\n`);
 	}
 	const store = createDualWriter(jsonlStore, sqliteStore);
 	const hookEvent = input.hook_event_name;
@@ -246,6 +254,29 @@ interface PartialEvent {
 	provenance?: AuditEvent["provenance"];
 }
 
+function buildIdempotencyKey(input: ClaudeCodeHookInput, action: string): string | undefined {
+	if (!input.session_id) return undefined;
+
+	const hookEvent = input.hook_event_name;
+
+	// Tool events: require tool_use_id for uniqueness — same session can have
+	// many PostToolUse events with the same action type.
+	if (hookEvent === "PostToolUse" || hookEvent === "PostToolUseFailure" || hookEvent === "PreToolUse") {
+		if (!input.tool_use_id) return undefined;
+		return [input.session_id, hookEvent, action, input.tool_use_id].join(":");
+	}
+
+	// SessionStart / SessionEnd: exactly one of each per session — safe to key.
+	if (hookEvent === "SessionStart" || hookEvent === "SessionEnd") {
+		return [input.session_id, hookEvent, action].join(":");
+	}
+
+	// Everything else (UserPromptSubmit, SubagentStart, SubagentStop, etc.)
+	// can occur multiple times per session with no stable unique signal.
+	// Omit key rather than create a colliding one.
+	return undefined;
+}
+
 function buildEvent(input: ClaudeCodeHookInput, partial: PartialEvent): AuditEvent {
 	const target: Target | undefined = partial.target
 		? { type: partial.target.type || "file", ...partial.target }
@@ -254,9 +285,11 @@ function buildEvent(input: ClaudeCodeHookInput, partial: PartialEvent): AuditEve
 	const risk = classifyRisk(partial.action, target);
 
 	return {
+		schema_version: CURRENT_SCHEMA_VERSION,
 		id: generateEventId(),
 		session_id: input.session_id || generateSessionId(),
 		timestamp: new Date().toISOString(),
+		idempotency_key: buildIdempotencyKey(input, partial.action),
 		agent: "claude-code",
 		action: partial.action,
 		status: partial.status || "completed",
