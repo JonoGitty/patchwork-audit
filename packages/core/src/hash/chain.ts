@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AuditEventSchema } from "../schema/event.js";
 
 /**
  * Canonical JSON serializer: deterministic key ordering for hash stability.
@@ -77,14 +78,18 @@ export function verifyChain(
 	let lastChainedHash: string | null = null;
 
 	for (let i = 0; i < events.length; i++) {
-		const event = events[i];
-
-		// Skip completely invalid entries (no id field = not a valid event)
-		if (typeof event !== "object" || event === null || !("id" in event)) {
+		const raw = events[i];
+		const parsed = AuditEventSchema.safeParse(raw);
+		if (!parsed.success) {
 			result.invalid_schema_events++;
+			result.is_valid = false;
+			if (result.first_failure_index === null) {
+				result.first_failure_index = i;
+			}
 			continue;
 		}
 
+		const event = raw as Record<string, unknown>;
 		const eventHash = event.event_hash as string | undefined;
 		const prevHash = event.prev_hash as string | null | undefined;
 

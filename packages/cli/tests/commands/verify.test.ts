@@ -1,13 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { computeEventHash, verifyChain } from "@patchwork/core";
+import { computeEventHash } from "@patchwork/core";
 
-/**
- * Tests for the verify command's underlying logic (verifyChain).
- * The CLI command itself is a thin wrapper that reads a file and calls verifyChain.
- */
+function makeLegacyEvent(id: string): Record<string, unknown> {
+	return {
+		id,
+		session_id: "ses_test",
+		timestamp: "2026-01-01T00:00:00.000Z",
+		agent: "claude-code",
+		action: "file_read",
+		status: "completed",
+		risk: { level: "low", flags: [] },
+	};
+}
 
 function makeChainedEvents(count: number): Record<string, unknown>[] {
 	const events: Record<string, unknown>[] = [];
@@ -28,7 +35,29 @@ function makeChainedEvents(count: number): Record<string, unknown>[] {
 	return events;
 }
 
-describe("verify command logic", () => {
+function writeJsonl(filePath: string, lines: string[]): void {
+	writeFileSync(filePath, lines.join("\n") + "\n", "utf-8");
+}
+
+async function runVerify(args: string[]): Promise<{ exitCode: number | undefined; output: string[] }> {
+	vi.resetModules();
+	const { verifyCommand } = await import("../../src/commands/verify.js");
+	const output: string[] = [];
+	const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+		output.push(a.map(String).join(" "));
+	});
+	const previousExitCode = process.exitCode;
+	process.exitCode = undefined;
+	try {
+		verifyCommand.parse(["node", "verify", ...args], { from: "node" });
+		return { exitCode: process.exitCode, output };
+	} finally {
+		process.exitCode = previousExitCode;
+		logSpy.mockRestore();
+	}
+}
+
+describe("verify command", () => {
 	let tmpDir: string;
 
 	beforeEach(() => {
@@ -39,52 +68,85 @@ describe("verify command logic", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("passes for a valid chain written to JSONL", () => {
+	it("passes for a valid chain", async () => {
 		const events = makeChainedEvents(5);
 		const filePath = join(tmpDir, "events.jsonl");
-		writeFileSync(filePath, events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
 
-		// Simulate what the CLI does: read + parse + verify
-		const parsed = events; // already parsed
-		const result = verifyChain(parsed);
-
-		expect(result.is_valid).toBe(true);
-		expect(result.chained_events).toBe(5);
-		expect(result.legacy_events).toBe(0);
-		expect(result.hash_mismatch_count).toBe(0);
-		expect(result.prev_link_mismatch_count).toBe(0);
+		const { exitCode } = await runVerify(["--file", filePath, "--no-seal-check"]);
+		expect(exitCode).toBeUndefined();
 	});
 
-	it("detects tampered event in chain", () => {
-		const events = makeChainedEvents(3);
-		// Tamper with middle event
-		events[1].action = "command_execute";
+	it("exits non-zero when JSON parse errors are present", async () => {
+		const events = makeChainedEvents(1);
+		const filePath = join(tmpDir, "parse-error.jsonl");
+		writeJsonl(filePath, [JSON.stringify(events[0]), "NOT_VALID_JSON"]);
 
-		const result = verifyChain(events);
-		expect(result.is_valid).toBe(false);
-		expect(result.hash_mismatch_count).toBeGreaterThanOrEqual(1);
-		expect(result.first_failure_index).toBe(1);
+		const { exitCode } = await runVerify(["--file", filePath, "--no-seal-check"]);
+		expect(exitCode).toBe(1);
 	});
 
-	it("strict mode flags legacy events", () => {
-		const legacy = { id: "evt_old", action: "file_read" };
-		const chained: Record<string, unknown> = {
-			id: "evt_new",
-			action: "file_write",
-			prev_hash: null,
-		};
-		chained.event_hash = computeEventHash(chained);
+	it("exits non-zero when schema-invalid events are present", async () => {
+		const events = makeChainedEvents(1);
+		const filePath = join(tmpDir, "schema-invalid.jsonl");
+		writeJsonl(filePath, [JSON.stringify(events[0]), JSON.stringify({ id: "evt_bad" })]);
 
-		const result = verifyChain([legacy, chained]);
-		// Chain is valid but legacy_events > 0
-		expect(result.is_valid).toBe(true);
-		expect(result.legacy_events).toBe(1);
-		// In strict mode, the CLI would exit 1 because legacy_events > 0
+		const { exitCode } = await runVerify(["--file", filePath, "--no-seal-check"]);
+		expect(exitCode).toBe(1);
 	});
 
-	it("handles empty event list", () => {
-		const result = verifyChain([]);
-		expect(result.is_valid).toBe(true);
-		expect(result.total_events).toBe(0);
+	it("allows invalid/corrupt events when --allow-invalid is set", async () => {
+		const events = makeChainedEvents(1);
+		const filePath = join(tmpDir, "allow-invalid.jsonl");
+		writeJsonl(filePath, [
+			JSON.stringify(events[0]),
+			JSON.stringify({ id: "evt_bad" }),
+			"NOT_VALID_JSON",
+		]);
+
+		const { exitCode } = await runVerify(["--file", filePath, "--allow-invalid", "--no-seal-check"]);
+		expect(exitCode).toBeUndefined();
+	});
+
+	it("strict mode fails when legacy events are present", async () => {
+		const legacy = makeLegacyEvent("evt_legacy");
+		const chained = makeChainedEvents(1)[0];
+		const filePath = join(tmpDir, "strict.jsonl");
+		writeJsonl(filePath, [JSON.stringify(legacy), JSON.stringify(chained)]);
+
+		const { exitCode: looseExitCode } = await runVerify(["--file", filePath, "--no-seal-check"]);
+		expect(looseExitCode).toBeUndefined();
+
+		const { exitCode: strictExitCode } = await runVerify(["--file", filePath, "--strict", "--no-seal-check"]);
+		expect(strictExitCode).toBe(1);
+	});
+
+	it("--json output includes seal status fields", async () => {
+		const events = makeChainedEvents(2);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { output } = await runVerify(["--file", filePath, "--json", "--no-seal-check"]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.seal).toBeDefined();
+		expect(parsed.seal.seal_checked).toBe(false);
+		expect(parsed.seal.seal_failure_reason).toBeNull();
+	});
+
+	it("--json with seal check includes all structured fields", async () => {
+		const events = makeChainedEvents(2);
+		const filePath = join(tmpDir, "events.jsonl");
+		const sealPath = join(tmpDir, "nonexistent-seals.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { output } = await runVerify(["--file", filePath, "--json", "--seal-file", sealPath]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.seal.seal_checked).toBe(true);
+		expect(parsed.seal.seal_present).toBe(false);
+		expect(parsed.seal.seal_valid).toBe(false);
+		expect(parsed.seal.seal_tip_match).toBe(false);
+		expect(parsed.seal.seal_age_seconds).toBeNull();
+		// No failure reason since --require-seal not set
+		expect(parsed.seal.seal_failure_reason).toBeNull();
 	});
 });

@@ -194,11 +194,26 @@ describe("JsonlStore", () => {
 			appendFileSync(filePath, "NOT_VALID_JSON\n", "utf-8");
 			appendFileSync(filePath, '{"id":"x"}\n', "utf-8"); // valid JSON but invalid schema
 
-			s.append(makeEvent({ action: "file_write" }));
+			const events = s.readAll();
+			expect(events).toHaveLength(1); // only the valid event
+			expect(s.lastReadErrors).toBe(2); // 1 parse error + 1 schema error
+		});
+
+		it("rejects append when existing log contains corrupt lines", () => {
+			const filePath = join(tmpDir, "events-corrupt.jsonl");
+			const s = new JsonlStore(filePath);
+			s.append(makeEvent({ id: "evt_valid_1", action: "file_read" }));
+
+			appendFileSync(filePath, "NOT_VALID_JSON\n", "utf-8");
+			appendFileSync(filePath, '{"id":"x"}\n', "utf-8");
+
+			expect(() =>
+				s.append(makeEvent({ id: "evt_valid_2", action: "file_write" })),
+			).toThrow(/Refusing to append to corrupted audit log/);
 
 			const events = s.readAll();
-			expect(events).toHaveLength(2); // only the 2 valid events
-			expect(s.lastReadErrors).toBe(2); // 1 parse error + 1 schema error
+			expect(events).toHaveLength(1);
+			expect(s.lastReadErrors).toBe(2);
 		});
 
 		it("counts errors accurately for empty file", () => {

@@ -100,8 +100,14 @@ export class JsonlStore implements Store {
 		const lockPath = this.filePath + ".lock";
 
 		this.withLock(lockPath, () => {
+			const { events: existing, errors } = this.parseFile();
+			if (errors > 0) {
+				throw new Error(
+					`Refusing to append to corrupted audit log: ${errors} invalid/corrupt line(s) detected. Run "patchwork verify" to inspect.`,
+				);
+			}
+
 			// Dedup by idempotency_key INSIDE the lock to prevent TOCTOU races
-			const existing = this.readAllRaw();
 			if (event.idempotency_key) {
 				if (existing.some((e) => e.idempotency_key === event.idempotency_key)) {
 					return; // Already recorded — skip silently
@@ -177,25 +183,6 @@ export class JsonlStore implements Store {
 
 	get path(): string {
 		return this.filePath;
-	}
-
-	/** Read raw parsed objects without validation (used for dedup checks). */
-	private readAllRaw(): AuditEvent[] {
-		if (!existsSync(this.filePath)) {
-			return [];
-		}
-		const content = readFileSync(this.filePath, "utf-8");
-		return content
-			.split("\n")
-			.filter((line) => line.trim().length > 0)
-			.map((line) => {
-				try {
-					return JSON.parse(line) as AuditEvent;
-				} catch {
-					return null;
-				}
-			})
-			.filter((e): e is AuditEvent => e !== null);
 	}
 
 	/** Get the event_hash of the last chained event, or null if none. */

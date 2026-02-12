@@ -40,6 +40,14 @@ export {
 	verifyChain,
 	type ChainVerification,
 } from "./hash/chain.js";
+export {
+	computeSealPayload,
+	signSeal,
+	verifySeal,
+	ensureSealKey,
+	readSealKey,
+	type SealRecord,
+} from "./hash/seal.js";
 
 // ID
 export { generateEventId, generateSessionId } from "./id/ulid.js";

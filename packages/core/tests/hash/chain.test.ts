@@ -23,6 +23,10 @@ function makeEvent(overrides: Partial<AuditEvent> = {}): AuditEvent {
 	};
 }
 
+function makeRawEvent(overrides: Partial<AuditEvent> = {}): Record<string, unknown> {
+	return makeEvent(overrides) as Record<string, unknown>;
+}
+
 describe("canonicalize", () => {
 	it("sorts object keys deterministically", () => {
 		const a = canonicalize({ z: 1, a: 2, m: 3 });
@@ -216,11 +220,11 @@ describe("verifyChain", () => {
 	});
 
 	it("detects hash tampering (field modification)", () => {
-		const e1: Record<string, unknown> = {
+		const e1 = makeRawEvent({
 			id: "evt_1",
 			action: "file_read",
 			prev_hash: null,
-		};
+		});
 		e1.event_hash = computeEventHash(e1);
 
 		// Tamper with the action after hashing
@@ -233,18 +237,18 @@ describe("verifyChain", () => {
 	});
 
 	it("detects broken prev_hash link", () => {
-		const e1: Record<string, unknown> = {
+		const e1 = makeRawEvent({
 			id: "evt_1",
 			action: "file_read",
 			prev_hash: null,
-		};
+		});
 		e1.event_hash = computeEventHash(e1);
 
-		const e2: Record<string, unknown> = {
+		const e2 = makeRawEvent({
 			id: "evt_2",
 			action: "file_write",
 			prev_hash: "sha256:wrong_hash", // broken link
-		};
+		});
 		e2.event_hash = computeEventHash(e2);
 
 		const result = verifyChain([e1, e2]);
@@ -254,7 +258,7 @@ describe("verifyChain", () => {
 	});
 
 	it("counts legacy events (no event_hash)", () => {
-		const legacy = { id: "evt_legacy", action: "file_read" };
+		const legacy = makeRawEvent({ id: "evt_legacy", action: "file_read" });
 		const result = verifyChain([legacy]);
 		expect(result.is_valid).toBe(true);
 		expect(result.legacy_events).toBe(1);
@@ -262,12 +266,12 @@ describe("verifyChain", () => {
 	});
 
 	it("handles mixed legacy and chained events", () => {
-		const legacy = { id: "evt_legacy", action: "file_read" };
-		const chained: Record<string, unknown> = {
+		const legacy = makeRawEvent({ id: "evt_legacy", action: "file_read" });
+		const chained = makeRawEvent({
 			id: "evt_1",
 			action: "file_write",
 			prev_hash: null,
-		};
+		});
 		chained.event_hash = computeEventHash(chained);
 
 		const result = verifyChain([legacy, chained]);
@@ -280,11 +284,11 @@ describe("verifyChain", () => {
 		const events: Record<string, unknown>[] = [];
 		// Build 3 valid events
 		for (let i = 0; i < 3; i++) {
-			const e: Record<string, unknown> = {
+			const e = makeRawEvent({
 				id: `evt_${i}`,
 				action: "file_read",
 				prev_hash: i === 0 ? null : events[i - 1].event_hash,
-			};
+			});
 			e.event_hash = computeEventHash(e);
 			events.push(e);
 		}
@@ -294,6 +298,14 @@ describe("verifyChain", () => {
 		const result = verifyChain(events);
 		expect(result.is_valid).toBe(false);
 		expect(result.first_failure_index).toBe(2);
+	});
+
+	it("fails closed when an event is schema-invalid", () => {
+		const invalid = { id: "evt_bad" } as Record<string, unknown>;
+		const result = verifyChain([invalid]);
+		expect(result.is_valid).toBe(false);
+		expect(result.invalid_schema_events).toBe(1);
+		expect(result.first_failure_index).toBe(0);
 	});
 
 	it("integrates with JsonlStore end-to-end", () => {

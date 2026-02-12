@@ -14,6 +14,7 @@ import { searchCommand } from "./commands/search.js";
 import { diffCommand } from "./commands/diff.js";
 import { statsCommand } from "./commands/stats.js";
 import { verifyCommand } from "./commands/verify.js";
+import { sealCommand } from "./commands/seal.js";
 
 const program = new Command();
 
@@ -37,5 +38,6 @@ program.addCommand(searchCommand);
 program.addCommand(diffCommand);
 program.addCommand(statsCommand);
 program.addCommand(verifyCommand);
+program.addCommand(sealCommand);
 
 program.parse();
