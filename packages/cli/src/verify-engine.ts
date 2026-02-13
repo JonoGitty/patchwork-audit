@@ -16,6 +16,7 @@ import {
 } from "@patchwork/core";
 import { WitnessRecordSchema, type WitnessRecord } from "@patchwork/core";
 import { EVENTS_PATH, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH, WITNESSES_PATH, ATTESTATION_PATH } from "./store.js";
+import { checkRemoteWitnesses, emptyRemoteWitnessResult, type RemoteWitnessCheckResult } from "./remote-witness.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -81,6 +82,12 @@ export interface VerifyOptions {
 	requireSignedAttestation?: boolean;
 	maxAttestationAgeSeconds?: string;
 	strictAttestationFile?: boolean;
+	requireAttestationBinding?: boolean;
+	requireRemoteWitnessProof?: boolean;
+	remoteWitnessQuorum?: string;
+	remoteWitnessTimeoutMs?: string;
+	noRemoteWitnessCheck?: boolean;
+	tokenEnv?: string;
 }
 
 /** Full verification result returned by runVerification(). */
@@ -99,6 +106,7 @@ export interface VerifyResult {
 	};
 	seal: SealCheckResult;
 	witness: WitnessCheckResult;
+	remote_witness: RemoteWitnessCheckResult;
 	attestation: AttestationCheckResult;
 	input_paths: {
 		events: string;
@@ -128,7 +136,7 @@ export function parsePositiveIntAge(raw: unknown): number | null | "invalid" {
  * Run the full verification pipeline: chain + seal + witness.
  * Returns a structured result that both `verify` and `attest` can consume.
  */
-export function runVerification(opts: VerifyOptions): VerifyResult {
+export async function runVerification(opts: VerifyOptions): Promise<VerifyResult> {
 	const eventsPath = opts.file || EVENTS_PATH;
 	const sealsPath = opts.sealFile || SEALS_PATH;
 	const witnessPath = opts.witnessFile || WITNESSES_PATH;
@@ -202,6 +210,16 @@ export function runVerification(opts: VerifyOptions): VerifyResult {
 		isPass = false;
 	}
 
+	// Remote witness proof check
+	let remoteWitnessCheck: RemoteWitnessCheckResult = emptyRemoteWitnessResult();
+	if (opts.noRemoteWitnessCheck !== true && opts.requireRemoteWitnessProof) {
+		const witnessPathVal = opts.witnessFile || WITNESSES_PATH;
+		remoteWitnessCheck = await runRemoteWitnessCheck(opts, witnessPathVal, currentTip);
+		if (remoteWitnessCheck.remote_witness_checked && remoteWitnessCheck.remote_witness_failure_reason !== null) {
+			isPass = false;
+		}
+	}
+
 	// Attestation check — pass current state for binding comparison
 	const currentState: CurrentVerifyState = {
 		chain_tip_hash: currentTip,
@@ -231,6 +249,7 @@ export function runVerification(opts: VerifyOptions): VerifyResult {
 		},
 		seal: sealCheck,
 		witness: witnessCheck,
+		remote_witness: remoteWitnessCheck,
 		attestation: attestationCheck,
 		input_paths: basePaths,
 	};
@@ -277,6 +296,7 @@ function emptyResult(
 			witness_corrupt_lines: 0,
 			witness_failure_reason: null,
 		},
+		remote_witness: emptyRemoteWitnessResult(),
 		attestation: {
 			attestation_checked: false,
 			attestation_present: false,
@@ -684,6 +704,67 @@ function runWitnessCheck(
 }
 
 // ---------------------------------------------------------------------------
+// Remote witness proof check
+// ---------------------------------------------------------------------------
+
+async function runRemoteWitnessCheck(
+	opts: VerifyOptions,
+	witnessPathVal: string,
+	currentTip: string | null,
+): Promise<RemoteWitnessCheckResult> {
+	const quorum = opts.remoteWitnessQuorum !== undefined ? Number(opts.remoteWitnessQuorum) : 1;
+	const timeoutMs = opts.remoteWitnessTimeoutMs !== undefined ? Number(opts.remoteWitnessTimeoutMs) : 5000;
+
+	// Read and filter witness records
+	if (!existsSync(witnessPathVal)) {
+		return {
+			remote_witness_checked: true,
+			remote_witness_proof_results: [],
+			remote_witness_verified_count: 0,
+			remote_witness_quorum_met: false,
+			remote_witness_failure_reason: "No witness file found for remote verification",
+		};
+	}
+
+	const content = readFileSync(witnessPathVal, "utf-8");
+	const lines = content.split("\n").filter((l) => l.trim().length > 0);
+	const validRecords: WitnessRecord[] = [];
+
+	for (const line of lines) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		const result = WitnessRecordSchema.safeParse(parsed);
+		if (result.success) {
+			validRecords.push(result.data);
+		}
+	}
+
+	// Filter to records matching current tip with witness_url and anchor_id
+	const candidates = validRecords.filter(
+		(r) => r.witness_url && r.anchor_id && (!currentTip || r.tip_hash === currentTip),
+	);
+
+	let bearerToken: string | undefined;
+	if (opts.tokenEnv) {
+		bearerToken = process.env[opts.tokenEnv];
+	}
+
+	return checkRemoteWitnesses({
+		witnessRecords: candidates.map((r) => ({
+			witness_url: r.witness_url!,
+			anchor_id: r.anchor_id!,
+		})),
+		quorum,
+		timeoutMs,
+		bearerToken,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Attestation check
 // ---------------------------------------------------------------------------
 
@@ -720,9 +801,10 @@ function runAttestationCheck(
 	const requireAttestation = opts.requireAttestation === true;
 	const requireSigned = opts.requireSignedAttestation === true;
 	const strictFile = opts.strictAttestationFile === true;
+	const requireBinding = opts.requireAttestationBinding === true;
 
 	// If no attestation-related flags are set, skip the check entirely
-	if (!requireAttestation && !requireSigned && maxAge === null && !strictFile && !opts.attestationFile) {
+	if (!requireAttestation && !requireSigned && maxAge === null && !strictFile && !requireBinding && !opts.attestationFile) {
 		return emptyAttestationResult();
 	}
 
@@ -932,8 +1014,29 @@ function runAttestationCheck(
 	// If the attestation includes binding fields (chain_tip_hash, etc.), compare
 	// them against the current verification state. This prevents replay/stale
 	// attestations from being accepted for a different audit state.
-	// Attestations without binding fields (legacy) pass vacuously.
+	// Attestations without binding fields (legacy) pass vacuously — unless
+	// --require-attestation-binding or --strict-attestation-file is set.
 	const hasBindingFields = "chain_tip_hash" in artifact;
+
+	// --require-attestation-binding / --strict-attestation-file: binding fields must exist
+	if ((requireBinding || strictFile) && !hasBindingFields) {
+		const reason = requireBinding
+			? "Attestation missing binding fields (required by --require-attestation-binding)"
+			: "Attestation missing binding fields (required by --strict-attestation-file)";
+		return {
+			attestation_checked: true,
+			attestation_present: true,
+			attestation_valid: true,
+			attestation_signed: isSigned,
+			attestation_signature_valid: isSigned ? sigValid : false,
+			attestation_hash_valid: true,
+			attestation_age_seconds: ageSeconds,
+			attestation_failure_reason: reason,
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: "No binding fields present",
+		};
+	}
+
 	let matchesState = true;
 	let matchFailureReason: string | null = null;
 

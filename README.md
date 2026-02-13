@@ -171,7 +171,7 @@ patchwork verify \
 Attestation verification checks (when any attestation flag is set):
 - **Integrity** (always enforced): recomputes canonical payload and verifies `payload_hash` matches. Hash mismatch always fails — no flag needed for tamper detection.
 - **Signature** (always enforced when present): if the attestation carries a signature (not `"unsigned"`), it must verify. Invalid signatures always fail.
-- **State binding** (always enforced when binding fields present): compares `chain_tip_hash`, `chain_chained_events`, `seal_tip_hash`, and `witness_latest_matching_tip_hash` against the current verification state. Mismatches fail with specific field details. Seal/witness fields are only compared when those checks are active in the current run. Legacy attestations without binding fields pass vacuously.
+- **State binding** (always enforced when binding fields present): compares `chain_tip_hash`, `chain_chained_events`, `seal_tip_hash`, and `witness_latest_matching_tip_hash` against the current verification state. Mismatches fail with specific field details. Seal/witness fields are only compared when those checks are active in the current run. Legacy attestations without binding fields pass vacuously unless `--require-attestation-binding` or `--strict-attestation-file` is set.
 - **Schema**: all required fields present (`schema_version`, `generated_at`, `tool_version`, `pass`, `payload_hash`, `signature`)
 - **Freshness**: `--max-attestation-age-seconds` enforces recency of `generated_at`
 
@@ -181,8 +181,107 @@ Attestation verification checks (when any attestation flag is set):
 | `--require-attestation` | Fail if attestation is missing, tampered (hash mismatch), or has invalid signature |
 | `--require-signed-attestation` | Fail if attestation is unsigned or signature is invalid |
 | `--max-attestation-age-seconds <n>` | Fail if attestation is older than n seconds |
-| `--strict-attestation-file` | Additionally require that the attestation's own `pass` field is `true` |
+| `--strict-attestation-file` | Additionally require that the attestation's own `pass` field is `true` and binding fields are present |
+| `--require-attestation-binding` | Fail if attestation lacks binding fields (prevents legacy vacuous pass) |
 | `--no-attestation-check` | Skip attestation verification entirely |
+| `--require-remote-witness-proof` | Fail if remote witness proof quorum is not met |
+| `--remote-witness-quorum <n>` | Minimum remote witness proofs required (default: 1) |
+| `--remote-witness-timeout-ms <n>` | HTTP timeout per remote witness endpoint in ms (default: 5000) |
+| `--no-remote-witness-check` | Skip remote witness proof checks |
+| `--token-env <name>` | Environment variable name for bearer token (remote witness) |
+
+## Remote Witness Verification
+
+`patchwork witness verify` checks that locally-stored witness records actually exist at their remote endpoints. This prevents accepting fabricated witness records.
+
+```bash
+# Verify all witness records against their remote endpoints
+patchwork witness verify
+patchwork witness verify --quorum 2 --json
+
+# Verify only witnesses matching a specific chain tip
+patchwork witness verify --tip-hash <hash>
+
+# Use as part of full CI enforcement
+patchwork verify \
+  --require-seal \
+  --require-witness \
+  --require-remote-witness-proof \
+  --require-signed-attestation \
+  --require-attestation-binding \
+  --attestation-file audit-attestation.json \
+  --max-seal-age-seconds 3600 \
+  --max-witness-age-seconds 3600 \
+  --max-attestation-age-seconds 3600
+```
+
+For each witness record with a `witness_url` and `anchor_id`, the tool performs `GET {witness_url}/anchors/{anchor_id}` and confirms the endpoint returns a 200 response with a matching `anchor_id` in the body.
+
+## Enforcement Profiles
+
+Profiles bundle enforcement flags for `patchwork verify` and `patchwork attest`, so teams don't need to pass 8+ flags on every CI invocation.
+
+| Profile | Behavior |
+|---|---|
+| `baseline` (default) | No enforcement — current behavior |
+| `strict` | Require seal, witness, remote witness proof, signed attestation, attestation binding, strict attestation file |
+
+```bash
+# Use strict profile (all enforcement on)
+patchwork verify --profile strict
+
+# Profile + explicit override
+patchwork verify --profile strict --no-seal-check
+
+# Attest with strict profile
+patchwork attest --profile strict --out audit-attestation.json
+```
+
+### Config-Driven Defaults
+
+Set defaults in a YAML config file instead of passing flags. Project-level config takes precedence over user-level.
+
+```yaml
+# ~/.patchwork/config.yml (or .patchwork/config.yml in project root)
+verify:
+  profile: strict
+  max_seal_age_seconds: 3600
+  max_witness_age_seconds: 3600
+  max_attestation_age_seconds: 3600
+  remote_witness_quorum: 2
+  token_env: WITNESS_TOKEN
+```
+
+With a config file in place, `patchwork verify` and `patchwork attest` use those defaults automatically. CLI flags still override config values.
+
+Resolution order: CLI flags > config file > profile defaults > built-in defaults.
+
+```bash
+# CI — config-driven, no flags needed
+patchwork verify
+patchwork attest --out audit-attestation.json
+
+# CI — strict profile with age thresholds from config
+patchwork verify --profile strict
+```
+
+### Config Validation
+
+Config files are schema-validated using Zod strict schemas. Unknown keys and type errors are detected and reported with full paths (e.g., `verify.unknown_key: Unrecognized key`).
+
+- **Strict profile**: invalid config causes immediate failure (exit 1) before verification runs.
+- **Baseline profile**: invalid config produces a warning on stderr and continues with the valid keys that could be extracted.
+
+Use `--show-effective-policy` to inspect the resolved configuration without running verification:
+
+```bash
+# See what the resolved policy looks like (text)
+patchwork verify --show-effective-policy
+
+# Machine-readable output
+patchwork verify --show-effective-policy --json
+patchwork attest --show-effective-policy --json
+```
 
 ## Policy Engine
 

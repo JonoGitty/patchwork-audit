@@ -85,7 +85,7 @@ async function runVerify(args: string[]): Promise<{ exitCode: number | undefined
 	const previousExitCode = process.exitCode;
 	process.exitCode = undefined;
 	try {
-		verifyCommand.parse(["node", "verify", ...args], { from: "node" });
+		await verifyCommand.parseAsync(["node", "verify", ...args], { from: "node" });
 		return { exitCode: process.exitCode, output };
 	} finally {
 		process.exitCode = previousExitCode;

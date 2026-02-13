@@ -57,7 +57,7 @@ async function runVerify(args: string[]): Promise<{ exitCode: number | undefined
 	const previousExitCode = process.exitCode;
 	process.exitCode = undefined;
 	try {
-		verifyCommand.parse(["node", "verify", ...args], { from: "node" });
+		await verifyCommand.parseAsync(["node", "verify", ...args], { from: "node" });
 		return { exitCode: process.exitCode, output };
 	} finally {
 		process.exitCode = previousExitCode;
@@ -1206,5 +1206,668 @@ describe("verify attestation state binding", () => {
 		expect(parsed.attestation.attestation_valid).toBe(true);
 		expect(parsed.attestation.attestation_matches_current_state).toBe(true);
 		expect(parsed.attestation.attestation_failure_reason).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// L-series: binding enforcement + remote witness
+// ---------------------------------------------------------------------------
+
+describe("verify --require-attestation-binding", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-verify-binding-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("L1: fails when legacy attestation has no binding fields", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const keyringDir = join(tmpDir, "keys", "seal");
+		const { keyId, key } = ensureKeyring(keyringDir);
+
+		// Build legacy attestation WITHOUT binding fields
+		const legacyArtifact: Record<string, unknown> = {
+			schema_version: 1,
+			generated_at: new Date().toISOString(),
+			tool_version: "0.1.0",
+			pass: true,
+		};
+		const payload = buildAttestationPayload(legacyArtifact);
+		legacyArtifact.payload_hash = hashAttestationPayload(payload);
+		legacyArtifact.signature = signAttestation(payload, key);
+		legacyArtifact.key_id = keyId;
+
+		const attestationPath = join(tmpDir, "attestation.json");
+		writeFileSync(attestationPath, JSON.stringify(legacyArtifact, null, 2) + "\n");
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--require-attestation-binding",
+			"--attestation-file", attestationPath,
+			"--keyring-dir", keyringDir,
+			"--json",
+		]);
+		expect(exitCode).toBe(1);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.attestation.attestation_failure_reason).toContain("missing binding fields");
+		expect(parsed.attestation.attestation_matches_current_state).toBe(false);
+	});
+
+	it("L2: passes when binding fields present and match", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+		const { attestationPath, keyringDir } = createTestAttestation(tmpDir, events);
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--seal-file", join(tmpDir, "seals.jsonl"),
+			"--require-attestation-binding",
+			"--require-signed-attestation",
+			"--attestation-file", attestationPath,
+			"--keyring-dir", keyringDir,
+			"--json",
+		]);
+		expect(exitCode).toBeUndefined();
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.attestation.attestation_valid).toBe(true);
+		expect(parsed.attestation.attestation_matches_current_state).toBe(true);
+	});
+
+	it("L3: --strict-attestation-file implies binding required (legacy attestation fails)", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const keyringDir = join(tmpDir, "keys", "seal");
+		const { keyId, key } = ensureKeyring(keyringDir);
+
+		// Legacy attestation with pass=true but no binding fields
+		const legacyArtifact: Record<string, unknown> = {
+			schema_version: 1,
+			generated_at: new Date().toISOString(),
+			tool_version: "0.1.0",
+			pass: true,
+		};
+		const payload = buildAttestationPayload(legacyArtifact);
+		legacyArtifact.payload_hash = hashAttestationPayload(payload);
+		legacyArtifact.signature = signAttestation(payload, key);
+		legacyArtifact.key_id = keyId;
+
+		const attestationPath = join(tmpDir, "attestation.json");
+		writeFileSync(attestationPath, JSON.stringify(legacyArtifact, null, 2) + "\n");
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--strict-attestation-file",
+			"--attestation-file", attestationPath,
+			"--keyring-dir", keyringDir,
+			"--json",
+		]);
+		expect(exitCode).toBe(1);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.attestation.attestation_failure_reason).toContain("missing binding fields");
+	});
+});
+
+describe("verify --require-remote-witness-proof", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-verify-remote-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function writeWitnessFile(witnessPath: string, tipHash: string): void {
+		const record = {
+			schema_version: 1,
+			witnessed_at: new Date().toISOString(),
+			tip_hash: tipHash,
+			chained_events: 3,
+			seal_signature: "hmac-sha256:fakesig",
+			witness_url: "https://witness.example.com",
+			anchor_id: "anchor_abc",
+		};
+		writeFileSync(witnessPath, JSON.stringify(record) + "\n", "utf-8");
+	}
+
+	it("L4: passes when remote witness proof quorum met", async () => {
+		vi.resetModules();
+
+		// Mock fetchJson before importing
+		vi.doMock("../../src/http-client.js", () => ({
+			fetchJson: vi.fn().mockResolvedValue({
+				status: 200,
+				body: { anchor_id: "anchor_abc", tip_hash: "test" },
+			}),
+		}));
+
+		const { verifyCommand } = await import("../../src/commands/verify.js");
+
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const tipHash = events[events.length - 1].event_hash as string;
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		writeWitnessFile(witnessPath, tipHash);
+
+		const output: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		const prev = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await verifyCommand.parseAsync([
+				"node", "verify",
+				"--file", filePath,
+				"--no-seal-check",
+				"--witness-file", witnessPath,
+				"--require-remote-witness-proof",
+				"--json",
+			], { from: "node" });
+			const exitCode = process.exitCode;
+			expect(exitCode).toBeUndefined();
+			const parsed = JSON.parse(output.join(""));
+			expect(parsed.remote_witness.remote_witness_checked).toBe(true);
+			expect(parsed.remote_witness.remote_witness_quorum_met).toBe(true);
+		} finally {
+			process.exitCode = prev;
+			logSpy.mockRestore();
+		}
+	});
+
+	it("L5: fails when remote witness proof returns 404", async () => {
+		vi.resetModules();
+
+		vi.doMock("../../src/http-client.js", () => ({
+			fetchJson: vi.fn().mockResolvedValue({
+				status: 404,
+				body: { error: "not found" },
+			}),
+		}));
+
+		const { verifyCommand } = await import("../../src/commands/verify.js");
+
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const tipHash = events[events.length - 1].event_hash as string;
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		writeWitnessFile(witnessPath, tipHash);
+
+		const output: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		const prev = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await verifyCommand.parseAsync([
+				"node", "verify",
+				"--file", filePath,
+				"--no-seal-check",
+				"--witness-file", witnessPath,
+				"--require-remote-witness-proof",
+				"--json",
+			], { from: "node" });
+			expect(process.exitCode).toBe(1);
+			const parsed = JSON.parse(output.join(""));
+			expect(parsed.remote_witness.remote_witness_quorum_met).toBe(false);
+			expect(parsed.remote_witness.remote_witness_failure_reason).toContain("quorum not met");
+		} finally {
+			process.exitCode = prev;
+			logSpy.mockRestore();
+		}
+	});
+
+	it("L6: --no-remote-witness-check skips remote checks", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--no-remote-witness-check",
+			"--json",
+		]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.remote_witness.remote_witness_checked).toBe(false);
+	});
+
+	it("L7: remote witness quorum=2 with one failure returns overall fail", async () => {
+		vi.resetModules();
+
+		const mockFetchJson = vi.fn()
+			.mockResolvedValueOnce({ status: 200, body: { anchor_id: "a1" } })
+			.mockResolvedValueOnce({ status: 500, body: { error: "server error" } });
+
+		vi.doMock("../../src/http-client.js", () => ({
+			fetchJson: mockFetchJson,
+		}));
+
+		const { verifyCommand } = await import("../../src/commands/verify.js");
+
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const tipHash = events[events.length - 1].event_hash as string;
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		// Write 2 witness records
+		const records = [
+			{ schema_version: 1, witnessed_at: new Date().toISOString(), tip_hash: tipHash, chained_events: 3, seal_signature: "hmac-sha256:s1", witness_url: "https://w1.example.com", anchor_id: "a1" },
+			{ schema_version: 1, witnessed_at: new Date().toISOString(), tip_hash: tipHash, chained_events: 3, seal_signature: "hmac-sha256:s2", witness_url: "https://w2.example.com", anchor_id: "a2" },
+		];
+		writeFileSync(witnessPath, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf-8");
+
+		const output: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		const prev = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await verifyCommand.parseAsync([
+				"node", "verify",
+				"--file", filePath,
+				"--no-seal-check",
+				"--witness-file", witnessPath,
+				"--require-remote-witness-proof",
+				"--remote-witness-quorum", "2",
+				"--json",
+			], { from: "node" });
+			expect(process.exitCode).toBe(1);
+			const parsed = JSON.parse(output.join(""));
+			expect(parsed.remote_witness.remote_witness_verified_count).toBe(1);
+			expect(parsed.remote_witness.remote_witness_quorum_met).toBe(false);
+		} finally {
+			process.exitCode = prev;
+			logSpy.mockRestore();
+		}
+	});
+
+	it("L8: JSON output includes remote_witness section", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--json",
+		]);
+		const parsed = JSON.parse(output.join(""));
+		expect("remote_witness" in parsed).toBe(true);
+		expect(parsed.remote_witness.remote_witness_checked).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// N-series: policy profile + config tests
+// ---------------------------------------------------------------------------
+
+describe("verify --profile", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-verify-profile-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("N1: --profile strict enforces require-seal (exits 1 when no seal)", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--profile", "strict",
+			"--no-witness-check",
+			"--no-remote-witness-check",
+			"--no-attestation-check",
+			"--seal-file", join(tmpDir, "nonexistent.jsonl"),
+			"--json",
+		]);
+		expect(exitCode).toBe(1);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.seal.seal_failure_reason).toContain("No seal file found");
+	});
+
+	it("N2: --no-seal-check overrides profile strict", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--profile", "strict",
+			"--no-seal-check",
+			"--no-witness-check",
+			"--no-remote-witness-check",
+			"--no-attestation-check",
+			"--json",
+		]);
+		expect(exitCode).toBeUndefined();
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.seal.seal_checked).toBe(false);
+	});
+
+	it("N3: JSON output includes resolved_policy block", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--json",
+		]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.resolved_policy).toBeDefined();
+		expect(parsed.resolved_policy.profile).toBe("baseline");
+		expect(parsed.resolved_policy.config_source).toBeDefined();
+		expect(parsed.resolved_policy.effective).toBeDefined();
+		expect(typeof parsed.resolved_policy.effective.requireSeal).toBe("boolean");
+	});
+
+	it("N3b: JSON resolved_policy reflects strict profile", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { output } = await runVerify([
+			"--file", filePath,
+			"--profile", "strict",
+			"--no-seal-check",
+			"--no-witness-check",
+			"--no-remote-witness-check",
+			"--no-attestation-check",
+			"--json",
+		]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.resolved_policy.profile).toBe("strict");
+		// --no-seal-check overrides the profile, so effective requireSeal is false
+		expect(parsed.resolved_policy.effective.requireSeal).toBe(false);
+	});
+
+	it("N4: text output includes Policy line", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+		]);
+		const joined = output.join("\n");
+		expect(joined).toContain("Policy:");
+		expect(joined).toContain("baseline");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// P-series: config validation enforcement in verify
+// ---------------------------------------------------------------------------
+
+describe("verify config validation", () => {
+	let tmpDir: string;
+	let cwdSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-verify-cfgval-"));
+	});
+
+	afterEach(() => {
+		cwdSpy?.mockRestore();
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function writeConfig(content: string): void {
+		const configDir = join(tmpDir, ".patchwork");
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(join(configDir, "config.yml"), content);
+	}
+
+	async function runVerifyWithCwd(args: string[]): Promise<{ exitCode: number | undefined; output: string[]; stderr: string[] }> {
+		cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(tmpDir);
+		vi.resetModules();
+		const { verifyCommand } = await import("../../src/commands/verify.js");
+		const output: string[] = [];
+		const stderr: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		const errSpy = vi.spyOn(console, "error").mockImplementation((...a) => {
+			stderr.push(a.map(String).join(" "));
+		});
+		const prev = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await verifyCommand.parseAsync(["node", "verify", ...args], { from: "node" });
+			return { exitCode: process.exitCode, output, stderr };
+		} finally {
+			process.exitCode = prev;
+			logSpy.mockRestore();
+			errSpy.mockRestore();
+		}
+	}
+
+	it("P1: strict profile + unknown key => exit 1 with error message", async () => {
+		writeConfig("verify:\n  unknown_key: true\n");
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+
+		const { exitCode, output } = await runVerifyWithCwd([
+			"--file", eventsPath,
+			"--profile", "strict",
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("Config validation failed");
+		expect(joined).toContain("unknown_key");
+	});
+
+	it("P2: strict profile + wrong type => exit 1", async () => {
+		writeConfig("verify:\n  max_seal_age_seconds: not_a_number\n");
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+
+		const { exitCode, output } = await runVerifyWithCwd([
+			"--file", eventsPath,
+			"--profile", "strict",
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("Config validation failed");
+	});
+
+	it("P3: baseline + unknown key => warns to stderr, continues verification", async () => {
+		writeConfig("verify:\n  profile: baseline\n  unknown_key: true\n");
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+
+		const { exitCode, stderr } = await runVerifyWithCwd([
+			"--file", eventsPath,
+			"--no-seal-check",
+		]);
+		// Verification should still succeed (baseline continues)
+		expect(exitCode).toBeUndefined();
+		// Warning should appear on stderr
+		const stderrJoined = stderr.join("\n");
+		expect(stderrJoined).toContain("Config warning");
+		expect(stderrJoined).toContain("unknown_key");
+	});
+
+	it("P4: JSON output includes config_validation in resolved_policy", async () => {
+		writeConfig("verify:\n  unknown_key: true\n");
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+
+		const { exitCode, output } = await runVerifyWithCwd([
+			"--file", eventsPath,
+			"--profile", "strict",
+			"--json",
+		]);
+		expect(exitCode).toBe(1);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.config_validation).toBeDefined();
+		expect(parsed.config_validation.status).toBe("invalid");
+		expect(parsed.config_validation.errors.length).toBeGreaterThan(0);
+	});
+
+	it("P5: nested unknown key detected in strict profile", async () => {
+		writeConfig("verify:\n  max_seal_age_seconds: 3600\n  typo_key: 42\n");
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+
+		const { exitCode, output } = await runVerifyWithCwd([
+			"--file", eventsPath,
+			"--profile", "strict",
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("typo_key");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Q-series: --show-effective-policy tests
+// ---------------------------------------------------------------------------
+
+describe("verify --show-effective-policy", () => {
+	let tmpDir: string;
+	let cwdSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-verify-policy-"));
+	});
+
+	afterEach(() => {
+		cwdSpy?.mockRestore();
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function writeConfig(content: string): void {
+		const configDir = join(tmpDir, ".patchwork");
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(join(configDir, "config.yml"), content);
+	}
+
+	async function runVerifyWithCwd(args: string[]): Promise<{ exitCode: number | undefined; output: string[] }> {
+		cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(tmpDir);
+		vi.resetModules();
+		const { verifyCommand } = await import("../../src/commands/verify.js");
+		const output: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		const prev = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await verifyCommand.parseAsync(["node", "verify", ...args], { from: "node" });
+			return { exitCode: process.exitCode, output };
+		} finally {
+			process.exitCode = prev;
+			logSpy.mockRestore();
+		}
+	}
+
+	it("Q1: text output shows all fields", async () => {
+		const { exitCode, output } = await runVerifyWithCwd([
+			"--show-effective-policy",
+		]);
+		expect(exitCode).toBeUndefined();
+		const joined = output.join("\n");
+		expect(joined).toContain("Effective Policy");
+		expect(joined).toContain("Profile:");
+		expect(joined).toContain("Config source:");
+		expect(joined).toContain("Config validation:");
+		expect(joined).toContain("requireSeal:");
+		expect(joined).toContain("requireWitness:");
+		expect(joined).toContain("requireRemoteWitnessProof:");
+		expect(joined).toContain("requireSignedAttestation:");
+	});
+
+	it("Q2: JSON output has resolved_policy with correct structure", async () => {
+		const { exitCode, output } = await runVerifyWithCwd([
+			"--show-effective-policy", "--json",
+		]);
+		expect(exitCode).toBeUndefined();
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.resolved_policy).toBeDefined();
+		expect(parsed.resolved_policy.profile).toBe("baseline");
+		expect(parsed.resolved_policy.config_source).toBeDefined();
+		expect(parsed.resolved_policy.effective).toBeDefined();
+		expect(parsed.resolved_policy.config_validation).toBeDefined();
+		expect(parsed.resolved_policy.config_validation.status).toBe("valid");
+	});
+
+	it("Q3: exits without running verification (no events file needed)", async () => {
+		// No events file exists — should still succeed because it exits before verification
+		const { exitCode, output } = await runVerifyWithCwd([
+			"--show-effective-policy",
+			"--file", join(tmpDir, "nonexistent.jsonl"),
+		]);
+		expect(exitCode).toBeUndefined();
+		const joined = output.join("\n");
+		expect(joined).toContain("Effective Policy");
+	});
+
+	it("Q4: shows config source path", async () => {
+		writeConfig("verify:\n  profile: strict\n");
+		const { output } = await runVerifyWithCwd([
+			"--show-effective-policy",
+		]);
+		const joined = output.join("\n");
+		expect(joined).toContain(join(tmpDir, ".patchwork", "config.yml"));
+	});
+
+	it("Q5: shows validation errors in text when config is invalid", async () => {
+		writeConfig("verify:\n  unknown_key: true\n");
+		const { exitCode, output } = await runVerifyWithCwd([
+			"--show-effective-policy",
+		]);
+		// --show-effective-policy always exits 0 (diagnostic, not enforcement)
+		expect(exitCode).toBeUndefined();
+		const joined = output.join("\n");
+		expect(joined).toContain("invalid");
+		expect(joined).toContain("unknown_key");
+	});
+
+	it("Q6: JSON includes validation errors when config is invalid", async () => {
+		writeConfig("verify:\n  unknown_key: true\n");
+		const { exitCode, output } = await runVerifyWithCwd([
+			"--show-effective-policy", "--json",
+		]);
+		expect(exitCode).toBeUndefined();
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.resolved_policy.config_validation.status).toBe("invalid");
+		expect(parsed.resolved_policy.config_validation.errors.length).toBeGreaterThan(0);
+		const paths = parsed.resolved_policy.config_validation.errors.map((e: { path: string }) => e.path);
+		expect(paths).toContain("verify.unknown_key");
 	});
 });

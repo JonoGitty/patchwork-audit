@@ -476,3 +476,220 @@ describe("witness lock concurrency", () => {
 		expect(existsSync(witnessFile + ".lock")).toBe(false);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// witness verify — remote proof checking
+// ---------------------------------------------------------------------------
+
+describe("witness verify", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-witness-verify-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function makeWitnessFile(witnessPath: string, records: Record<string, unknown>[]): void {
+		writeFileSync(witnessPath, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf-8");
+	}
+
+	it("G1: passes when remote endpoint confirms anchor", async () => {
+		vi.resetModules();
+
+		vi.doMock("../../src/http-client.js", () => ({
+			fetchJson: vi.fn().mockResolvedValue({
+				status: 200,
+				body: { anchor_id: "anc_001", tip_hash: "abc" },
+			}),
+		}));
+
+		const { witnessCommand } = await import("../../src/commands/witness.js");
+
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		makeWitnessFile(witnessPath, [{
+			schema_version: 1,
+			witnessed_at: new Date().toISOString(),
+			tip_hash: "abc",
+			chained_events: 3,
+			seal_signature: "hmac-sha256:sig",
+			witness_url: "https://witness.example.com",
+			anchor_id: "anc_001",
+		}]);
+
+		const output: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		const prev = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await witnessCommand.parseAsync([
+				"node", "witness", "verify",
+				"--witness-file", witnessPath,
+				"--json",
+			], { from: "node" });
+			expect(process.exitCode).toBeUndefined();
+			const parsed = JSON.parse(output.join(""));
+			expect(parsed.remote_witness_checked).toBe(true);
+			expect(parsed.remote_witness_quorum_met).toBe(true);
+			expect(parsed.remote_witness_verified_count).toBe(1);
+			expect(parsed.candidates_checked).toBe(1);
+		} finally {
+			process.exitCode = prev;
+			logSpy.mockRestore();
+		}
+	});
+
+	it("G2: fails with exit code 1 when quorum not met", async () => {
+		vi.resetModules();
+
+		vi.doMock("../../src/http-client.js", () => ({
+			fetchJson: vi.fn().mockResolvedValue({
+				status: 404,
+				body: { error: "not found" },
+			}),
+		}));
+
+		const { witnessCommand } = await import("../../src/commands/witness.js");
+
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		makeWitnessFile(witnessPath, [{
+			schema_version: 1,
+			witnessed_at: new Date().toISOString(),
+			tip_hash: "abc",
+			chained_events: 3,
+			seal_signature: "hmac-sha256:sig",
+			witness_url: "https://witness.example.com",
+			anchor_id: "anc_001",
+		}]);
+
+		const output: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		const prev = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await witnessCommand.parseAsync([
+				"node", "witness", "verify",
+				"--witness-file", witnessPath,
+				"--json",
+			], { from: "node" });
+			expect(process.exitCode).toBe(1);
+			const parsed = JSON.parse(output.join(""));
+			expect(parsed.remote_witness_quorum_met).toBe(false);
+		} finally {
+			process.exitCode = prev;
+			logSpy.mockRestore();
+		}
+	});
+
+	it("G3: --tip-hash filters witness records", async () => {
+		vi.resetModules();
+
+		const fetchFn = vi.fn().mockResolvedValue({
+			status: 200,
+			body: { anchor_id: "anc_match", tip_hash: "target_hash" },
+		});
+
+		vi.doMock("../../src/http-client.js", () => ({
+			fetchJson: fetchFn,
+		}));
+
+		const { witnessCommand } = await import("../../src/commands/witness.js");
+
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		makeWitnessFile(witnessPath, [
+			{
+				schema_version: 1,
+				witnessed_at: new Date().toISOString(),
+				tip_hash: "other_hash",
+				chained_events: 3,
+				seal_signature: "hmac-sha256:sig",
+				witness_url: "https://w1.example.com",
+				anchor_id: "anc_other",
+			},
+			{
+				schema_version: 1,
+				witnessed_at: new Date().toISOString(),
+				tip_hash: "target_hash",
+				chained_events: 3,
+				seal_signature: "hmac-sha256:sig",
+				witness_url: "https://w2.example.com",
+				anchor_id: "anc_match",
+			},
+		]);
+
+		const output: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		const prev = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await witnessCommand.parseAsync([
+				"node", "witness", "verify",
+				"--witness-file", witnessPath,
+				"--tip-hash", "target_hash",
+				"--json",
+			], { from: "node" });
+			expect(process.exitCode).toBeUndefined();
+			const parsed = JSON.parse(output.join(""));
+			expect(parsed.candidates_checked).toBe(1);
+			expect(parsed.remote_witness_verified_count).toBe(1);
+			// Only the matching record should trigger fetchJson
+			expect(fetchFn).toHaveBeenCalledTimes(1);
+		} finally {
+			process.exitCode = prev;
+			logSpy.mockRestore();
+		}
+	});
+
+	it("G4: text output shows verification summary", async () => {
+		vi.resetModules();
+
+		vi.doMock("../../src/http-client.js", () => ({
+			fetchJson: vi.fn().mockResolvedValue({
+				status: 200,
+				body: { anchor_id: "anc_001" },
+			}),
+		}));
+
+		const { witnessCommand } = await import("../../src/commands/witness.js");
+
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		makeWitnessFile(witnessPath, [{
+			schema_version: 1,
+			witnessed_at: new Date().toISOString(),
+			tip_hash: "abc",
+			chained_events: 3,
+			seal_signature: "hmac-sha256:sig",
+			witness_url: "https://witness.example.com",
+			anchor_id: "anc_001",
+		}]);
+
+		const output: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		const prev = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await witnessCommand.parseAsync([
+				"node", "witness", "verify",
+				"--witness-file", witnessPath,
+			], { from: "node" });
+			expect(process.exitCode).toBeUndefined();
+			const text = output.join("\n");
+			expect(text).toContain("Witness Remote Verification");
+			expect(text).toContain("Verified:");
+			expect(text).toContain("Quorum met.");
+		} finally {
+			process.exitCode = prev;
+			logSpy.mockRestore();
+		}
+	});
+});

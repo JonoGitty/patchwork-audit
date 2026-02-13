@@ -19,6 +19,7 @@ import {
 import { runVerification, reconcileMode, type VerifyResult } from "../verify-engine.js";
 import { ATTESTATION_PATH, ATTESTATIONS_DIR, KEYRING_DIR, SEAL_KEY_PATH } from "../store.js";
 import { TOOL_VERSION } from "../version.js";
+import { loadConfig, resolveVerifyDefaults, type ResolvedPolicy } from "../config.js";
 
 /** The signed attestation artifact schema. */
 interface AttestationArtifact {
@@ -60,7 +61,9 @@ export const attestCommand = new Command("attest")
 	.option("--max-witness-age-seconds <n>", "Fail if latest matching witness is older than n seconds")
 	.option("--history", "Write timestamped artifact to history in addition to latest")
 	.option("--max-history-files <n>", "Maximum number of history files to keep (default: unlimited)")
-	.action((opts) => {
+	.option("--profile <name>", "Enforcement profile: strict, baseline (default: baseline)")
+	.option("--show-effective-policy", "Show resolved policy configuration and exit")
+	.action(async (opts) => {
 		// Validate --max-history-files early
 		if (opts.maxHistoryFiles !== undefined) {
 			const n = Number(opts.maxHistoryFiles);
@@ -76,16 +79,56 @@ export const attestCommand = new Command("attest")
 			}
 		}
 
-		const result = runVerification({
+		// Resolve config + profile + CLI flags
+		const { config, source: configSource, validation } = loadConfig(process.cwd());
+		const resolved = resolveVerifyDefaults({
+			profile: opts.profile,
+			cliFlags: opts,
+			config,
+			configSource,
+			configValidation: validation,
+		});
+
+		// --show-effective-policy: diagnostic output and exit (before validation enforcement)
+		if (opts.showEffectivePolicy) {
+			formatEffectivePolicy(resolved, opts.json);
+			return;
+		}
+
+		// Config validation enforcement
+		if (validation.status === "invalid") {
+			if (resolved.profileName === "strict") {
+				const errMsg = formatConfigValidationError(validation.errors);
+				if (opts.json) {
+					console.log(JSON.stringify({
+						error: errMsg,
+						config_validation: validation,
+					}));
+				} else {
+					console.log(chalk.red(errMsg));
+				}
+				process.exitCode = 1;
+				return;
+			}
+			// Baseline: warn to stderr and continue
+			const warnMsg = validation.errors
+				.map((e) => `${e.path ? e.path + ": " : ""}${e.message}`)
+				.join("; ");
+			console.error(chalk.yellow(`Config warning: ${warnMsg}`));
+		}
+
+		const d = resolved.defaults;
+
+		const result = await runVerification({
 			file: opts.file,
 			sealFile: opts.sealFile,
 			keyFile: opts.keyFile,
 			keyringDir: opts.keyringDir,
 			witnessFile: opts.witnessFile,
-			requireSeal: opts.requireSeal,
-			requireWitness: opts.requireWitness,
-			maxSealAgeSeconds: opts.maxSealAgeSeconds,
-			maxWitnessAgeSeconds: opts.maxWitnessAgeSeconds,
+			requireSeal: d.requireSeal || undefined,
+			requireWitness: d.requireWitness || undefined,
+			maxSealAgeSeconds: d.maxSealAgeSeconds,
+			maxWitnessAgeSeconds: d.maxWitnessAgeSeconds,
 		});
 
 		// Build unsigned artifact with binding fields that tie it to current state
@@ -202,6 +245,55 @@ function ensureAttestationDir(filePath: string): void {
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
 	} else {
 		reconcileMode(dir, 0o700);
+	}
+}
+
+function formatConfigValidationError(errors: { path: string; message: string }[]): string {
+	const lines = errors.map(
+		(e) => `  ${e.path ? e.path + ": " : ""}${e.message}`,
+	);
+	return `Config validation failed (profile: strict):\n${lines.join("\n")}`;
+}
+
+function formatEffectivePolicy(resolved: ResolvedPolicy, json?: boolean): void {
+	if (json) {
+		console.log(JSON.stringify({
+			resolved_policy: {
+				profile: resolved.profileName,
+				config_source: resolved.configSource,
+				effective: resolved.defaults,
+				config_validation: {
+					status: resolved.configValidation.status,
+					errors: resolved.configValidation.errors,
+				},
+			},
+		}, null, 2));
+	} else {
+		const cv = resolved.configValidation;
+		console.log(chalk.bold("Effective Policy"));
+		console.log();
+		console.log(`  Profile:                    ${resolved.profileName}`);
+		console.log(`  Config source:              ${resolved.configSource}`);
+		console.log(`  Config validation:          ${cv.status}`);
+		if (cv.errors.length > 0) {
+			for (const err of cv.errors) {
+				console.log(chalk.yellow(`    ${err.path ? err.path + ": " : ""}${err.message}`));
+			}
+		}
+		console.log();
+		const d = resolved.defaults;
+		console.log(`  requireSeal:                ${d.requireSeal}`);
+		console.log(`  requireWitness:             ${d.requireWitness}`);
+		console.log(`  requireRemoteWitnessProof:  ${d.requireRemoteWitnessProof}`);
+		console.log(`  requireSignedAttestation:   ${d.requireSignedAttestation}`);
+		console.log(`  requireAttestationBinding:  ${d.requireAttestationBinding}`);
+		console.log(`  strictAttestationFile:      ${d.strictAttestationFile}`);
+		console.log(`  maxSealAgeSeconds:          ${d.maxSealAgeSeconds ?? "-"}`);
+		console.log(`  maxWitnessAgeSeconds:       ${d.maxWitnessAgeSeconds ?? "-"}`);
+		console.log(`  maxAttestationAgeSeconds:   ${d.maxAttestationAgeSeconds ?? "-"}`);
+		console.log(`  remoteWitnessQuorum:        ${d.remoteWitnessQuorum ?? "-"}`);
+		console.log(`  remoteWitnessTimeoutMs:     ${d.remoteWitnessTimeoutMs ?? "-"}`);
+		console.log(`  tokenEnv:                   ${d.tokenEnv ?? "-"}`);
 	}
 }
 

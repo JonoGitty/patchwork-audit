@@ -48,16 +48,22 @@ What is implemented:
 - Attestation artifacts include signed binding fields (`chain_tip_hash`, `chain_chained_events`, `seal_tip_hash`, `witness_latest_matching_tip_hash`)
 - `patchwork verify` compares binding fields against current chain/seal/witness state, preventing replay of stale attestations
 - Seal/witness binding fields only compared when those checks are active (skipped checks are not falsely enforced)
-- Legacy attestations without binding fields pass vacuously (backward compatible)
+- Legacy attestations without binding fields pass vacuously unless `--require-attestation-binding` or `--strict-attestation-file` is set
+- Remote witness proof verification (`patchwork witness verify`) checks endpoints via HTTP GET
+- `--require-remote-witness-proof` integrates remote proof checking into `patchwork verify` pipeline
+- `--require-attestation-binding` closes legacy vacuous-pass bypass for attestations without binding fields
+- `--strict-attestation-file` now also requires binding fields (in addition to `pass=true`)
+- Injectable HTTP client seam for deterministic testing (no flaky socket tests)
 
 Residual risk:
 - Seals are local-key based; an attacker with both key and data can forge
 - Seal records are not chained to each other
 - Legacy seals without `key_id` require legacy key fallback
-- Witness endpoints are trusted to return honest `anchor_id` and `witnessed_at`
+- Witness endpoints may return false-positive confirmations; HTTP layer is injectable/mockable but endpoint honesty is not verified
 - Attestation signing and verification use the same local-key trust model as seals
 - Attestation `pass` field reflects the generator's assessment; use `--strict-attestation-file` to enforce `pass=true`
 - Binding field comparison is skipped for seal/witness when those checks are not active in the current verify run
+- Remote witness proof uses HTTP GET without certificate pinning; relies on TLS for transport security
 
 Evidence:
 - `packages/core/src/schema/event.ts`
@@ -68,6 +74,8 @@ Evidence:
 - `packages/cli/src/verify-engine.ts`
 - `packages/cli/src/commands/verify.ts`
 - `packages/cli/src/commands/witness.ts`
+- `packages/cli/src/http-client.ts`
+- `packages/cli/src/remote-witness.ts`
 - `packages/cli/src/commands/attest.ts`
 - `packages/core/src/hash/attestation.ts`
 - `packages/cli/src/version.ts`
@@ -215,12 +223,24 @@ Current state:
 - Telemetry sink routing is supported (`PATCHWORK_PRETOOL_TELEMETRY_DEST=stderr|file|both`, optional `PATCHWORK_PRETOOL_TELEMETRY_FILE`)
 - Telemetry file rotation controls are supported (`PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES`, `PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES`)
 - Strict install profile is supported (`--strict-profile`: fail-closed + telemetry + 500ms warn by default)
+- Named enforcement profiles (`strict`, `baseline`) for `verify` and `attest` commands
+- Config-driven defaults from `~/.patchwork/config.yml` and `.patchwork/config.yml` (project-level takes precedence)
+- Resolution order: CLI flags > config file > profile defaults > built-in defaults
+- JSON output includes `resolved_policy` block with profile name, config source, and effective settings
+- Text output shows concise "Policy:" line with profile name, config source, and key thresholds
+- Config schema validation using Zod strict schemas (unknown keys, type errors, negative values all detected)
+- Strict profile fails fast on invalid config (exit 1 before verification runs, with per-key error paths)
+- Baseline profile warns on invalid config to stderr and continues with extracted valid keys
+- `--show-effective-policy` diagnostic flag shows resolved policy, config source, and validation status without running verification
 
 Why this remains important:
 - Default behavior is still fail-open unless fail-closed mode is explicitly chosen
 - Process-level timeouts/crashes still rely on host behavior and are not fully controlled by Patchwork
 - Telemetry rotation path is lock-protected, but the common no-rotation append path remains lock-free and can still race under high concurrency
 - Rotations use rename chains (not transactional), so abrupt interruption can leave transient gaps
+- Config schema only covers the `verify` section; future sections will need their own schemas
+- Profile names are not validated (unknown profiles silently fall back to baseline)
+- Enforcement profiles do not cover path-level options (file paths, keyring paths)
 
 Evidence:
 - `packages/cli/src/commands/hook.ts`
@@ -228,6 +248,8 @@ Evidence:
 - `packages/cli/src/commands/init.ts`
 - `packages/cli/src/store.ts`
 - `packages/cli/tests/commands/hook.test.ts`
+- `packages/cli/src/config.ts`
+- `packages/cli/tests/config.test.ts`
 
 ### R10. JSONL scaling (`readAll()` and dedup scans)
 Status: Partially mitigated

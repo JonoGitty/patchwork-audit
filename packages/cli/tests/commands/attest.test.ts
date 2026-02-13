@@ -628,6 +628,58 @@ describe("attest history mode", () => {
 	});
 });
 
+describe("attest --profile", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-attest-profile-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("N5: --profile strict enables require-seal and require-witness in attest", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+		const outPath = join(tmpDir, "attestation.json");
+
+		const { exitCode } = await runAttest([
+			"--file", eventsPath,
+			"--seal-file", join(tmpDir, "nonexistent.jsonl"),
+			"--witness-file", join(tmpDir, "nonexistent-w.jsonl"),
+			"--profile", "strict",
+			"--out", outPath,
+		]);
+
+		expect(exitCode).toBe(1);
+		const artifact = JSON.parse(readFileSync(outPath, "utf-8"));
+		expect(artifact.pass).toBe(false);
+		// Should fail due to seal or witness requirement from profile
+		const hasSealFail = artifact.seal?.seal_failure_reason !== null;
+		const hasWitnessFail = artifact.witness?.witness_failure_reason !== null;
+		expect(hasSealFail || hasWitnessFail).toBe(true);
+	});
+
+	it("N5b: --profile baseline does not enforce seal/witness requirements", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+		const outPath = join(tmpDir, "attestation.json");
+
+		const { exitCode } = await runAttest([
+			"--file", eventsPath,
+			"--profile", "baseline",
+			"--out", outPath,
+		]);
+
+		expect(exitCode).toBeUndefined();
+		const artifact = JSON.parse(readFileSync(outPath, "utf-8"));
+		expect(artifact.pass).toBe(true);
+	});
+});
+
 describe("attest --max-history-files validation", () => {
 	let tmpDir: string;
 
@@ -683,5 +735,83 @@ describe("attest --max-history-files validation", () => {
 		expect(exitCode).toBe(1);
 		const parsed = JSON.parse(output.join(""));
 		expect(parsed.error).toContain("Invalid --max-history-files");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// P-series: config validation enforcement in attest
+// ---------------------------------------------------------------------------
+
+describe("attest config validation", () => {
+	let tmpDir: string;
+	let cwdSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-attest-cfgval-"));
+	});
+
+	afterEach(() => {
+		cwdSpy?.mockRestore();
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function writeConfig(content: string): void {
+		const configDir = join(tmpDir, ".patchwork");
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(join(configDir, "config.yml"), content);
+	}
+
+	async function runAttestWithCwd(args: string[]): Promise<{ exitCode: number | undefined; output: string[] }> {
+		cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(tmpDir);
+		vi.resetModules();
+		const { attestCommand } = await import("../../src/commands/attest.js");
+		const output: string[] = [];
+		const logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+			output.push(a.map(String).join(" "));
+		});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const prev = process.exitCode;
+		process.exitCode = undefined;
+		try {
+			await attestCommand.parseAsync(["node", "attest", ...args], { from: "node" });
+			return { exitCode: process.exitCode, output };
+		} finally {
+			process.exitCode = prev;
+			logSpy.mockRestore();
+			vi.restoreAllMocks();
+		}
+	}
+
+	it("P6: strict profile + invalid config => exit 1 in attest", async () => {
+		writeConfig("verify:\n  unknown_key: true\n");
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+		const outPath = join(tmpDir, "attestation.json");
+
+		const { exitCode, output } = await runAttestWithCwd([
+			"--file", eventsPath,
+			"--profile", "strict",
+			"--out", outPath,
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("Config validation failed");
+		// Attestation file should NOT have been written
+		expect(existsSync(outPath)).toBe(false);
+	});
+
+	it("P7: --show-effective-policy works in attest", async () => {
+		writeConfig("verify:\n  profile: strict\n  max_seal_age_seconds: 7200\n");
+
+		const { exitCode, output } = await runAttestWithCwd([
+			"--show-effective-policy", "--json",
+		]);
+		expect(exitCode).toBeUndefined();
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.resolved_policy).toBeDefined();
+		expect(parsed.resolved_policy.profile).toBe("strict");
+		expect(parsed.resolved_policy.effective.maxSealAgeSeconds).toBe("7200");
+		expect(parsed.resolved_policy.config_validation.status).toBe("valid");
 	});
 });

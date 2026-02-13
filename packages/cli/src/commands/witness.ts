@@ -22,10 +22,12 @@ import {
 	loadKeyById,
 	buildWitnessPayload,
 	validateWitnessResponse,
+	WitnessRecordSchema,
 	type SealRecord,
 	type WitnessRecord,
 } from "@patchwork/core";
 import { EVENTS_PATH, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH, WITNESSES_PATH } from "../store.js";
+import { checkRemoteWitnesses } from "../remote-witness.js";
 
 export const witnessCommand = new Command("witness")
 	.description("Anchor chain tips to external witness endpoints");
@@ -321,6 +323,142 @@ witnessCommand
 		}
 
 		if (!quorumMet) {
+			process.exitCode = 1;
+		}
+	});
+
+// ---------------------------------------------------------------------------
+// witness verify — remote proof checking
+// ---------------------------------------------------------------------------
+
+witnessCommand
+	.command("verify")
+	.description("Verify witness records against remote endpoints (HTTP GET proof)")
+	.option("--witness-file <path>", "Path to witness records JSONL file")
+	.option("--quorum <n>", "Minimum verified proofs required (default: 1)")
+	.option("--timeout-ms <n>", "HTTP timeout per endpoint in milliseconds (default: 5000)")
+	.option("--token-env <name>", "Environment variable name for bearer token")
+	.option("--tip-hash <hash>", "Only verify witnesses matching this chain tip hash")
+	.option("--json", "Output result as JSON")
+	.action(async (opts) => {
+		// Validate --quorum
+		const quorum = opts.quorum !== undefined ? Number(opts.quorum) : 1;
+		if (!Number.isInteger(quorum) || quorum < 1) {
+			const msg = `Invalid --quorum: "${opts.quorum}" (must be a positive integer).`;
+			if (opts.json) {
+				console.log(JSON.stringify({ error: msg }));
+			} else {
+				console.log(chalk.red(msg));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		// Validate --timeout-ms
+		const timeoutMs = opts.timeoutMs !== undefined ? Number(opts.timeoutMs) : 5000;
+		if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
+			const msg = `Invalid --timeout-ms: "${opts.timeoutMs}" (must be a positive integer).`;
+			if (opts.json) {
+				console.log(JSON.stringify({ error: msg }));
+			} else {
+				console.log(chalk.red(msg));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		// Read witness file
+		const witnessFilePath = opts.witnessFile || WITNESSES_PATH;
+		if (!existsSync(witnessFilePath)) {
+			const msg = "No witness file found.";
+			if (opts.json) {
+				console.log(JSON.stringify({ error: msg, path: witnessFilePath }));
+			} else {
+				console.log(chalk.red(msg), chalk.dim(witnessFilePath));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		const content = readFileSync(witnessFilePath, "utf-8");
+		const lines = content.split("\n").filter((l) => l.trim().length > 0);
+		const validRecords: WitnessRecord[] = [];
+		let corruptLines = 0;
+
+		for (const line of lines) {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(line);
+			} catch {
+				corruptLines++;
+				continue;
+			}
+			const result = WitnessRecordSchema.safeParse(parsed);
+			if (result.success) {
+				validRecords.push(result.data);
+			} else {
+				corruptLines++;
+			}
+		}
+
+		// Filter to records with witness_url and anchor_id
+		let candidates = validRecords.filter(
+			(r) => r.witness_url && r.anchor_id,
+		);
+
+		// Optional tip-hash filter
+		if (opts.tipHash) {
+			candidates = candidates.filter((r) => r.tip_hash === opts.tipHash);
+		}
+
+		// Resolve bearer token
+		let bearerToken: string | undefined;
+		if (opts.tokenEnv) {
+			bearerToken = process.env[opts.tokenEnv];
+		}
+
+		const result = await checkRemoteWitnesses({
+			witnessRecords: candidates.map((r) => ({
+				witness_url: r.witness_url!,
+				anchor_id: r.anchor_id!,
+			})),
+			quorum,
+			timeoutMs,
+			bearerToken,
+		});
+
+		if (opts.json) {
+			console.log(JSON.stringify({
+				...result,
+				witness_file: witnessFilePath,
+				total_records: validRecords.length,
+				candidates_checked: candidates.length,
+				corrupt_lines: corruptLines,
+			}, null, 2));
+		} else {
+			console.log(chalk.bold("Witness Remote Verification"));
+			console.log();
+			console.log(`  Records: ${validRecords.length} total, ${candidates.length} with remote URL, ${corruptLines} corrupt`);
+			console.log();
+
+			for (const proof of result.remote_witness_proof_results) {
+				if (proof.verified) {
+					console.log(chalk.green(`  + ${proof.url}`), chalk.dim(`anchor=${proof.anchor_id}`));
+				} else {
+					console.log(chalk.red(`  - ${proof.url}`), chalk.dim(proof.error || "unknown error"));
+				}
+			}
+
+			console.log();
+			console.log(`  Verified: ${result.remote_witness_verified_count}/${candidates.length} (quorum: ${quorum})`);
+			if (result.remote_witness_quorum_met) {
+				console.log(chalk.green("  Quorum met."));
+			} else {
+				console.log(chalk.red(`  Quorum NOT met (need ${quorum}, got ${result.remote_witness_verified_count}).`));
+			}
+		}
+
+		if (!result.remote_witness_quorum_met) {
 			process.exitCode = 1;
 		}
 	});
