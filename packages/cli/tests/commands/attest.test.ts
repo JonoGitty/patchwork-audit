@@ -304,11 +304,58 @@ describe("patchwork attest", () => {
 		const expectedKeys = [
 			"schema_version", "generated_at", "tool_version", "pass",
 			"input_paths", "chain", "seal", "witness", "error",
+			"chain_tip_hash", "chain_chained_events", "seal_tip_hash",
+			"witness_latest_matching_tip_hash",
 			"payload_hash", "signature", "key_id",
 		];
 		for (const key of expectedKeys) {
 			expect(artifact).toHaveProperty(key);
 		}
+	});
+
+	it("E2: binding fields match chain/seal state", async () => {
+		const events = makeChainedEvents(5);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+		const { sealPath, keyringDir } = createTestSeal(tmpDir, events);
+		const outPath = join(tmpDir, "attestation.json");
+
+		await runAttest([
+			"--file", eventsPath,
+			"--seal-file", sealPath,
+			"--keyring-dir", keyringDir,
+			"--out", outPath,
+		]);
+
+		const artifact = JSON.parse(readFileSync(outPath, "utf-8"));
+		const tipHash = events[4].event_hash as string;
+		expect(artifact.chain_tip_hash).toBe(tipHash);
+		expect(artifact.chain_chained_events).toBe(5);
+		expect(artifact.seal_tip_hash).toBe(tipHash);
+		expect(artifact.witness_latest_matching_tip_hash).toBeNull();
+	});
+
+	it("E3: binding fields included in signed payload (tamper-proof)", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+		const { sealPath, keyringDir } = createTestSeal(tmpDir, events);
+		const outPath = join(tmpDir, "attestation.json");
+
+		await runAttest([
+			"--file", eventsPath,
+			"--seal-file", sealPath,
+			"--keyring-dir", keyringDir,
+			"--out", outPath,
+		]);
+
+		const artifact = JSON.parse(readFileSync(outPath, "utf-8"));
+		const key = loadKeyById(keyringDir, artifact.key_id);
+
+		// Tamper with a binding field
+		artifact.chain_chained_events = 999;
+		const tamperedPayload = buildAttestationPayload(artifact);
+		expect(verifyAttestation(tamperedPayload, artifact.signature, key)).toBe(false);
 	});
 
 	it("F: secure permissions — dir 0o700, file 0o600", async () => {
@@ -578,5 +625,63 @@ describe("attest history mode", () => {
 		const files = readdirSync(attestDir);
 		const historyFiles = files.filter((f) => f.startsWith("attestation-") && f.endsWith(".json"));
 		expect(historyFiles.length).toBe(1);
+	});
+});
+
+describe("attest --max-history-files validation", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-attest-hist-val-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	const invalidInputs = [
+		{ value: "0", label: "zero" },
+		{ value: "-1", label: "negative" },
+		{ value: "3.5", label: "decimal" },
+		{ value: "abc", label: "non-numeric" },
+	];
+
+	for (const { value, label } of invalidInputs) {
+		it(`O: rejects invalid --max-history-files: ${label} ("${value}")`, async () => {
+			const events = makeChainedEvents(3);
+			const eventsPath = join(tmpDir, "events.jsonl");
+			writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+			const outPath = join(tmpDir, "attestation.json");
+
+			const { exitCode, output } = await runAttest([
+				"--file", eventsPath,
+				"--out", outPath,
+				"--history",
+				"--max-history-files", value,
+			]);
+			expect(exitCode).toBe(1);
+			const joined = output.join("\n");
+			expect(joined).toContain("Invalid --max-history-files");
+			// Attestation file should NOT have been written
+			expect(existsSync(outPath)).toBe(false);
+		});
+	}
+
+	it("O2: rejects invalid --max-history-files in JSON mode", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
+		const outPath = join(tmpDir, "attestation.json");
+
+		const { exitCode, output } = await runAttest([
+			"--file", eventsPath,
+			"--out", outPath,
+			"--history",
+			"--max-history-files", "0",
+			"--json",
+		]);
+		expect(exitCode).toBe(1);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.error).toContain("Invalid --max-history-files");
 	});
 });

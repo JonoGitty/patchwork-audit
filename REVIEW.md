@@ -39,13 +39,25 @@ What is implemented:
 - Constant-time signature verification (timing-safe comparison)
 - Attestation history mode with bounded retention pruning
 - Dynamic tool version from `package.json` (no hardcoded strings)
+- Attestation verification in `patchwork verify` — hash integrity, signature check, freshness enforcement
+- Recursive canonical payload determinism (all nested levels, not just top-level keys)
+- Strict `--max-history-files` validation with early exit on invalid input
+- Always-on tamper detection: hash mismatch fails attestation check unconditionally (no flag needed)
+- Always-on signature enforcement: signed-but-invalid attestations fail unconditionally (consistent with seal check)
+- `--strict-attestation-file` enforces attestation `pass=true` (not just structural validity)
+- Attestation artifacts include signed binding fields (`chain_tip_hash`, `chain_chained_events`, `seal_tip_hash`, `witness_latest_matching_tip_hash`)
+- `patchwork verify` compares binding fields against current chain/seal/witness state, preventing replay of stale attestations
+- Seal/witness binding fields only compared when those checks are active (skipped checks are not falsely enforced)
+- Legacy attestations without binding fields pass vacuously (backward compatible)
 
 Residual risk:
 - Seals are local-key based; an attacker with both key and data can forge
 - Seal records are not chained to each other
 - Legacy seals without `key_id` require legacy key fallback
 - Witness endpoints are trusted to return honest `anchor_id` and `witnessed_at`
-- Attestation signing uses the same local-key trust model as seals
+- Attestation signing and verification use the same local-key trust model as seals
+- Attestation `pass` field reflects the generator's assessment; use `--strict-attestation-file` to enforce `pass=true`
+- Binding field comparison is skipped for seal/witness when those checks are not active in the current verify run
 
 Evidence:
 - `packages/core/src/schema/event.ts`

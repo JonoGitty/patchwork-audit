@@ -9,10 +9,13 @@ import {
 	verifySeal,
 	readSealKey,
 	loadKeyById,
+	buildAttestationPayload,
+	hashAttestationPayload,
+	verifyAttestation,
 	type SealRecord,
 } from "@patchwork/core";
 import { WitnessRecordSchema, type WitnessRecord } from "@patchwork/core";
-import { EVENTS_PATH, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH, WITNESSES_PATH } from "./store.js";
+import { EVENTS_PATH, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH, WITNESSES_PATH, ATTESTATION_PATH } from "./store.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -24,6 +27,7 @@ export interface SealCheckResult {
 	seal_present: boolean;
 	seal_valid: boolean;
 	seal_tip_match: boolean;
+	seal_tip_hash: string | null;
 	seal_age_seconds: number | null;
 	seal_corrupt_lines: number;
 	seal_failure_reason: string | null;
@@ -38,6 +42,20 @@ export interface WitnessCheckResult {
 	witness_latest_age_seconds: number | null;
 	witness_corrupt_lines: number;
 	witness_failure_reason: string | null;
+}
+
+/** Structured attestation check result. */
+export interface AttestationCheckResult {
+	attestation_checked: boolean;
+	attestation_present: boolean;
+	attestation_valid: boolean;
+	attestation_signed: boolean;
+	attestation_signature_valid: boolean;
+	attestation_hash_valid: boolean;
+	attestation_age_seconds: number | null;
+	attestation_failure_reason: string | null;
+	attestation_matches_current_state: boolean;
+	attestation_match_failure_reason: string | null;
 }
 
 /** Options accepted by the verification engine. */
@@ -57,12 +75,19 @@ export interface VerifyOptions {
 	strictWitnessFile?: boolean;
 	strict?: boolean;
 	allowInvalid?: boolean;
+	attestationFile?: string;
+	attestationCheck?: boolean;
+	requireAttestation?: boolean;
+	requireSignedAttestation?: boolean;
+	maxAttestationAgeSeconds?: string;
+	strictAttestationFile?: boolean;
 }
 
 /** Full verification result returned by runVerification(). */
 export interface VerifyResult {
 	pass: boolean;
 	error: string | null;
+	chain_tip_hash: string | null;
 	chain: {
 		total_events: number;
 		chained_events: number;
@@ -74,6 +99,7 @@ export interface VerifyResult {
 	};
 	seal: SealCheckResult;
 	witness: WitnessCheckResult;
+	attestation: AttestationCheckResult;
 	input_paths: {
 		events: string;
 		seals: string;
@@ -118,6 +144,11 @@ export function runVerification(opts: VerifyOptions): VerifyResult {
 	const maxWitnessAge = parsePositiveIntAge(opts.maxWitnessAgeSeconds);
 	if (maxWitnessAge === "invalid") {
 		return emptyResult(false, `Invalid --max-witness-age-seconds: "${opts.maxWitnessAgeSeconds}". Must be a positive integer (> 0).`, basePaths);
+	}
+
+	const maxAttestationAge = parsePositiveIntAge(opts.maxAttestationAgeSeconds);
+	if (maxAttestationAge === "invalid") {
+		return emptyResult(false, `Invalid --max-attestation-age-seconds: "${opts.maxAttestationAgeSeconds}". Must be a positive integer (> 0).`, basePaths);
 	}
 
 	// Events file must exist
@@ -171,9 +202,24 @@ export function runVerification(opts: VerifyOptions): VerifyResult {
 		isPass = false;
 	}
 
+	// Attestation check — pass current state for binding comparison
+	const currentState: CurrentVerifyState = {
+		chain_tip_hash: currentTip,
+		chain_chained_events: chainResult.chained_events,
+		seal_tip_hash: sealCheck.seal_tip_hash,
+		seal_checked: sealCheck.seal_checked,
+		witness_latest_matching_tip_hash: witnessCheck.witness_matching_tip_count > 0 ? currentTip : null,
+		witness_checked: witnessCheck.witness_checked,
+	};
+	const attestationCheck = runAttestationCheck(opts, maxAttestationAge, currentState);
+	if (attestationCheck.attestation_checked && attestationCheck.attestation_failure_reason !== null) {
+		isPass = false;
+	}
+
 	return {
 		pass: isPass,
 		error: null,
+		chain_tip_hash: currentTip,
 		chain: {
 			total_events: chainResult.total_events,
 			chained_events: chainResult.chained_events,
@@ -185,6 +231,7 @@ export function runVerification(opts: VerifyOptions): VerifyResult {
 		},
 		seal: sealCheck,
 		witness: witnessCheck,
+		attestation: attestationCheck,
 		input_paths: basePaths,
 	};
 }
@@ -201,6 +248,7 @@ function emptyResult(
 	return {
 		pass,
 		error,
+		chain_tip_hash: null,
 		chain: {
 			total_events: 0,
 			chained_events: 0,
@@ -215,6 +263,7 @@ function emptyResult(
 			seal_present: false,
 			seal_valid: false,
 			seal_tip_match: false,
+			seal_tip_hash: null,
 			seal_age_seconds: null,
 			seal_corrupt_lines: 0,
 			seal_failure_reason: null,
@@ -228,8 +277,30 @@ function emptyResult(
 			witness_corrupt_lines: 0,
 			witness_failure_reason: null,
 		},
+		attestation: {
+			attestation_checked: false,
+			attestation_present: false,
+			attestation_valid: false,
+			attestation_signed: false,
+			attestation_signature_valid: false,
+			attestation_hash_valid: false,
+			attestation_age_seconds: null,
+			attestation_failure_reason: null,
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: null,
+		},
 		input_paths: paths,
 	};
+}
+
+/** Current verification state passed to attestation check for binding comparison. */
+interface CurrentVerifyState {
+	chain_tip_hash: string | null;
+	chain_chained_events: number;
+	seal_tip_hash: string | null;
+	seal_checked: boolean;
+	witness_latest_matching_tip_hash: string | null;
+	witness_checked: boolean;
 }
 
 interface SealScanResult {
@@ -276,6 +347,7 @@ function runSealCheck(
 			seal_present: false,
 			seal_valid: false,
 			seal_tip_match: false,
+			seal_tip_hash: null,
 			seal_age_seconds: null,
 			seal_corrupt_lines: 0,
 			seal_failure_reason: null,
@@ -295,6 +367,7 @@ function runSealCheck(
 			seal_present: false,
 			seal_valid: false,
 			seal_tip_match: false,
+			seal_tip_hash: null,
 			seal_age_seconds: null,
 			seal_corrupt_lines: 0,
 			seal_failure_reason: needsFail
@@ -313,6 +386,7 @@ function runSealCheck(
 			seal_present: true,
 			seal_valid: false,
 			seal_tip_match: false,
+			seal_tip_hash: null,
 			seal_age_seconds: null,
 			seal_corrupt_lines: 0,
 			seal_failure_reason: "Seal file is empty",
@@ -327,6 +401,7 @@ function runSealCheck(
 			seal_present: true,
 			seal_valid: false,
 			seal_tip_match: false,
+			seal_tip_hash: null,
 			seal_age_seconds: null,
 			seal_corrupt_lines: scanResult.corrupt_lines,
 			seal_failure_reason: `${scanResult.corrupt_lines} corrupt seal line(s) detected (--strict-seal-file)`,
@@ -339,6 +414,7 @@ function runSealCheck(
 			seal_present: true,
 			seal_valid: false,
 			seal_tip_match: false,
+			seal_tip_hash: null,
 			seal_age_seconds: null,
 			seal_corrupt_lines: scanResult.corrupt_lines,
 			seal_failure_reason: "No valid seal record found in seal file",
@@ -366,6 +442,7 @@ function runSealCheck(
 				seal_present: true,
 				seal_valid: false,
 				seal_tip_match: false,
+				seal_tip_hash: null,
 				seal_age_seconds: null,
 				seal_corrupt_lines: scanResult.corrupt_lines,
 				seal_failure_reason: reason,
@@ -379,6 +456,7 @@ function runSealCheck(
 				seal_present: true,
 				seal_valid: false,
 				seal_tip_match: false,
+				seal_tip_hash: null,
 				seal_age_seconds: null,
 				seal_corrupt_lines: scanResult.corrupt_lines,
 				seal_failure_reason: `Cannot read seal key at ${keyPath}`,
@@ -399,6 +477,7 @@ function runSealCheck(
 			seal_present: true,
 			seal_valid: false,
 			seal_tip_match: false,
+			seal_tip_hash: null,
 			seal_age_seconds: null,
 			seal_corrupt_lines: scanResult.corrupt_lines,
 			seal_failure_reason: "Seal signature is invalid (key mismatch or tampered seal)",
@@ -424,6 +503,7 @@ function runSealCheck(
 			seal_present: true,
 			seal_valid: true,
 			seal_tip_match: false,
+			seal_tip_hash: latestSeal.tip_hash,
 			seal_age_seconds: ageSeconds,
 			seal_corrupt_lines: scanResult.corrupt_lines,
 			seal_failure_reason: `Chain tip mismatch: sealed=${latestSeal.tip_hash.slice(0, 20)}... current=${currentTip?.slice(0, 20) ?? "null"}...`,
@@ -436,6 +516,7 @@ function runSealCheck(
 			seal_present: true,
 			seal_valid: true,
 			seal_tip_match: true,
+			seal_tip_hash: latestSeal.tip_hash,
 			seal_age_seconds: ageSeconds,
 			seal_corrupt_lines: scanResult.corrupt_lines,
 			seal_failure_reason: `Seal too old: ${ageSeconds}s exceeds max ${maxAge}s`,
@@ -447,6 +528,7 @@ function runSealCheck(
 		seal_present: true,
 		seal_valid: true,
 		seal_tip_match: true,
+		seal_tip_hash: latestSeal.tip_hash,
 		seal_age_seconds: ageSeconds,
 		seal_corrupt_lines: scanResult.corrupt_lines,
 		seal_failure_reason: null,
@@ -598,6 +680,318 @@ function runWitnessCheck(
 		witness_latest_age_seconds: latestAgeSeconds,
 		witness_corrupt_lines: corruptLines,
 		witness_failure_reason: null,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Attestation check
+// ---------------------------------------------------------------------------
+
+const REQUIRED_ATTESTATION_FIELDS = [
+	"schema_version", "generated_at", "tool_version", "pass",
+	"payload_hash", "signature",
+];
+
+function emptyAttestationResult(): AttestationCheckResult {
+	return {
+		attestation_checked: false,
+		attestation_present: false,
+		attestation_valid: false,
+		attestation_signed: false,
+		attestation_signature_valid: false,
+		attestation_hash_valid: false,
+		attestation_age_seconds: null,
+		attestation_failure_reason: null,
+		attestation_matches_current_state: false,
+		attestation_match_failure_reason: null,
+	};
+}
+
+function runAttestationCheck(
+	opts: VerifyOptions,
+	maxAge: number | null,
+	currentState: CurrentVerifyState,
+): AttestationCheckResult {
+	if (opts.attestationCheck === false) {
+		return emptyAttestationResult();
+	}
+
+	const attestationPath = opts.attestationFile || ATTESTATION_PATH;
+	const requireAttestation = opts.requireAttestation === true;
+	const requireSigned = opts.requireSignedAttestation === true;
+	const strictFile = opts.strictAttestationFile === true;
+
+	// If no attestation-related flags are set, skip the check entirely
+	if (!requireAttestation && !requireSigned && maxAge === null && !strictFile && !opts.attestationFile) {
+		return emptyAttestationResult();
+	}
+
+	if (!existsSync(attestationPath)) {
+		const needsFail = requireAttestation || requireSigned || maxAge !== null;
+		return {
+			attestation_checked: true,
+			attestation_present: false,
+			attestation_valid: false,
+			attestation_signed: false,
+			attestation_signature_valid: false,
+			attestation_hash_valid: false,
+			attestation_age_seconds: null,
+			attestation_failure_reason: needsFail
+				? "No attestation file found (required by policy)"
+				: null,
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: null,
+		};
+	}
+
+	reconcileMode(attestationPath, 0o600);
+
+	// Parse the attestation artifact
+	let artifact: Record<string, unknown>;
+	try {
+		artifact = JSON.parse(readFileSync(attestationPath, "utf-8"));
+	} catch {
+		return {
+			attestation_checked: true,
+			attestation_present: true,
+			attestation_valid: false,
+			attestation_signed: false,
+			attestation_signature_valid: false,
+			attestation_hash_valid: false,
+			attestation_age_seconds: null,
+			attestation_failure_reason: "Attestation file is not valid JSON",
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: null,
+		};
+	}
+
+	// Validate required fields
+	for (const field of REQUIRED_ATTESTATION_FIELDS) {
+		if (!(field in artifact)) {
+			return {
+				attestation_checked: true,
+				attestation_present: true,
+				attestation_valid: false,
+				attestation_signed: false,
+				attestation_signature_valid: false,
+				attestation_hash_valid: false,
+				attestation_age_seconds: null,
+				attestation_failure_reason: `Attestation missing required field: ${field}`,
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: null,
+			};
+		}
+	}
+
+	// Recompute canonical payload and verify hash
+	const recomputedPayload = buildAttestationPayload(artifact);
+	const recomputedHash = hashAttestationPayload(recomputedPayload);
+	const hashValid = artifact.payload_hash === recomputedHash;
+
+	// Hash mismatch is always a failure — this is tamper detection.
+	// No flag needed; if the attestation check runs at all, integrity is enforced.
+	if (!hashValid) {
+		return {
+			attestation_checked: true,
+			attestation_present: true,
+			attestation_valid: false,
+			attestation_signed: false,
+			attestation_signature_valid: false,
+			attestation_hash_valid: false,
+			attestation_age_seconds: null,
+			attestation_failure_reason: "Attestation payload_hash mismatch (artifact may be tampered)",
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: null,
+		};
+	}
+
+	// Check signature
+	const sig = String(artifact.signature);
+	const isSigned = sig !== "unsigned" && sig.startsWith("hmac-sha256:");
+	let sigValid = false;
+
+	if (isSigned) {
+		const keyringDir = opts.keyringDir || KEYRING_DIR;
+		const keyPath = opts.keyFile || SEAL_KEY_PATH;
+		let key: Buffer | null = null;
+
+		// Try key_id from artifact -> keyring first
+		if (artifact.key_id && typeof artifact.key_id === "string") {
+			try {
+				key = loadKeyById(keyringDir, artifact.key_id);
+			} catch {
+				// try legacy fallback
+			}
+		}
+
+		// Legacy key fallback
+		if (!key) {
+			try {
+				key = readSealKey(keyPath);
+			} catch {
+				// no key available
+			}
+		}
+
+		if (key) {
+			sigValid = verifyAttestation(recomputedPayload, sig, key);
+		}
+	}
+
+	// Freshness check
+	const generatedAt = String(artifact.generated_at);
+	const genTime = new Date(generatedAt).getTime();
+	const ageSeconds = Number.isFinite(genTime)
+		? Math.round((Date.now() - genTime) / 1000)
+		: null;
+
+	// Signed but invalid signature is always a failure (consistent with seal
+	// verification). If a signature is present it must verify; there is no
+	// "soft" mode for bad signatures.
+	if (isSigned && !sigValid) {
+		return {
+			attestation_checked: true,
+			attestation_present: true,
+			attestation_valid: false,
+			attestation_signed: true,
+			attestation_signature_valid: false,
+			attestation_hash_valid: true,
+			attestation_age_seconds: ageSeconds,
+			attestation_failure_reason: "Attestation signature is invalid (key mismatch or tampered)",
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: null,
+		};
+	}
+
+	// --require-signed-attestation: must be signed (and valid — already checked above)
+	if (requireSigned && !isSigned) {
+		return {
+			attestation_checked: true,
+			attestation_present: true,
+			attestation_valid: true,
+			attestation_signed: false,
+			attestation_signature_valid: false,
+			attestation_hash_valid: true,
+			attestation_age_seconds: ageSeconds,
+			attestation_failure_reason: "Attestation is unsigned (required by --require-signed-attestation)",
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: null,
+		};
+	}
+
+	// --strict-attestation-file: the attestation's own pass field must be true.
+	// This enforces that the attestation was generated from a passing verification,
+	// not just that the artifact itself is structurally intact.
+	if (strictFile && artifact.pass !== true) {
+		return {
+			attestation_checked: true,
+			attestation_present: true,
+			attestation_valid: true,
+			attestation_signed: isSigned,
+			attestation_signature_valid: isSigned ? sigValid : false,
+			attestation_hash_valid: true,
+			attestation_age_seconds: ageSeconds,
+			attestation_failure_reason: "Attestation artifact reports pass=false (--strict-attestation-file requires pass=true)",
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: null,
+		};
+	}
+
+	// Freshness
+	if (maxAge !== null && ageSeconds !== null && ageSeconds > maxAge) {
+		return {
+			attestation_checked: true,
+			attestation_present: true,
+			attestation_valid: true,
+			attestation_signed: isSigned,
+			attestation_signature_valid: isSigned ? sigValid : false,
+			attestation_hash_valid: true,
+			attestation_age_seconds: ageSeconds,
+			attestation_failure_reason: `Attestation too old: ${ageSeconds}s exceeds max ${maxAge}s`,
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: null,
+		};
+	}
+
+	if (maxAge !== null && ageSeconds === null) {
+		return {
+			attestation_checked: true,
+			attestation_present: true,
+			attestation_valid: false,
+			attestation_signed: isSigned,
+			attestation_signature_valid: isSigned ? sigValid : false,
+			attestation_hash_valid: true,
+			attestation_age_seconds: null,
+			attestation_failure_reason: "Attestation has invalid generated_at timestamp (cannot check age)",
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: null,
+		};
+	}
+
+	// Current-state binding check.
+	// If the attestation includes binding fields (chain_tip_hash, etc.), compare
+	// them against the current verification state. This prevents replay/stale
+	// attestations from being accepted for a different audit state.
+	// Attestations without binding fields (legacy) pass vacuously.
+	const hasBindingFields = "chain_tip_hash" in artifact;
+	let matchesState = true;
+	let matchFailureReason: string | null = null;
+
+	if (hasBindingFields) {
+		const mismatches: string[] = [];
+		// Chain fields are always compared (chain verification always runs)
+		if (artifact.chain_tip_hash !== currentState.chain_tip_hash) {
+			const expected = currentState.chain_tip_hash?.slice(0, 20) ?? "null";
+			const got = artifact.chain_tip_hash === null ? "null" : String(artifact.chain_tip_hash).slice(0, 20);
+			mismatches.push(`chain_tip_hash: expected=${expected}... got=${got}...`);
+		}
+		if (artifact.chain_chained_events !== currentState.chain_chained_events) {
+			mismatches.push(`chain_chained_events: expected=${currentState.chain_chained_events} got=${artifact.chain_chained_events}`);
+		}
+		// Seal/witness fields only compared when those checks actually ran
+		if (currentState.seal_checked && artifact.seal_tip_hash !== currentState.seal_tip_hash) {
+			const expected = currentState.seal_tip_hash?.slice(0, 20) ?? "null";
+			const got = artifact.seal_tip_hash === null ? "null" : String(artifact.seal_tip_hash).slice(0, 20);
+			mismatches.push(`seal_tip_hash: expected=${expected}... got=${got}...`);
+		}
+		if (currentState.witness_checked && artifact.witness_latest_matching_tip_hash !== currentState.witness_latest_matching_tip_hash) {
+			const expected = currentState.witness_latest_matching_tip_hash?.slice(0, 20) ?? "null";
+			const got = artifact.witness_latest_matching_tip_hash === null ? "null" : String(artifact.witness_latest_matching_tip_hash).slice(0, 20);
+			mismatches.push(`witness_latest_matching_tip_hash: expected=${expected}... got=${got}...`);
+		}
+
+		if (mismatches.length > 0) {
+			matchesState = false;
+			matchFailureReason = `Attestation does not match current state: ${mismatches.join("; ")}`;
+		}
+	}
+
+	if (!matchesState) {
+		return {
+			attestation_checked: true,
+			attestation_present: true,
+			attestation_valid: true,
+			attestation_signed: isSigned,
+			attestation_signature_valid: isSigned ? sigValid : false,
+			attestation_hash_valid: true,
+			attestation_age_seconds: ageSeconds,
+			attestation_failure_reason: matchFailureReason,
+			attestation_matches_current_state: false,
+			attestation_match_failure_reason: matchFailureReason,
+		};
+	}
+
+	return {
+		attestation_checked: true,
+		attestation_present: true,
+		attestation_valid: true,
+		attestation_signed: isSigned,
+		attestation_signature_valid: isSigned ? sigValid : false,
+		attestation_hash_valid: true,
+		attestation_age_seconds: ageSeconds,
+		attestation_failure_reason: null,
+		attestation_matches_current_state: true,
+		attestation_match_failure_reason: null,
 	};
 }
 

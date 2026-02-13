@@ -133,12 +133,56 @@ The attestation artifact includes:
 | `seal` | Seal verification results (presence, validity, age) |
 | `witness` | Witness verification results (matching records, age) |
 | `input_paths` | Paths to events, seals, and witness files used |
+| `chain_tip_hash` | Hash of the last chained event at attestation time (binding field) |
+| `chain_chained_events` | Number of chained events at attestation time (binding field) |
+| `seal_tip_hash` | Seal's tip hash at attestation time, or `null` (binding field) |
+| `witness_latest_matching_tip_hash` | Witness-matched tip hash at attestation time, or `null` (binding field) |
 | `error` | Error message if verification could not run, else `null` |
 | `payload_hash` | SHA-256 hash of the canonical payload |
 | `signature` | HMAC-SHA256 signature (or `"unsigned"` if no key) |
 | `key_id` | Signing key ID from keyring (omitted for legacy keys) |
 
+Binding fields tie the attestation to the exact audit state at generation time. During `patchwork verify`, these fields are compared against the current chain/seal/witness state. If the audit log has changed since the attestation was generated (e.g., new events appended), verification fails with a clear mismatch reason. This prevents replay of stale attestations against a different audit state.
+
 Exit code is non-zero when verification fails, so CI pipelines can gate on audit completeness.
+
+### Verifying Signed Attestations
+
+`patchwork verify` can validate attestation artifacts as part of the verification pipeline. This closes the loop: `attest` produces signed evidence, and `verify` enforces it.
+
+```bash
+# Verify chain + require a valid, signed attestation
+patchwork verify \
+  --require-signed-attestation \
+  --attestation-file audit-attestation.json \
+  --max-attestation-age-seconds 3600
+
+# Full enforcement: chain + seal + witness + signed attestation
+patchwork verify \
+  --require-seal \
+  --require-witness \
+  --require-signed-attestation \
+  --attestation-file audit-attestation.json \
+  --max-attestation-age-seconds 3600 \
+  --max-seal-age-seconds 3600 \
+  --max-witness-age-seconds 3600
+```
+
+Attestation verification checks (when any attestation flag is set):
+- **Integrity** (always enforced): recomputes canonical payload and verifies `payload_hash` matches. Hash mismatch always fails — no flag needed for tamper detection.
+- **Signature** (always enforced when present): if the attestation carries a signature (not `"unsigned"`), it must verify. Invalid signatures always fail.
+- **State binding** (always enforced when binding fields present): compares `chain_tip_hash`, `chain_chained_events`, `seal_tip_hash`, and `witness_latest_matching_tip_hash` against the current verification state. Mismatches fail with specific field details. Seal/witness fields are only compared when those checks are active in the current run. Legacy attestations without binding fields pass vacuously.
+- **Schema**: all required fields present (`schema_version`, `generated_at`, `tool_version`, `pass`, `payload_hash`, `signature`)
+- **Freshness**: `--max-attestation-age-seconds` enforces recency of `generated_at`
+
+| Flag | Effect |
+|---|---|
+| `--attestation-file <path>` | Path to attestation artifact (default: `~/.patchwork/attestations/latest.json`) |
+| `--require-attestation` | Fail if attestation is missing, tampered (hash mismatch), or has invalid signature |
+| `--require-signed-attestation` | Fail if attestation is unsigned or signature is invalid |
+| `--max-attestation-age-seconds <n>` | Fail if attestation is older than n seconds |
+| `--strict-attestation-file` | Additionally require that the attestation's own `pass` field is `true` |
+| `--no-attestation-check` | Skip attestation verification entirely |
 
 ## Policy Engine
 

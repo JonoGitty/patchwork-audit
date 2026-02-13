@@ -77,6 +77,44 @@ describe("buildAttestationPayload", () => {
 		const b: Record<string, unknown> = { a_field: 2, z_field: 1 };
 		expect(buildAttestationPayload(a)).toBe(buildAttestationPayload(b));
 	});
+
+	it("recursively sorts nested object keys", () => {
+		const a: Record<string, unknown> = {
+			outer: { z_inner: 1, a_inner: 2, nested: { c: 3, a: 1, b: 2 } },
+		};
+		const b: Record<string, unknown> = {
+			outer: { a_inner: 2, nested: { b: 2, a: 1, c: 3 }, z_inner: 1 },
+		};
+		expect(buildAttestationPayload(a)).toBe(buildAttestationPayload(b));
+	});
+
+	it("preserves array order while sorting keys within array elements", () => {
+		const a: Record<string, unknown> = {
+			items: [{ z: 1, a: 2 }, { b: 3, a: 4 }],
+		};
+		const b: Record<string, unknown> = {
+			items: [{ a: 2, z: 1 }, { a: 4, b: 3 }],
+		};
+		expect(buildAttestationPayload(a)).toBe(buildAttestationPayload(b));
+
+		// Different array order must produce different output
+		const c: Record<string, unknown> = {
+			items: [{ a: 4, b: 3 }, { a: 2, z: 1 }],
+		};
+		expect(buildAttestationPayload(a)).not.toBe(buildAttestationPayload(c));
+	});
+
+	it("handles deeply nested structures deterministically", () => {
+		const a: Record<string, unknown> = {
+			l1: { l2: { l3: { z: "deep", a: "value" } } },
+		};
+		const b: Record<string, unknown> = {
+			l1: { l2: { l3: { a: "value", z: "deep" } } },
+		};
+		expect(buildAttestationPayload(a)).toBe(buildAttestationPayload(b));
+		const parsed = JSON.parse(buildAttestationPayload(a));
+		expect(Object.keys(parsed.l1.l2.l3)).toEqual(["a", "z"]);
+	});
 });
 
 describe("hashAttestationPayload", () => {

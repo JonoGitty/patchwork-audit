@@ -35,6 +35,11 @@ interface AttestationArtifact {
 	seal: VerifyResult["seal"];
 	witness: VerifyResult["witness"];
 	error: string | null;
+	/** Binding fields — tie the attestation to the exact audit state at generation time. */
+	chain_tip_hash: string | null;
+	chain_chained_events: number;
+	seal_tip_hash: string | null;
+	witness_latest_matching_tip_hash: string | null;
 	payload_hash: string;
 	signature: string;
 	key_id?: string;
@@ -56,6 +61,21 @@ export const attestCommand = new Command("attest")
 	.option("--history", "Write timestamped artifact to history in addition to latest")
 	.option("--max-history-files <n>", "Maximum number of history files to keep (default: unlimited)")
 	.action((opts) => {
+		// Validate --max-history-files early
+		if (opts.maxHistoryFiles !== undefined) {
+			const n = Number(opts.maxHistoryFiles);
+			if (!Number.isInteger(n) || n <= 0) {
+				const msg = `Invalid --max-history-files: "${opts.maxHistoryFiles}". Must be a positive integer (> 0).`;
+				if (opts.json) {
+					console.log(JSON.stringify({ error: msg }));
+				} else {
+					console.log(chalk.red(msg));
+				}
+				process.exitCode = 1;
+				return;
+			}
+		}
+
 		const result = runVerification({
 			file: opts.file,
 			sealFile: opts.sealFile,
@@ -68,7 +88,7 @@ export const attestCommand = new Command("attest")
 			maxWitnessAgeSeconds: opts.maxWitnessAgeSeconds,
 		});
 
-		// Build unsigned artifact
+		// Build unsigned artifact with binding fields that tie it to current state
 		const artifact: Record<string, unknown> = {
 			schema_version: 1,
 			generated_at: new Date().toISOString(),
@@ -79,6 +99,11 @@ export const attestCommand = new Command("attest")
 			seal: result.seal,
 			witness: result.witness,
 			error: result.error,
+			chain_tip_hash: result.chain_tip_hash,
+			chain_chained_events: result.chain.chained_events,
+			seal_tip_hash: result.seal.seal_tip_hash,
+			witness_latest_matching_tip_hash:
+				result.witness.witness_matching_tip_count > 0 ? result.chain_tip_hash : null,
 		};
 
 		// Resolve signing key

@@ -20,6 +20,12 @@ export const verifyCommand = new Command("verify")
 	.option("--require-witness", "Fail if no valid matching witness record exists")
 	.option("--max-witness-age-seconds <n>", "Fail if latest matching witness is older than n seconds")
 	.option("--strict-witness-file", "Fail if any corrupt lines exist in the witness file")
+	.option("--attestation-file <path>", "Path to attestation artifact JSON file")
+	.option("--no-attestation-check", "Skip attestation verification")
+	.option("--require-attestation", "Fail if attestation is missing, tampered, or has invalid signature")
+	.option("--require-signed-attestation", "Fail if attestation is unsigned or signature is invalid")
+	.option("--max-attestation-age-seconds <n>", "Fail if attestation is older than n seconds")
+	.option("--strict-attestation-file", "Additionally require attestation pass=true (not just structural validity)")
 	.action((opts) => {
 		const result = runVerification({
 			file: opts.file,
@@ -37,6 +43,12 @@ export const verifyCommand = new Command("verify")
 			strictWitnessFile: opts.strictWitnessFile,
 			strict: opts.strict,
 			allowInvalid: opts.allowInvalid,
+			attestationFile: opts.attestationFile,
+			attestationCheck: opts.attestationCheck,
+			requireAttestation: opts.requireAttestation,
+			requireSignedAttestation: opts.requireSignedAttestation,
+			maxAttestationAgeSeconds: opts.maxAttestationAgeSeconds,
+			strictAttestationFile: opts.strictAttestationFile,
 		});
 
 		// Handle early-exit errors
@@ -62,7 +74,7 @@ export const verifyCommand = new Command("verify")
 	});
 
 function formatJsonOutput(result: VerifyResult): void {
-	const output = { ...result.chain, seal: result.seal, witness: result.witness };
+	const output = { ...result.chain, seal: result.seal, witness: result.witness, attestation: result.attestation };
 	console.log(JSON.stringify(output, null, 2));
 }
 
@@ -133,6 +145,25 @@ function formatTextOutput(result: VerifyResult, opts: Record<string, unknown>): 
 			console.log(chalk.green(`  Witness verified: ${witnessCheck.witness_matching_tip_count} matching record(s)${ageStr}${corruptStr}`));
 		} else if (!witnessCheck.witness_present) {
 			console.log(chalk.yellow("  Witness: No witness file found. Run 'patchwork witness publish' to create one."));
+		}
+	}
+
+	// Attestation text output
+	const attestCheck = result.attestation;
+	if (attestCheck.attestation_checked) {
+		if (attestCheck.attestation_failure_reason) {
+			console.log(chalk.red(`  Attestation FAILED: ${attestCheck.attestation_failure_reason}`));
+		} else if (attestCheck.attestation_present && attestCheck.attestation_valid) {
+			const ageStr = attestCheck.attestation_age_seconds !== null
+				? ` (age: ${attestCheck.attestation_age_seconds}s)`
+				: "";
+			const sigStr = attestCheck.attestation_signed
+				? (attestCheck.attestation_signature_valid ? ", signature valid" : ", signature INVALID")
+				: ", unsigned";
+			const stateStr = attestCheck.attestation_matches_current_state ? ", state bound" : "";
+			console.log(chalk.green(`  Attestation verified: hash valid${sigStr}${stateStr}${ageStr}`));
+		} else if (!attestCheck.attestation_present) {
+			console.log(chalk.yellow("  Attestation: No attestation file found. Run 'patchwork attest' to create one."));
 		}
 	}
 }
