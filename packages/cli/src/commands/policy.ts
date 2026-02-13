@@ -7,6 +7,7 @@ import {
 	policyToYaml,
 	STRICT_POLICY,
 	DEFAULT_POLICY,
+	getHomeDir,
 } from "@patchwork/core";
 
 export const policyCommand = new Command("policy")
@@ -57,7 +58,7 @@ policyCommand
 		const policy = opts.strict ? STRICT_POLICY : DEFAULT_POLICY;
 		const targetDir = opts.project
 			? join(process.cwd(), ".patchwork")
-			: join(process.env.HOME || "~", ".patchwork");
+			: join(getHomeDir(), ".patchwork");
 		const targetPath = join(targetDir, "policy.yml");
 
 		if (existsSync(targetPath)) {

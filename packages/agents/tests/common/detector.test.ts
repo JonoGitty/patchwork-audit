@@ -12,6 +12,7 @@ vi.mock("node:fs", () => ({
 
 const mockedExecSync = vi.mocked(execSync);
 const mockedExistsSync = vi.mocked(existsSync);
+const findCmd = (name: string) => (process.platform === "win32" ? `where ${name}` : `which ${name}`);
 
 describe("detectInstalledAgents", () => {
 	beforeEach(() => {
@@ -27,7 +28,7 @@ describe("detectInstalledAgents", () => {
 
 	it("detects claude-code when which claude succeeds", async () => {
 		mockedExecSync.mockImplementation((cmd: string) => {
-			if (cmd === "which claude") return "/usr/local/bin/claude" as any;
+			if (cmd === findCmd("claude")) return "/usr/local/bin/claude" as any;
 			if (cmd.includes("--version")) return "1.2.3" as any;
 			throw new Error("not found");
 		});
@@ -42,7 +43,7 @@ describe("detectInstalledAgents", () => {
 
 	it("detects codex when which codex succeeds", async () => {
 		mockedExecSync.mockImplementation((cmd: string) => {
-			if (cmd === "which codex") return "/usr/local/bin/codex" as any;
+			if (cmd === findCmd("codex")) return "/usr/local/bin/codex" as any;
 			if (cmd.includes("--version")) return "0.5.0" as any;
 			throw new Error("not found");
 		});
@@ -69,7 +70,7 @@ describe("detectInstalledAgents", () => {
 
 	it("extracts semver from version output", async () => {
 		mockedExecSync.mockImplementation((cmd: string) => {
-			if (cmd === "which claude") return "/usr/bin/claude" as any;
+			if (cmd === findCmd("claude")) return "/usr/bin/claude" as any;
 			if (cmd.includes("--version")) return "Claude Code v2.11.3 (build abc123)" as any;
 			throw new Error("not found");
 		});
@@ -82,7 +83,7 @@ describe("detectInstalledAgents", () => {
 
 	it("returns null version when --version throws", async () => {
 		mockedExecSync.mockImplementation((cmd: string) => {
-			if (cmd === "which claude") return "/usr/bin/claude" as any;
+			if (cmd === findCmd("claude")) return "/usr/bin/claude" as any;
 			// --version throws
 			if (cmd.includes("--version")) throw new Error("timeout");
 			throw new Error("not found");
@@ -97,7 +98,7 @@ describe("detectInstalledAgents", () => {
 
 	it("checks config dir existence", async () => {
 		mockedExecSync.mockImplementation((cmd: string) => {
-			if (cmd === "which claude") return "/usr/bin/claude" as any;
+			if (cmd === findCmd("claude")) return "/usr/bin/claude" as any;
 			if (cmd.includes("--version")) return "1.0.0" as any;
 			throw new Error("not found");
 		});

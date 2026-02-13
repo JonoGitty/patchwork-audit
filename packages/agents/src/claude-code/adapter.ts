@@ -11,6 +11,7 @@ import {
 	JsonlStore,
 	SqliteStore,
 	loadActivePolicy,
+	getHomeDir,
 } from "@patchwork/core";
 import { isAbsolute, relative, dirname, join } from "node:path";
 import {
@@ -27,11 +28,11 @@ import { mapClaudeCodeTool } from "./mapper.js";
 import type { ClaudeCodeHookInput, ClaudeCodeHookOutput } from "./types.js";
 
 function getEventsPath(): string {
-	return `${process.env.HOME}/.patchwork/events.jsonl`;
+	return join(getHomeDir(), ".patchwork", "events.jsonl");
 }
 
 function getDbPath(): string {
-	return `${process.env.HOME}/.patchwork/db/audit.db`;
+	return join(getHomeDir(), ".patchwork", "db", "audit.db");
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +54,7 @@ export interface DivergenceMarker {
 }
 
 function getDivergenceMarkerPath(): string {
-	return join(process.env.HOME || "~", ".patchwork", "state", "sqlite-divergence.json");
+	return join(getHomeDir(), ".patchwork", "state", "sqlite-divergence.json");
 }
 
 /** Reconcile permissions to target if they don't match. */
