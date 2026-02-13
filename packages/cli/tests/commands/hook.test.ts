@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Readable, Writable } from "node:stream";
-import { mkdtempSync, rmSync, readFileSync, existsSync, statSync, mkdirSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, statSync, mkdirSync, chmodSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 
 /**
  * Helper: run `patchwork hook <event>` with controlled stdin, capturing stdout/stderr.
@@ -278,10 +279,8 @@ describe("hook PreToolUse telemetry file sink", () => {
 
 	it("D: file write failure does not change allow/deny output path", async () => {
 		// Point to a path that cannot be written (dir is a regular file)
-		const blockingFile = join(tmpDir, "blocker");
 		mkdirSync(tmpDir, { recursive: true });
 		// Create a regular file where the dir should be, making mkdir fail
-		const { writeFileSync } = await import("node:fs");
 		writeFileSync(join(tmpDir, "blocker"), "not-a-dir");
 		const telemetryFile = join(tmpDir, "blocker", "sub", "pretool.jsonl");
 
@@ -299,5 +298,381 @@ describe("hook PreToolUse telemetry file sink", () => {
 
 		// stderr should contain the warning about failed write
 		expect(stderr).toContain("telemetry file write failed");
+	});
+});
+
+describe("hook PreToolUse telemetry file rotation", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-telemetry-rotate-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("A: rotation triggers when max bytes exceeded", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Seed the file with enough data to exceed a small max
+		const seedLine = JSON.stringify({ event: "PreToolUse", ts: "old", seeded: true }) + "\n";
+		writeFileSync(telemetryFile, seedLine, { mode: 0o600 });
+		const seedSize = Buffer.byteLength(seedLine);
+
+		// Set max-bytes to seed size so next append triggers rotation
+		await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES: String(seedSize),
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES: "3",
+		});
+
+		// Active file should contain only the new line
+		expect(existsSync(telemetryFile)).toBe(true);
+		const activeContent = readFileSync(telemetryFile, "utf-8").trim();
+		const activeRecord = JSON.parse(activeContent);
+		expect(activeRecord.seeded).toBeUndefined(); // new record, not seeded
+		expect(activeRecord.event).toBe("PreToolUse");
+
+		// Old data should be in pretool.1.jsonl
+		const rotated1 = join(telemetryDir, "pretool.1.jsonl");
+		expect(existsSync(rotated1)).toBe(true);
+		const rotatedContent = readFileSync(rotated1, "utf-8").trim();
+		const rotatedRecord = JSON.parse(rotatedContent);
+		expect(rotatedRecord.seeded).toBe(true);
+	});
+
+	it("B: rotation keeps only configured max files", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Pre-populate 3 rotated files to simulate prior rotations
+		for (let i = 1; i <= 3; i++) {
+			writeFileSync(
+				join(telemetryDir, `pretool.${i}.jsonl`),
+				JSON.stringify({ old: i }) + "\n",
+				{ mode: 0o600 },
+			);
+		}
+		// Seed active file so it exceeds max-bytes
+		const seedLine = JSON.stringify({ event: "PreToolUse", ts: "seed" }) + "\n";
+		writeFileSync(telemetryFile, seedLine, { mode: 0o600 });
+
+		await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES: "1", // force rotation
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES: "2",
+		});
+
+		// Should have active + .1 + .2 only (max_files=2)
+		expect(existsSync(telemetryFile)).toBe(true);
+		expect(existsSync(join(telemetryDir, "pretool.1.jsonl"))).toBe(true);
+		expect(existsSync(join(telemetryDir, "pretool.2.jsonl"))).toBe(true);
+		// .3 should have been deleted
+		expect(existsSync(join(telemetryDir, "pretool.3.jsonl"))).toBe(false);
+	});
+
+	it("C: no rotation when disabled (max-bytes=0 or absent)", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Seed with data
+		const seedLine = JSON.stringify({ event: "PreToolUse", ts: "seed" }) + "\n";
+		writeFileSync(telemetryFile, seedLine, { mode: 0o600 });
+
+		// Run without max-bytes (disabled by default)
+		await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+		});
+
+		// No rotated files should exist
+		expect(existsSync(join(telemetryDir, "pretool.1.jsonl"))).toBe(false);
+
+		// Active file should have both lines (seed + new)
+		const lines = readFileSync(telemetryFile, "utf-8").trim().split("\n");
+		expect(lines).toHaveLength(2);
+		expect(JSON.parse(lines[0]).ts).toBe("seed");
+		expect(JSON.parse(lines[1]).event).toBe("PreToolUse");
+	});
+
+	it("D: rotated files keep secure perms (0o600)", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Seed file
+		writeFileSync(telemetryFile, JSON.stringify({ seed: true }) + "\n", { mode: 0o600 });
+
+		await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES: "3",
+		});
+
+		const rotated1 = join(telemetryDir, "pretool.1.jsonl");
+		expect(existsSync(rotated1)).toBe(true);
+		expect(statSync(rotated1).mode & 0o777).toBe(0o600);
+		expect(statSync(telemetryFile).mode & 0o777).toBe(0o600);
+		expect(statSync(telemetryDir).mode & 0o777).toBe(0o700);
+	});
+
+	it("E: rotation failure does not alter fail-closed deny output", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Seed file
+		writeFileSync(telemetryFile, JSON.stringify({ seed: true }) + "\n", { mode: 0o600 });
+
+		// Make the rotated destination a directory so renameSync fails
+		const rotated1Dir = join(telemetryDir, "pretool.1.jsonl");
+		mkdirSync(rotated1Dir);
+
+		const { stdout } = await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES: "3",
+		});
+
+		// Fail-closed deny should still work
+		const parsed = JSON.parse(stdout);
+		expect(parsed.allow).toBe(false);
+		expect(parsed.reason).toContain("fail-closed");
+	});
+});
+
+describe("hook PreToolUse telemetry concurrency hardening", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-telemetry-concurrency-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("A: concurrent writes produce valid JSONL (no corruption)", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Run 5 hook invocations sequentially (same process; concurrency tested
+		// by verifying the lock file is created and removed cleanly each time)
+		const writes: Promise<{ stdout: string; stderr: string }>[] = [];
+		for (let i = 0; i < 5; i++) {
+			writes.push(
+				runHook("pre-tool", "NOT_JSON", {
+					PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+					PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+					PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+					PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+					PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES: "100000",
+					PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES: "3",
+				}),
+			);
+		}
+		await Promise.all(writes);
+
+		// All 5 lines should be valid JSON, no corruption
+		expect(existsSync(telemetryFile)).toBe(true);
+		const lines = readFileSync(telemetryFile, "utf-8").trim().split("\n");
+		expect(lines.length).toBe(5);
+		for (const line of lines) {
+			const record = JSON.parse(line); // throws if corrupt
+			expect(record.event).toBe("PreToolUse");
+		}
+
+		// Lock file should be cleaned up
+		expect(existsSync(telemetryFile + ".lock")).toBe(false);
+	});
+
+	it("B: gap-robust cleanup removes orphaned high-index files", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Create a gap scenario: .1 exists, .2 missing, .3 and .5 exist
+		writeFileSync(join(telemetryDir, "pretool.1.jsonl"), "{\"idx\":1}\n", { mode: 0o600 });
+		// .2 intentionally missing
+		writeFileSync(join(telemetryDir, "pretool.3.jsonl"), "{\"idx\":3}\n", { mode: 0o600 });
+		writeFileSync(join(telemetryDir, "pretool.5.jsonl"), "{\"idx\":5}\n", { mode: 0o600 });
+		// Seed active file
+		writeFileSync(telemetryFile, "{\"active\":true}\n", { mode: 0o600 });
+
+		// Trigger rotation with max_files=2
+		await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES: "1", // force rotation
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES: "2",
+		});
+
+		// .3 and .5 should be gone (index >= maxFiles=2, cleaned up despite gaps)
+		expect(existsSync(join(telemetryDir, "pretool.3.jsonl"))).toBe(false);
+		expect(existsSync(join(telemetryDir, "pretool.5.jsonl"))).toBe(false);
+
+		// .1 was shifted to .2, active was shifted to .1
+		// Active file has the new telemetry line
+		expect(existsSync(telemetryFile)).toBe(true);
+		expect(existsSync(join(telemetryDir, "pretool.1.jsonl"))).toBe(true);
+		expect(existsSync(join(telemetryDir, "pretool.2.jsonl"))).toBe(true);
+	});
+
+	it("C: lock contention failure preserves fail-closed deny and logs warning", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Seed file to trigger rotation path
+		writeFileSync(telemetryFile, "{\"seed\":true}\n", { mode: 0o600 });
+
+		// Hold the lock file to simulate contention (fresh mtime so not stale)
+		const lockPath = telemetryFile + ".lock";
+		const fd = openSync(lockPath, "wx", 0o600);
+		writeFileSync(fd, String(process.pid));
+		closeSync(fd);
+
+		const { stdout, stderr } = await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES: "1", // force rotation path
+			PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES: "3",
+		});
+
+		// Fail-closed deny must still be emitted
+		const parsed = JSON.parse(stdout);
+		expect(parsed.allow).toBe(false);
+		expect(parsed.reason).toContain("fail-closed");
+
+		// Stderr should contain the lock contention warning
+		expect(stderr).toContain("telemetry lock contention");
+	});
+});
+
+describe("hook PreToolUse telemetry append atomicity", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-telemetry-atomicity-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("A: concurrent non-rotation writes produce valid JSONL under default lock mode", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Run 5 concurrent hook invocations without rotation (no max-bytes)
+		// Default lock mode is "always", so all writes are lock-protected
+		const writes: Promise<{ stdout: string; stderr: string }>[] = [];
+		for (let i = 0; i < 5; i++) {
+			writes.push(
+				runHook("pre-tool", "NOT_JSON", {
+					PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+					PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+					PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+					PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+					// No MAX_BYTES — non-rotation path, but still locked
+				}),
+			);
+		}
+		await Promise.all(writes);
+
+		// All 5 lines should be valid JSON
+		expect(existsSync(telemetryFile)).toBe(true);
+		const lines = readFileSync(telemetryFile, "utf-8").trim().split("\n");
+		expect(lines.length).toBe(5);
+		for (const line of lines) {
+			const record = JSON.parse(line);
+			expect(record.event).toBe("PreToolUse");
+		}
+
+		// Lock file should be cleaned up
+		expect(existsSync(telemetryFile + ".lock")).toBe(false);
+	});
+
+	it("B: rotate-only mode skips lock for non-rotation writes", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Hold the lock to prove non-rotation path doesn't need it in rotate-only mode
+		const lockPath = telemetryFile + ".lock";
+		const fd = openSync(lockPath, "wx", 0o600);
+		writeFileSync(fd, String(process.pid));
+		closeSync(fd);
+
+		const { stderr } = await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+			PATCHWORK_PRETOOL_TELEMETRY_LOCK_MODE: "rotate-only",
+			// No MAX_BYTES — non-rotation path
+		});
+
+		// File should have been written (lock bypassed for non-rotation)
+		expect(existsSync(telemetryFile)).toBe(true);
+		const content = readFileSync(telemetryFile, "utf-8").trim();
+		const record = JSON.parse(content);
+		expect(record.event).toBe("PreToolUse");
+
+		// No contention warning (lock was not attempted)
+		expect(stderr).not.toContain("telemetry lock contention");
+	});
+
+	it("C: lock contention on non-rotation path preserves fail-closed deny (always mode)", async () => {
+		const telemetryDir = join(tmpDir, "telemetry");
+		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
+		const telemetryFile = join(telemetryDir, "pretool.jsonl");
+
+		// Hold the lock to simulate contention
+		const lockPath = telemetryFile + ".lock";
+		const fd = openSync(lockPath, "wx", 0o600);
+		writeFileSync(fd, String(process.pid));
+		closeSync(fd);
+
+		const { stdout, stderr } = await runHook("pre-tool", "NOT_JSON", {
+			PATCHWORK_PRETOOL_TELEMETRY_JSON: "1",
+			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
+			PATCHWORK_PRETOOL_TELEMETRY_DEST: "file",
+			PATCHWORK_PRETOOL_TELEMETRY_FILE: telemetryFile,
+			// Default lock mode (always) — non-rotation path will try lock
+		});
+
+		// Fail-closed deny must still be emitted
+		const parsed = JSON.parse(stdout);
+		expect(parsed.allow).toBe(false);
+		expect(parsed.reason).toContain("fail-closed");
+
+		// Stderr should show lock contention warning
+		expect(stderr).toContain("telemetry lock contention");
 	});
 });

@@ -182,12 +182,14 @@ Current state:
 - Explicit policy mode is supported at install time (`--policy-mode audit|fail-closed`)
 - Structured PreToolUse telemetry JSON is supported (`PATCHWORK_PRETOOL_TELEMETRY_JSON=1` / `--pretool-telemetry-json`)
 - Telemetry sink routing is supported (`PATCHWORK_PRETOOL_TELEMETRY_DEST=stderr|file|both`, optional `PATCHWORK_PRETOOL_TELEMETRY_FILE`)
+- Telemetry file rotation controls are supported (`PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES`, `PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES`)
 - Strict install profile is supported (`--strict-profile`: fail-closed + telemetry + 500ms warn by default)
 
 Why this remains important:
 - Default behavior is still fail-open unless fail-closed mode is explicitly chosen
 - Process-level timeouts/crashes still rely on host behavior and are not fully controlled by Patchwork
-- Telemetry file sink is append-only with no built-in rotation/history controls
+- Telemetry rotation path is lock-protected, but the common no-rotation append path remains lock-free and can still race under high concurrency
+- Rotations use rename chains (not transactional), so abrupt interruption can leave transient gaps
 
 Evidence:
 - `packages/cli/src/commands/hook.ts`
@@ -225,7 +227,7 @@ What it is not yet:
 ## 4. Recommended Next Work (Priority Order)
 
 1. Enforcement semantics hardening
-- Add telemetry retention/rotation controls for file sink deployments
+- Extend telemetry lock coverage to non-rotation append path (or move to atomic append strategy) for high-concurrency runs
 - Consider promoting strict-profile semantics into installer API for non-CLI callers
 
 2. Dual-write consistency hardening

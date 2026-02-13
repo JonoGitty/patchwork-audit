@@ -8,6 +8,7 @@ export {
 	type InstallOptions,
 	type PolicyMode,
 	type TelemetryDest,
+	type TelemetryLockMode,
 } from "./claude-code/installer.js";
 export type {
 	ClaudeCodeHookInput,

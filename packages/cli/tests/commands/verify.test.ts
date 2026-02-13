@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { computeEventHash } from "@patchwork/core";
@@ -217,5 +217,360 @@ describe("verify --max-seal-age-seconds input validation", () => {
 			"--max-seal-age-seconds", "3600",
 		]);
 		expect(exitCode).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Witness verification tests
+// ---------------------------------------------------------------------------
+
+/** Build a valid witness record for the given chain tip. */
+function makeWitnessRecord(
+	tipHash: string,
+	overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+	return {
+		schema_version: 1,
+		witnessed_at: new Date().toISOString(),
+		tip_hash: tipHash,
+		chained_events: 3,
+		seal_signature: "hmac-sha256:fake",
+		witness_url: "https://witness.example.com",
+		anchor_id: "anc_test_001",
+		...overrides,
+	};
+}
+
+describe("verify --require-witness", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-verify-witness-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("E: fails with no witness file", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { exitCode } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--require-witness",
+			"--witness-file", join(tmpDir, "nonexistent-witnesses.jsonl"),
+		]);
+		expect(exitCode).toBe(1);
+	});
+
+	it("E2: fails with empty witness file", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		writeFileSync(witnessPath, "", "utf-8");
+
+		const { exitCode } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--require-witness",
+			"--witness-file", witnessPath,
+		]);
+		expect(exitCode).toBe(1);
+	});
+
+	it("E3: fails when witness records exist but none match current tip", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		const staleWitness = makeWitnessRecord("sha256:old_tip_hash");
+		writeFileSync(witnessPath, JSON.stringify(staleWitness) + "\n", "utf-8");
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--require-witness",
+			"--witness-file", witnessPath,
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("Witness FAILED");
+	});
+
+	it("E4: passes with valid matching witness", async () => {
+		const events = makeChainedEvents(3);
+		const tipHash = events[2].event_hash as string;
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		const witness = makeWitnessRecord(tipHash);
+		writeFileSync(witnessPath, JSON.stringify(witness) + "\n", "utf-8");
+
+		const { exitCode } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--require-witness",
+			"--witness-file", witnessPath,
+		]);
+		expect(exitCode).toBeUndefined();
+	});
+});
+
+describe("verify --max-witness-age-seconds", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-verify-witness-age-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("F: fails on stale witness", async () => {
+		const events = makeChainedEvents(3);
+		const tipHash = events[2].event_hash as string;
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		// Create witness from 2 hours ago
+		const oldTime = new Date(Date.now() - 7200 * 1000).toISOString();
+		const witness = makeWitnessRecord(tipHash, { witnessed_at: oldTime });
+		writeFileSync(witnessPath, JSON.stringify(witness) + "\n", "utf-8");
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--max-witness-age-seconds", "3600",
+			"--witness-file", witnessPath,
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("Witness");
+		expect(joined).toContain("too old");
+	});
+
+	it("F2: passes on fresh witness", async () => {
+		const events = makeChainedEvents(3);
+		const tipHash = events[2].event_hash as string;
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		// Create witness from 5 seconds ago
+		const freshTime = new Date(Date.now() - 5 * 1000).toISOString();
+		const witness = makeWitnessRecord(tipHash, { witnessed_at: freshTime });
+		writeFileSync(witnessPath, JSON.stringify(witness) + "\n", "utf-8");
+
+		const { exitCode } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--max-witness-age-seconds", "3600",
+			"--witness-file", witnessPath,
+		]);
+		expect(exitCode).toBeUndefined();
+	});
+
+	it("F3: rejects invalid --max-witness-age-seconds", async () => {
+		const events = makeChainedEvents(2);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--max-witness-age-seconds", "abc",
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("Invalid --max-witness-age-seconds");
+	});
+});
+
+describe("verify --strict-witness-file", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-verify-strict-witness-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("G: fails when witness file has corrupt lines", async () => {
+		const events = makeChainedEvents(3);
+		const tipHash = events[2].event_hash as string;
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		const validWitness = makeWitnessRecord(tipHash);
+		writeFileSync(
+			witnessPath,
+			JSON.stringify(validWitness) + "\nNOT_VALID_JSON\n",
+			"utf-8",
+		);
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--strict-witness-file",
+			"--witness-file", witnessPath,
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("corrupt witness line");
+	});
+
+	it("G2: default mode tolerates corrupt lines and continues", async () => {
+		const events = makeChainedEvents(3);
+		const tipHash = events[2].event_hash as string;
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		const validWitness = makeWitnessRecord(tipHash);
+		writeFileSync(
+			witnessPath,
+			JSON.stringify(validWitness) + "\nNOT_VALID_JSON\n",
+			"utf-8",
+		);
+
+		// Without --strict-witness-file, corrupt lines are tolerated
+		const { exitCode } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--require-witness",
+			"--witness-file", witnessPath,
+		]);
+		expect(exitCode).toBeUndefined();
+	});
+
+	it("G3: invalid witnessed_at line counted as corrupt", async () => {
+		const events = makeChainedEvents(3);
+		const tipHash = events[2].event_hash as string;
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		// Record with invalid witnessed_at — parseable JSON but fails schema .datetime()
+		const badRecord = {
+			schema_version: 1,
+			witnessed_at: "not-a-date",
+			tip_hash: tipHash,
+			chained_events: 3,
+			seal_signature: "hmac-sha256:fake",
+			witness_url: "https://witness.example.com",
+			anchor_id: "anc_bad_ts",
+		};
+		writeFileSync(witnessPath, JSON.stringify(badRecord) + "\n", "utf-8");
+
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--strict-witness-file",
+			"--witness-file", witnessPath,
+			"--json",
+		]);
+		expect(exitCode).toBe(1);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.witness.witness_corrupt_lines).toBe(1);
+	});
+});
+
+describe("verify witness JSON output", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-verify-witness-json-test-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("H: JSON output includes all witness structured fields (pass path)", async () => {
+		const events = makeChainedEvents(3);
+		const tipHash = events[2].event_hash as string;
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+		const witnessPath = join(tmpDir, "witnesses.jsonl");
+		const witness = makeWitnessRecord(tipHash);
+		writeFileSync(witnessPath, JSON.stringify(witness) + "\n", "utf-8");
+
+		const { output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--require-witness",
+			"--witness-file", witnessPath,
+			"--json",
+		]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.witness).toBeDefined();
+		expect(parsed.witness.witness_checked).toBe(true);
+		expect(parsed.witness.witness_present).toBe(true);
+		expect(parsed.witness.witness_matching_tip_count).toBe(1);
+		expect(parsed.witness.witness_valid_count).toBe(1);
+		expect(typeof parsed.witness.witness_latest_age_seconds).toBe("number");
+		expect(parsed.witness.witness_corrupt_lines).toBe(0);
+		expect(parsed.witness.witness_failure_reason).toBeNull();
+	});
+
+	it("H2: JSON output includes all witness fields (fail path)", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--require-witness",
+			"--witness-file", join(tmpDir, "nonexistent.jsonl"),
+			"--json",
+		]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.witness).toBeDefined();
+		expect(parsed.witness.witness_checked).toBe(true);
+		expect(parsed.witness.witness_present).toBe(false);
+		expect(parsed.witness.witness_matching_tip_count).toBe(0);
+		expect(parsed.witness.witness_valid_count).toBe(0);
+		expect(parsed.witness.witness_latest_age_seconds).toBeNull();
+		expect(parsed.witness.witness_corrupt_lines).toBe(0);
+		expect(typeof parsed.witness.witness_failure_reason).toBe("string");
+	});
+
+	it("I: --no-witness-check bypasses witness policy and marks witness_checked false", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		const { output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--no-witness-check",
+			"--json",
+		]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.witness).toBeDefined();
+		expect(parsed.witness.witness_checked).toBe(false);
+		expect(parsed.witness.witness_failure_reason).toBeNull();
+	});
+
+	it("I2: --no-witness-check skips even when --require-witness is set", async () => {
+		const events = makeChainedEvents(3);
+		const filePath = join(tmpDir, "events.jsonl");
+		writeJsonl(filePath, events.map((e) => JSON.stringify(e)));
+
+		// --no-witness-check should win over --require-witness
+		const { exitCode, output } = await runVerify([
+			"--file", filePath,
+			"--no-seal-check",
+			"--no-witness-check",
+			"--json",
+		]);
+		expect(exitCode).toBeUndefined();
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.witness.witness_checked).toBe(false);
 	});
 });

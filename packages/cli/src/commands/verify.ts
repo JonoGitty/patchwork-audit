@@ -9,7 +9,8 @@ import {
 	loadKeyById,
 	type SealRecord,
 } from "@patchwork/core";
-import { EVENTS_PATH, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH } from "../store.js";
+import { EVENTS_PATH, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH, WITNESSES_PATH } from "../store.js";
+import { WitnessRecordSchema, type WitnessRecord } from "@patchwork/core";
 
 /** Structured seal check result for JSON output and policy decisions. */
 interface SealCheckResult {
@@ -20,6 +21,17 @@ interface SealCheckResult {
 	seal_age_seconds: number | null;
 	seal_corrupt_lines: number;
 	seal_failure_reason: string | null;
+}
+
+/** Structured witness check result for JSON output and policy decisions. */
+interface WitnessCheckResult {
+	witness_checked: boolean;
+	witness_present: boolean;
+	witness_matching_tip_count: number;
+	witness_valid_count: number;
+	witness_latest_age_seconds: number | null;
+	witness_corrupt_lines: number;
+	witness_failure_reason: string | null;
 }
 
 /**
@@ -38,6 +50,19 @@ function parseMaxSealAge(raw: unknown): number | null | "invalid" {
 	return n;
 }
 
+/**
+ * Parse and strictly validate --max-witness-age-seconds.
+ * Identical validation rules to seal age.
+ */
+function parseMaxWitnessAge(raw: unknown): number | null | "invalid" {
+	if (raw === undefined) return null;
+	const str = String(raw);
+	if (!/^\d+$/.test(str)) return "invalid";
+	const n = Number(str);
+	if (n <= 0 || !Number.isSafeInteger(n)) return "invalid";
+	return n;
+}
+
 export const verifyCommand = new Command("verify")
 	.description("Verify tamper-evident hash chain integrity of the audit log")
 	.option("--json", "Output result as JSON")
@@ -51,11 +76,29 @@ export const verifyCommand = new Command("verify")
 	.option("--require-seal", "Fail if no valid seal exists")
 	.option("--max-seal-age-seconds <n>", "Fail if latest seal is older than n seconds (positive integer)")
 	.option("--strict-seal-file", "Fail if any corrupt lines exist in the seal file")
+	.option("--witness-file <path>", "Path to witness records JSONL file")
+	.option("--no-witness-check", "Skip witness verification")
+	.option("--require-witness", "Fail if no valid matching witness record exists")
+	.option("--max-witness-age-seconds <n>", "Fail if latest matching witness is older than n seconds")
+	.option("--strict-witness-file", "Fail if any corrupt lines exist in the witness file")
 	.action((opts) => {
 		// Validate --max-seal-age-seconds early, before any verification logic
 		const maxAgeResult = parseMaxSealAge(opts.maxSealAgeSeconds);
 		if (maxAgeResult === "invalid") {
 			const msg = `Invalid --max-seal-age-seconds: "${opts.maxSealAgeSeconds}". Must be a positive integer (> 0).`;
+			if (opts.json) {
+				console.log(JSON.stringify({ error: msg }));
+			} else {
+				console.log(chalk.red(msg));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		// Validate --max-witness-age-seconds early
+		const maxWitnessAge = parseMaxWitnessAge(opts.maxWitnessAgeSeconds);
+		if (maxWitnessAge === "invalid") {
+			const msg = `Invalid --max-witness-age-seconds: "${opts.maxWitnessAgeSeconds}". Must be a positive integer (> 0).`;
 			if (opts.json) {
 				console.log(JSON.stringify({ error: msg }));
 			} else {
@@ -110,8 +153,26 @@ export const verifyCommand = new Command("verify")
 			}
 		}
 
+		// Witness verification — find current chain tip for matching
+		let currentTipForWitness: string | null = null;
+		for (let i = events.length - 1; i >= 0; i--) {
+			const h = events[i].event_hash;
+			if (typeof h === "string") {
+				currentTipForWitness = h;
+				break;
+			}
+		}
+		const witnessCheck = runWitnessCheck(opts, currentTipForWitness, maxWitnessAge);
+
+		// Apply witness policy to pass/fail
+		if (witnessCheck.witness_checked) {
+			if (witnessCheck.witness_failure_reason !== null) {
+				isPass = false;
+			}
+		}
+
 		if (opts.json) {
-			const output = { ...result, seal: sealCheck };
+			const output = { ...result, seal: sealCheck, witness: witnessCheck };
 			console.log(JSON.stringify(output, null, 2));
 		} else {
 			const status = isPass
@@ -162,6 +223,23 @@ export const verifyCommand = new Command("verify")
 					console.log(chalk.green(`  Seal verified: signature valid, tip matches${ageStr}${corruptStr}`));
 				} else if (!sealCheck.seal_present) {
 					console.log(chalk.yellow("  Seal: No seal file found. Run 'patchwork seal' to create one."));
+				}
+			}
+
+			// Witness text output
+			if (witnessCheck.witness_checked) {
+				if (witnessCheck.witness_failure_reason) {
+					console.log(chalk.red(`  Witness FAILED: ${witnessCheck.witness_failure_reason}`));
+				} else if (witnessCheck.witness_matching_tip_count > 0) {
+					const ageStr = witnessCheck.witness_latest_age_seconds !== null
+						? ` (age: ${witnessCheck.witness_latest_age_seconds}s)`
+						: "";
+					const corruptStr = witnessCheck.witness_corrupt_lines > 0
+						? ` [${witnessCheck.witness_corrupt_lines} corrupt witness line(s) skipped]`
+						: "";
+					console.log(chalk.green(`  Witness verified: ${witnessCheck.witness_matching_tip_count} matching record(s)${ageStr}${corruptStr}`));
+				} else if (!witnessCheck.witness_present) {
+					console.log(chalk.yellow("  Witness: No witness file found. Run 'patchwork witness publish' to create one."));
 				}
 			}
 		}
@@ -415,6 +493,168 @@ function runSealCheck(
 		seal_age_seconds: ageSeconds,
 		seal_corrupt_lines: scanResult.corrupt_lines,
 		seal_failure_reason: null,
+	};
+}
+
+/**
+ * Run the witness check, applying --require-witness, --max-witness-age-seconds,
+ * and --strict-witness-file policies.
+ */
+function runWitnessCheck(
+	opts: Record<string, unknown>,
+	currentTip: string | null,
+	maxAge: number | null,
+): WitnessCheckResult {
+	// --no-witness-check skips everything
+	if (opts.witnessCheck === false) {
+		return {
+			witness_checked: false,
+			witness_present: false,
+			witness_matching_tip_count: 0,
+			witness_valid_count: 0,
+			witness_latest_age_seconds: null,
+			witness_corrupt_lines: 0,
+			witness_failure_reason: null,
+		};
+	}
+
+	const witnessPath = (opts.witnessFile as string) || WITNESSES_PATH;
+	const requireWitness = opts.requireWitness === true;
+	const strictWitnessFile = opts.strictWitnessFile === true;
+
+	// Witness file missing
+	if (!existsSync(witnessPath)) {
+		const needsFail = requireWitness || maxAge !== null;
+		return {
+			witness_checked: true,
+			witness_present: false,
+			witness_matching_tip_count: 0,
+			witness_valid_count: 0,
+			witness_latest_age_seconds: null,
+			witness_corrupt_lines: 0,
+			witness_failure_reason: needsFail
+				? "No witness file found (required by policy)"
+				: null,
+		};
+	}
+
+	// Reconcile permissions
+	reconcileMode(witnessPath, 0o600);
+
+	// Parse witness records
+	const witnessContent = readFileSync(witnessPath, "utf-8");
+	const witnessLines = witnessContent.split("\n").filter((l) => l.trim().length > 0);
+	if (witnessLines.length === 0) {
+		const needsFail = requireWitness || maxAge !== null;
+		return {
+			witness_checked: true,
+			witness_present: true,
+			witness_matching_tip_count: 0,
+			witness_valid_count: 0,
+			witness_latest_age_seconds: null,
+			witness_corrupt_lines: 0,
+			witness_failure_reason: needsFail
+				? "Witness file is empty (required by policy)"
+				: null,
+		};
+	}
+
+	let corruptLines = 0;
+	const validRecords: WitnessRecord[] = [];
+
+	for (const line of witnessLines) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			corruptLines++;
+			continue;
+		}
+
+		const result = WitnessRecordSchema.safeParse(parsed);
+		if (result.success) {
+			validRecords.push(result.data);
+		} else {
+			corruptLines++;
+		}
+	}
+
+	// --strict-witness-file: fail if any corrupt lines
+	if (strictWitnessFile && corruptLines > 0) {
+		return {
+			witness_checked: true,
+			witness_present: true,
+			witness_matching_tip_count: 0,
+			witness_valid_count: validRecords.length,
+			witness_latest_age_seconds: null,
+			witness_corrupt_lines: corruptLines,
+			witness_failure_reason: `${corruptLines} corrupt witness line(s) detected (--strict-witness-file)`,
+		};
+	}
+
+	// Find records matching current tip
+	const matchingRecords = currentTip
+		? validRecords.filter((r) => r.tip_hash === currentTip)
+		: [];
+
+	// Find latest matching witness age
+	let latestAgeSeconds: number | null = null;
+	if (matchingRecords.length > 0) {
+		let latestTime = 0;
+		for (const r of matchingRecords) {
+			const t = new Date(r.witnessed_at).getTime();
+			if (t > latestTime) latestTime = t;
+		}
+		latestAgeSeconds = Math.round((Date.now() - latestTime) / 1000);
+	}
+
+	// --require-witness: fail if no matching records
+	if (requireWitness && matchingRecords.length === 0) {
+		return {
+			witness_checked: true,
+			witness_present: true,
+			witness_matching_tip_count: 0,
+			witness_valid_count: validRecords.length,
+			witness_latest_age_seconds: latestAgeSeconds,
+			witness_corrupt_lines: corruptLines,
+			witness_failure_reason: "No witness record matches current chain tip (required by --require-witness)",
+		};
+	}
+
+	// --max-witness-age-seconds: fail if latest matching witness is too old
+	if (maxAge !== null && matchingRecords.length > 0 && latestAgeSeconds !== null && latestAgeSeconds > maxAge) {
+		return {
+			witness_checked: true,
+			witness_present: true,
+			witness_matching_tip_count: matchingRecords.length,
+			witness_valid_count: validRecords.length,
+			witness_latest_age_seconds: latestAgeSeconds,
+			witness_corrupt_lines: corruptLines,
+			witness_failure_reason: `Witness too old: ${latestAgeSeconds}s exceeds max ${maxAge}s`,
+		};
+	}
+
+	// --max-witness-age-seconds without matching records
+	if (maxAge !== null && matchingRecords.length === 0) {
+		return {
+			witness_checked: true,
+			witness_present: true,
+			witness_matching_tip_count: 0,
+			witness_valid_count: validRecords.length,
+			witness_latest_age_seconds: latestAgeSeconds,
+			witness_corrupt_lines: corruptLines,
+			witness_failure_reason: "No witness record matches current chain tip (required by --max-witness-age-seconds)",
+		};
+	}
+
+	return {
+		witness_checked: true,
+		witness_present: true,
+		witness_matching_tip_count: matchingRecords.length,
+		witness_valid_count: validRecords.length,
+		witness_latest_age_seconds: latestAgeSeconds,
+		witness_corrupt_lines: corruptLines,
+		witness_failure_reason: null,
 	};
 }
 

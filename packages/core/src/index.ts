@@ -52,6 +52,13 @@ export {
 	rotateKey,
 	type SealRecord,
 } from "./hash/seal.js";
+export {
+	WitnessRecordSchema,
+	buildWitnessPayload,
+	validateWitnessResponse,
+	hashWitnessPayload,
+	type WitnessRecord,
+} from "./hash/witness.js";
 
 // ID
 export { generateEventId, generateSessionId } from "./id/ulid.js";

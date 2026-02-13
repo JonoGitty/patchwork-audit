@@ -1,10 +1,11 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { installClaudeCodeHooks, detectInstalledAgents } from "@patchwork/agents";
-import type { InstallOptions, PolicyMode, TelemetryDest } from "@patchwork/agents";
+import type { InstallOptions, PolicyMode, TelemetryDest, TelemetryLockMode } from "@patchwork/agents";
 
 const VALID_POLICY_MODES = ["audit", "fail-closed"] as const;
 const VALID_TELEMETRY_DESTS = ["stderr", "file", "both"] as const;
+const VALID_LOCK_MODES = ["always", "rotate-only"] as const;
 
 interface InitOpts {
 	project?: string;
@@ -15,6 +16,9 @@ interface InitOpts {
 	pretoolTelemetryJson?: true;
 	pretoolTelemetryDest?: string;
 	pretoolTelemetryFile?: string;
+	pretoolTelemetryMaxBytes?: string;
+	pretoolTelemetryMaxFiles?: string;
+	pretoolTelemetryLockMode?: string;
 }
 
 export const initCommand = new Command("init")
@@ -28,6 +32,9 @@ export const initCommand = new Command("init")
 	.option("--pretool-telemetry-json", "Emit structured JSON telemetry for PreToolUse")
 	.option("--pretool-telemetry-dest <dest>", "Telemetry destination: stderr (default), file, or both")
 	.option("--pretool-telemetry-file <path>", "File path for telemetry JSONL output")
+	.option("--pretool-telemetry-max-bytes <n>", "Max telemetry file size before rotation (0 = disabled)")
+	.option("--pretool-telemetry-max-files <n>", "Max rotated telemetry files to keep (default: 5)")
+	.option("--pretool-telemetry-lock-mode <mode>", "Lock mode for telemetry writes: always (default) or rotate-only")
 	.action((agent: string | undefined, opts: InitOpts) => {
 		const installOpts = buildInstallOptions(opts);
 		if (!installOpts) return; // validation error already printed
@@ -127,6 +134,35 @@ function buildInstallOptions(opts: InitOpts): InstallOptions | null {
 
 	if (opts.pretoolTelemetryFile !== undefined) {
 		installOpts.pretoolTelemetryFile = opts.pretoolTelemetryFile;
+	}
+
+	if (opts.pretoolTelemetryMaxBytes !== undefined) {
+		const n = Number(opts.pretoolTelemetryMaxBytes);
+		if (!Number.isInteger(n) || n < 0) {
+			console.log(chalk.red(`Invalid --pretool-telemetry-max-bytes: "${opts.pretoolTelemetryMaxBytes}" (must be a non-negative integer)`));
+			process.exitCode = 1;
+			return null;
+		}
+		installOpts.pretoolTelemetryMaxBytes = n;
+	}
+
+	if (opts.pretoolTelemetryMaxFiles !== undefined) {
+		const n = Number(opts.pretoolTelemetryMaxFiles);
+		if (!Number.isInteger(n) || n < 1) {
+			console.log(chalk.red(`Invalid --pretool-telemetry-max-files: "${opts.pretoolTelemetryMaxFiles}" (must be a positive integer)`));
+			process.exitCode = 1;
+			return null;
+		}
+		installOpts.pretoolTelemetryMaxFiles = n;
+	}
+
+	if (opts.pretoolTelemetryLockMode !== undefined) {
+		if (!VALID_LOCK_MODES.includes(opts.pretoolTelemetryLockMode as TelemetryLockMode)) {
+			console.log(chalk.red(`Invalid --pretool-telemetry-lock-mode: "${opts.pretoolTelemetryLockMode}" (must be "always" or "rotate-only")`));
+			process.exitCode = 1;
+			return null;
+		}
+		installOpts.pretoolTelemetryLockMode = opts.pretoolTelemetryLockMode as TelemetryLockMode;
 	}
 
 	// Print strict profile summary

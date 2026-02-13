@@ -162,6 +162,71 @@ describe("init --pretool flags", () => {
 		expect(joined).toContain("Invalid --pretool-telemetry-dest");
 		expect(joined).toContain("kafka");
 	});
+
+	it("F-rot: --pretool-telemetry-max-bytes and --pretool-telemetry-max-files pass through and validate", async () => {
+		// Valid values pass through
+		await runInit([
+			"claude-code",
+			"--project", tmpDir,
+			"--pretool-telemetry-json",
+			"--pretool-telemetry-dest", "file",
+			"--pretool-telemetry-max-bytes", "1048576",
+			"--pretool-telemetry-max-files", "10",
+		]);
+		const settingsPath = join(tmpDir, ".claude", "settings.json");
+		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+		const cmd = settings.hooks.PreToolUse[0].command;
+		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES=1048576");
+		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES=10");
+	});
+
+	it("F-rot: invalid --pretool-telemetry-max-bytes fails clearly", async () => {
+		const { exitCode, output } = await runInit([
+			"claude-code",
+			"--project", tmpDir,
+			"--pretool-telemetry-max-bytes", "nope",
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("Invalid --pretool-telemetry-max-bytes");
+		expect(joined).toContain("nope");
+	});
+
+	it("F-rot: invalid --pretool-telemetry-max-files fails clearly (zero not allowed)", async () => {
+		const { exitCode, output } = await runInit([
+			"claude-code",
+			"--project", tmpDir,
+			"--pretool-telemetry-max-files", "0",
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("Invalid --pretool-telemetry-max-files");
+	});
+
+	it("G: --pretool-telemetry-lock-mode passes through to hook command", async () => {
+		await runInit([
+			"claude-code",
+			"--project", tmpDir,
+			"--pretool-telemetry-lock-mode", "rotate-only",
+		]);
+		const settingsPath = join(tmpDir, ".claude", "settings.json");
+		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+		const cmd = settings.hooks.PreToolUse[0].command;
+		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_LOCK_MODE=rotate-only");
+		expect(cmd).toContain("patchwork hook pre-tool");
+	});
+
+	it("G-invalid: invalid --pretool-telemetry-lock-mode fails with clear error", async () => {
+		const { exitCode, output } = await runInit([
+			"claude-code",
+			"--project", tmpDir,
+			"--pretool-telemetry-lock-mode", "yolo",
+		]);
+		expect(exitCode).toBe(1);
+		const joined = output.join("\n");
+		expect(joined).toContain("Invalid --pretool-telemetry-lock-mode");
+		expect(joined).toContain("yolo");
+	});
 });
 
 describe("init --strict-profile", () => {

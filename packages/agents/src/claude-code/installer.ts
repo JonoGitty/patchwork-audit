@@ -16,6 +16,9 @@ export type PolicyMode = "audit" | "fail-closed";
 /** Valid telemetry destination values. */
 export type TelemetryDest = "stderr" | "file" | "both";
 
+/** Valid lock mode values for telemetry file writes. */
+export type TelemetryLockMode = "always" | "rotate-only";
+
 /** Options that control PreToolUse enforcement behavior. */
 export interface InstallOptions {
 	policyMode?: PolicyMode;
@@ -24,6 +27,9 @@ export interface InstallOptions {
 	pretoolTelemetryJson?: boolean;
 	pretoolTelemetryDest?: TelemetryDest;
 	pretoolTelemetryFile?: string;
+	pretoolTelemetryMaxBytes?: number;
+	pretoolTelemetryMaxFiles?: number;
+	pretoolTelemetryLockMode?: TelemetryLockMode;
 }
 
 /**
@@ -81,6 +87,15 @@ function buildHooks(binPath?: string, options?: InstallOptions) {
 	}
 	if (options?.pretoolTelemetryFile) {
 		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_FILE=${options.pretoolTelemetryFile}`);
+	}
+	if (options?.pretoolTelemetryMaxBytes !== undefined) {
+		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES=${options.pretoolTelemetryMaxBytes}`);
+	}
+	if (options?.pretoolTelemetryMaxFiles !== undefined) {
+		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES=${options.pretoolTelemetryMaxFiles}`);
+	}
+	if (options?.pretoolTelemetryLockMode) {
+		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_LOCK_MODE=${options.pretoolTelemetryLockMode}`);
 	}
 	const preToolCmd = envParts.length > 0
 		? `${envParts.join(" ")} ${cmd} hook pre-tool`
