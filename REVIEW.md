@@ -20,8 +20,8 @@ Remaining reality: this is still an audit/observability system, not a hard polic
 ## 2. Risk Register (Current)
 
 ### R1. Tamper evidence and integrity
-Status: Partially mitigated
-Current severity: Medium
+Status: Substantially mitigated
+Current severity: Low–Medium
 
 What is implemented:
 - Event-level hash chain fields in schema (`prev_hash`, `event_hash`)
@@ -29,26 +29,43 @@ What is implemented:
 - HMAC seal key management and signature verification
 - Key IDs and key rotation in a local keyring model
 - CLI verification with seal policy options
+- Remote witness anchoring (`patchwork witness publish`) with quorum enforcement
+- Witness records validated with strict ISO datetime schema
+- Deterministic witness payloads (no implicit timestamps)
+- Advisory-locked witness file append (O_EXCL + stale reclamation)
+- CI attestation artifact (`patchwork attest`) for durable machine-readable evidence
+- Attestation artifacts HMAC-signed using seal key/keyring (same trust model as seals)
+- Deterministic canonical payload with SHA-256 hash for tamper detection
+- Constant-time signature verification (timing-safe comparison)
+- Attestation history mode with bounded retention pruning
+- Dynamic tool version from `package.json` (no hardcoded strings)
 
 Residual risk:
 - Seals are local-key based; an attacker with both key and data can forge
-- No remote witness / transparency log anchoring
 - Seal records are not chained to each other
 - Legacy seals without `key_id` require legacy key fallback
+- Witness endpoints are trusted to return honest `anchor_id` and `witnessed_at`
+- Attestation signing uses the same local-key trust model as seals
 
 Evidence:
 - `packages/core/src/schema/event.ts`
 - `packages/core/src/hash/chain.ts`
 - `packages/core/src/hash/seal.ts`
+- `packages/core/src/hash/witness.ts`
 - `packages/cli/src/commands/seal.ts`
+- `packages/cli/src/verify-engine.ts`
 - `packages/cli/src/commands/verify.ts`
+- `packages/cli/src/commands/witness.ts`
+- `packages/cli/src/commands/attest.ts`
+- `packages/core/src/hash/attestation.ts`
+- `packages/cli/src/version.ts`
 
 ### R2. File and directory permissions
 Status: Mostly mitigated
 Current severity: Medium
 
 What is implemented:
-- `0700`/`0600` creation and reconciliation for JSONL, SQLite DB, seal key, and seal file paths
+- `0700`/`0600` creation and reconciliation for JSONL, SQLite DB, seal key, seal file, witness file, and attestation artifact paths
 
 Residual risk:
 - SQLite `-wal`/`-shm` permission hardening remains platform/engine-dependent
@@ -59,7 +76,9 @@ Evidence:
 - `packages/core/src/store/sqlite.ts`
 - `packages/core/src/hash/seal.ts`
 - `packages/cli/src/commands/seal.ts`
-- `packages/cli/src/commands/verify.ts`
+- `packages/cli/src/commands/witness.ts`
+- `packages/cli/src/commands/attest.ts`
+- `packages/cli/src/verify-engine.ts`
 
 ### R3. Runtime schema enforcement
 Status: Mitigated
@@ -220,7 +239,6 @@ What it is:
 - A local-first, tamper-evident audit trail with practical privacy defaults and strong test coverage.
 
 What it is not yet:
-- A cryptographically anchored global attestation system
 - A guaranteed policy enforcement boundary under process timeout/failure
 - A long-retention, large-scale event warehouse
 
@@ -235,8 +253,8 @@ What it is not yet:
 - Consider optional retry/backoff policy for transient SQLite failures during `sync db`
 
 3. Seal trust model hardening
-- Add optional external witness anchoring for tip hashes (CI artifact, transparency log, or KMS-backed signer)
 - Add seal-to-seal chaining or checkpointing strategy for stronger timeline integrity
+- Consider KMS-backed signer for high-assurance environments
 
 4. Privacy lifecycle completeness
 - Add retention policy and purge command

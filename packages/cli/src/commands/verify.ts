@@ -1,67 +1,6 @@
 import { Command } from "commander";
-import { chmodSync, existsSync, readFileSync, statSync } from "node:fs";
 import chalk from "chalk";
-import {
-	verifyChain,
-	computeSealPayload,
-	verifySeal,
-	readSealKey,
-	loadKeyById,
-	type SealRecord,
-} from "@patchwork/core";
-import { EVENTS_PATH, SEAL_KEY_PATH, KEYRING_DIR, SEALS_PATH, WITNESSES_PATH } from "../store.js";
-import { WitnessRecordSchema, type WitnessRecord } from "@patchwork/core";
-
-/** Structured seal check result for JSON output and policy decisions. */
-interface SealCheckResult {
-	seal_checked: boolean;
-	seal_present: boolean;
-	seal_valid: boolean;
-	seal_tip_match: boolean;
-	seal_age_seconds: number | null;
-	seal_corrupt_lines: number;
-	seal_failure_reason: string | null;
-}
-
-/** Structured witness check result for JSON output and policy decisions. */
-interface WitnessCheckResult {
-	witness_checked: boolean;
-	witness_present: boolean;
-	witness_matching_tip_count: number;
-	witness_valid_count: number;
-	witness_latest_age_seconds: number | null;
-	witness_corrupt_lines: number;
-	witness_failure_reason: string | null;
-}
-
-/**
- * Parse and strictly validate --max-seal-age-seconds.
- * Returns the validated positive integer, or null if not provided.
- * Exits non-zero with clear error for invalid values.
- */
-function parseMaxSealAge(raw: unknown): number | null | "invalid" {
-	if (raw === undefined) return null;
-	const str = String(raw);
-	// Reject decimals, non-numeric, empty
-	if (!/^\d+$/.test(str)) return "invalid";
-	const n = Number(str);
-	// Reject 0 and anything that somehow isn't a safe integer
-	if (n <= 0 || !Number.isSafeInteger(n)) return "invalid";
-	return n;
-}
-
-/**
- * Parse and strictly validate --max-witness-age-seconds.
- * Identical validation rules to seal age.
- */
-function parseMaxWitnessAge(raw: unknown): number | null | "invalid" {
-	if (raw === undefined) return null;
-	const str = String(raw);
-	if (!/^\d+$/.test(str)) return "invalid";
-	const n = Number(str);
-	if (n <= 0 || !Number.isSafeInteger(n)) return "invalid";
-	return n;
-}
+import { runVerification, type VerifyResult } from "../verify-engine.js";
 
 export const verifyCommand = new Command("verify")
 	.description("Verify tamper-evident hash chain integrity of the audit log")
@@ -82,590 +21,118 @@ export const verifyCommand = new Command("verify")
 	.option("--max-witness-age-seconds <n>", "Fail if latest matching witness is older than n seconds")
 	.option("--strict-witness-file", "Fail if any corrupt lines exist in the witness file")
 	.action((opts) => {
-		// Validate --max-seal-age-seconds early, before any verification logic
-		const maxAgeResult = parseMaxSealAge(opts.maxSealAgeSeconds);
-		if (maxAgeResult === "invalid") {
-			const msg = `Invalid --max-seal-age-seconds: "${opts.maxSealAgeSeconds}". Must be a positive integer (> 0).`;
+		const result = runVerification({
+			file: opts.file,
+			sealFile: opts.sealFile,
+			keyFile: opts.keyFile,
+			keyringDir: opts.keyringDir,
+			witnessFile: opts.witnessFile,
+			sealCheck: opts.sealCheck,
+			requireSeal: opts.requireSeal,
+			maxSealAgeSeconds: opts.maxSealAgeSeconds,
+			strictSealFile: opts.strictSealFile,
+			witnessCheck: opts.witnessCheck,
+			requireWitness: opts.requireWitness,
+			maxWitnessAgeSeconds: opts.maxWitnessAgeSeconds,
+			strictWitnessFile: opts.strictWitnessFile,
+			strict: opts.strict,
+			allowInvalid: opts.allowInvalid,
+		});
+
+		// Handle early-exit errors
+		if (result.error) {
 			if (opts.json) {
-				console.log(JSON.stringify({ error: msg }));
+				console.log(JSON.stringify({ error: result.error, path: result.input_paths.events }));
 			} else {
-				console.log(chalk.red(msg));
+				console.log(chalk.red(result.error));
 			}
 			process.exitCode = 1;
 			return;
-		}
-
-		// Validate --max-witness-age-seconds early
-		const maxWitnessAge = parseMaxWitnessAge(opts.maxWitnessAgeSeconds);
-		if (maxWitnessAge === "invalid") {
-			const msg = `Invalid --max-witness-age-seconds: "${opts.maxWitnessAgeSeconds}". Must be a positive integer (> 0).`;
-			if (opts.json) {
-				console.log(JSON.stringify({ error: msg }));
-			} else {
-				console.log(chalk.red(msg));
-			}
-			process.exitCode = 1;
-			return;
-		}
-
-		const filePath = opts.file || EVENTS_PATH;
-
-		if (!existsSync(filePath)) {
-			if (opts.json) {
-				console.log(JSON.stringify({ error: "No audit log found", path: filePath }));
-			} else {
-				console.log(chalk.yellow("No audit log found at:"), chalk.dim(filePath));
-			}
-			process.exitCode = 1;
-			return;
-		}
-
-		const content = readFileSync(filePath, "utf-8");
-		const lines = content.split("\n").filter((l) => l.trim().length > 0);
-		const events: Record<string, unknown>[] = [];
-		let parseErrors = 0;
-
-		for (const line of lines) {
-			try {
-				events.push(JSON.parse(line));
-			} catch {
-				parseErrors++;
-			}
-		}
-
-		const result = verifyChain(events);
-		result.invalid_schema_events += parseErrors;
-		const hasIntegrityFailures =
-			result.hash_mismatch_count > 0 || result.prev_link_mismatch_count > 0;
-		const hasInvalidFailures =
-			!opts.allowInvalid && result.invalid_schema_events > 0;
-		const hasStrictLegacyFailures = opts.strict && result.legacy_events > 0;
-		let isPass =
-			!hasIntegrityFailures && !hasInvalidFailures && !hasStrictLegacyFailures;
-
-		// Seal verification
-		const sealCheck = runSealCheck(opts, events, maxAgeResult);
-
-		// Apply seal policy to pass/fail
-		if (sealCheck.seal_checked) {
-			if (sealCheck.seal_failure_reason !== null) {
-				isPass = false;
-			}
-		}
-
-		// Witness verification — find current chain tip for matching
-		let currentTipForWitness: string | null = null;
-		for (let i = events.length - 1; i >= 0; i--) {
-			const h = events[i].event_hash;
-			if (typeof h === "string") {
-				currentTipForWitness = h;
-				break;
-			}
-		}
-		const witnessCheck = runWitnessCheck(opts, currentTipForWitness, maxWitnessAge);
-
-		// Apply witness policy to pass/fail
-		if (witnessCheck.witness_checked) {
-			if (witnessCheck.witness_failure_reason !== null) {
-				isPass = false;
-			}
 		}
 
 		if (opts.json) {
-			const output = { ...result, seal: sealCheck, witness: witnessCheck };
-			console.log(JSON.stringify(output, null, 2));
+			formatJsonOutput(result);
 		} else {
-			const status = isPass
-				? chalk.green("PASS")
-				: chalk.red("FAIL");
-
-			console.log(chalk.bold("Hash Chain Verification"), status);
-			console.log();
-			console.log(`  Total events:       ${result.total_events}`);
-			console.log(`  Chained events:     ${result.chained_events}`);
-			console.log(`  Legacy events:      ${result.legacy_events}`);
-			console.log(`  Invalid/corrupt:    ${result.invalid_schema_events}`);
-			console.log();
-
-			if (result.hash_mismatch_count > 0) {
-				console.log(chalk.red(`  Hash mismatches:    ${result.hash_mismatch_count}`));
-			}
-			if (result.prev_link_mismatch_count > 0) {
-				console.log(chalk.red(`  Link mismatches:    ${result.prev_link_mismatch_count}`));
-			}
-			if (result.first_failure_index !== null) {
-				console.log(chalk.red(`  First failure at:   event index ${result.first_failure_index}`));
-			}
-
-			if (opts.allowInvalid && result.invalid_schema_events > 0) {
-				console.log(
-					chalk.yellow(
-						`  --allow-invalid: ignoring ${result.invalid_schema_events} invalid/corrupt event(s).`,
-					),
-				);
-			}
-
-			if (isPass && result.chained_events > 0) {
-				console.log(chalk.green(`  Chain intact across ${result.chained_events} event(s).`));
-			}
-
-			// Seal text output
-			if (sealCheck.seal_checked) {
-				if (sealCheck.seal_failure_reason) {
-					console.log(chalk.red(`  Seal FAILED: ${sealCheck.seal_failure_reason}`));
-				} else if (sealCheck.seal_present && sealCheck.seal_valid) {
-					const ageStr = sealCheck.seal_age_seconds !== null
-						? ` (age: ${sealCheck.seal_age_seconds}s)`
-						: "";
-					const corruptStr = sealCheck.seal_corrupt_lines > 0
-						? ` [${sealCheck.seal_corrupt_lines} corrupt seal line(s) skipped]`
-						: "";
-					console.log(chalk.green(`  Seal verified: signature valid, tip matches${ageStr}${corruptStr}`));
-				} else if (!sealCheck.seal_present) {
-					console.log(chalk.yellow("  Seal: No seal file found. Run 'patchwork seal' to create one."));
-				}
-			}
-
-			// Witness text output
-			if (witnessCheck.witness_checked) {
-				if (witnessCheck.witness_failure_reason) {
-					console.log(chalk.red(`  Witness FAILED: ${witnessCheck.witness_failure_reason}`));
-				} else if (witnessCheck.witness_matching_tip_count > 0) {
-					const ageStr = witnessCheck.witness_latest_age_seconds !== null
-						? ` (age: ${witnessCheck.witness_latest_age_seconds}s)`
-						: "";
-					const corruptStr = witnessCheck.witness_corrupt_lines > 0
-						? ` [${witnessCheck.witness_corrupt_lines} corrupt witness line(s) skipped]`
-						: "";
-					console.log(chalk.green(`  Witness verified: ${witnessCheck.witness_matching_tip_count} matching record(s)${ageStr}${corruptStr}`));
-				} else if (!witnessCheck.witness_present) {
-					console.log(chalk.yellow("  Witness: No witness file found. Run 'patchwork witness publish' to create one."));
-				}
-			}
+			formatTextOutput(result, opts);
 		}
 
-		if (!isPass) {
+		if (!result.pass) {
 			process.exitCode = 1;
 		}
 	});
 
-/**
- * Result from scanning seal lines backward to find the latest valid record.
- */
-interface SealScanResult {
-	seal: SealRecord | null;
-	corrupt_lines: number;
+function formatJsonOutput(result: VerifyResult): void {
+	const output = { ...result.chain, seal: result.seal, witness: result.witness };
+	console.log(JSON.stringify(output, null, 2));
 }
 
-/**
- * Scan seal lines backward to find the latest valid JSON seal record.
- * A valid record must parse as JSON and have all required fields.
- * Returns the latest valid seal and a count of corrupt/invalid trailing lines.
- */
-function findLatestValidSeal(sealLines: string[]): SealScanResult {
-	let corruptLines = 0;
+function formatTextOutput(result: VerifyResult, opts: Record<string, unknown>): void {
+	const { chain, seal: sealCheck, witness: witnessCheck } = result;
+	const status = result.pass
+		? chalk.green("PASS")
+		: chalk.red("FAIL");
 
-	for (let i = sealLines.length - 1; i >= 0; i--) {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(sealLines[i]);
-		} catch {
-			corruptLines++;
-			continue;
-		}
+	console.log(chalk.bold("Hash Chain Verification"), status);
+	console.log();
+	console.log(`  Total events:       ${chain.total_events}`);
+	console.log(`  Chained events:     ${chain.chained_events}`);
+	console.log(`  Legacy events:      ${chain.legacy_events}`);
+	console.log(`  Invalid/corrupt:    ${chain.invalid_schema_events}`);
+	console.log();
 
-		const record = parsed as Record<string, unknown>;
-		if (
-			record.sealed_at &&
-			record.tip_hash &&
-			typeof record.chained_events === "number" &&
-			record.signature
-		) {
-			return { seal: record as unknown as SealRecord, corrupt_lines: corruptLines };
-		}
-
-		// Parseable JSON but missing required fields — still corrupt
-		corruptLines++;
+	if (chain.hash_mismatch_count > 0) {
+		console.log(chalk.red(`  Hash mismatches:    ${chain.hash_mismatch_count}`));
+	}
+	if (chain.prev_link_mismatch_count > 0) {
+		console.log(chalk.red(`  Link mismatches:    ${chain.prev_link_mismatch_count}`));
+	}
+	if (chain.first_failure_index !== null) {
+		console.log(chalk.red(`  First failure at:   event index ${chain.first_failure_index}`));
 	}
 
-	return { seal: null, corrupt_lines: corruptLines };
-}
-
-/**
- * Run the full seal check, applying --require-seal, --max-seal-age-seconds,
- * and --strict-seal-file policies on top of the raw verification result.
- */
-function runSealCheck(
-	opts: Record<string, unknown>,
-	events: Record<string, unknown>[],
-	maxAge: number | null,
-): SealCheckResult {
-	// --no-seal-check skips everything
-	if (opts.sealCheck === false) {
-		return {
-			seal_checked: false,
-			seal_present: false,
-			seal_valid: false,
-			seal_tip_match: false,
-			seal_age_seconds: null,
-			seal_corrupt_lines: 0,
-			seal_failure_reason: null,
-		};
+	if (opts.allowInvalid && chain.invalid_schema_events > 0) {
+		console.log(
+			chalk.yellow(
+				`  --allow-invalid: ignoring ${chain.invalid_schema_events} invalid/corrupt event(s).`,
+			),
+		);
 	}
 
-	const sealPath = (opts.sealFile as string) || SEALS_PATH;
-	const keyPath = (opts.keyFile as string) || SEAL_KEY_PATH;
-	const keyringDir = (opts.keyringDir as string) || KEYRING_DIR;
-	const requireSeal = opts.requireSeal === true;
-	const strictSealFile = opts.strictSealFile === true;
-
-	// Seal file missing
-	if (!existsSync(sealPath)) {
-		const needsFail = requireSeal || maxAge !== null;
-		return {
-			seal_checked: true,
-			seal_present: false,
-			seal_valid: false,
-			seal_tip_match: false,
-			seal_age_seconds: null,
-			seal_corrupt_lines: 0,
-			seal_failure_reason: needsFail
-				? "No seal file found (required by policy)"
-				: null,
-		};
+	if (result.pass && chain.chained_events > 0) {
+		console.log(chalk.green(`  Chain intact across ${chain.chained_events} event(s).`));
 	}
 
-	// Reconcile insecure seal file permissions on use
-	reconcileMode(sealPath, 0o600);
-
-	// Read seal file and scan backward for latest valid record
-	const sealContent = readFileSync(sealPath, "utf-8");
-	const sealLines = sealContent.split("\n").filter((l) => l.trim().length > 0);
-	if (sealLines.length === 0) {
-		return {
-			seal_checked: true,
-			seal_present: true,
-			seal_valid: false,
-			seal_tip_match: false,
-			seal_age_seconds: null,
-			seal_corrupt_lines: 0,
-			seal_failure_reason: "Seal file is empty",
-		};
-	}
-
-	const scanResult = findLatestValidSeal(sealLines);
-
-	// --strict-seal-file: fail if any corrupt lines
-	if (strictSealFile && scanResult.corrupt_lines > 0) {
-		return {
-			seal_checked: true,
-			seal_present: true,
-			seal_valid: false,
-			seal_tip_match: false,
-			seal_age_seconds: null,
-			seal_corrupt_lines: scanResult.corrupt_lines,
-			seal_failure_reason: `${scanResult.corrupt_lines} corrupt seal line(s) detected (--strict-seal-file)`,
-		};
-	}
-
-	if (!scanResult.seal) {
-		return {
-			seal_checked: true,
-			seal_present: true,
-			seal_valid: false,
-			seal_tip_match: false,
-			seal_age_seconds: null,
-			seal_corrupt_lines: scanResult.corrupt_lines,
-			seal_failure_reason: "No valid seal record found in seal file",
-		};
-	}
-
-	const latestSeal = scanResult.seal;
-
-	// Key resolution: keyring by key_id, then legacy key-file fallback
-	let key: Buffer | null = null;
-
-	if (latestSeal.key_id) {
-		// Seal has a key_id — try keyring lookup
-		try {
-			key = loadKeyById(keyringDir, latestSeal.key_id);
-		} catch {
-			// Keyring lookup failed — try legacy key-file as last resort
+	// Seal text output
+	if (sealCheck.seal_checked) {
+		if (sealCheck.seal_failure_reason) {
+			console.log(chalk.red(`  Seal FAILED: ${sealCheck.seal_failure_reason}`));
+		} else if (sealCheck.seal_present && sealCheck.seal_valid) {
+			const ageStr = sealCheck.seal_age_seconds !== null
+				? ` (age: ${sealCheck.seal_age_seconds}s)`
+				: "";
+			const corruptStr = sealCheck.seal_corrupt_lines > 0
+				? ` [${sealCheck.seal_corrupt_lines} corrupt seal line(s) skipped]`
+				: "";
+			console.log(chalk.green(`  Seal verified: signature valid, tip matches${ageStr}${corruptStr}`));
+		} else if (!sealCheck.seal_present) {
+			console.log(chalk.yellow("  Seal: No seal file found. Run 'patchwork seal' to create one."));
 		}
 	}
 
-	if (!key) {
-		// Legacy fallback: use --key-file path
-		if (!existsSync(keyPath)) {
-			const reason = latestSeal.key_id
-				? `Key ${latestSeal.key_id} not found in keyring and no legacy key at ${keyPath}`
-				: `Seal file exists but key not found at ${keyPath}`;
-			return {
-				seal_checked: true,
-				seal_present: true,
-				seal_valid: false,
-				seal_tip_match: false,
-				seal_age_seconds: null,
-				seal_corrupt_lines: scanResult.corrupt_lines,
-				seal_failure_reason: reason,
-			};
+	// Witness text output
+	if (witnessCheck.witness_checked) {
+		if (witnessCheck.witness_failure_reason) {
+			console.log(chalk.red(`  Witness FAILED: ${witnessCheck.witness_failure_reason}`));
+		} else if (witnessCheck.witness_matching_tip_count > 0) {
+			const ageStr = witnessCheck.witness_latest_age_seconds !== null
+				? ` (age: ${witnessCheck.witness_latest_age_seconds}s)`
+				: "";
+			const corruptStr = witnessCheck.witness_corrupt_lines > 0
+				? ` [${witnessCheck.witness_corrupt_lines} corrupt witness line(s) skipped]`
+				: "";
+			console.log(chalk.green(`  Witness verified: ${witnessCheck.witness_matching_tip_count} matching record(s)${ageStr}${corruptStr}`));
+		} else if (!witnessCheck.witness_present) {
+			console.log(chalk.yellow("  Witness: No witness file found. Run 'patchwork witness publish' to create one."));
 		}
-		try {
-			key = readSealKey(keyPath);
-		} catch {
-			return {
-				seal_checked: true,
-				seal_present: true,
-				seal_valid: false,
-				seal_tip_match: false,
-				seal_age_seconds: null,
-				seal_corrupt_lines: scanResult.corrupt_lines,
-				seal_failure_reason: `Cannot read seal key at ${keyPath}`,
-			};
-		}
-	}
-
-	// Signature verification
-	const payload = computeSealPayload(
-		latestSeal.tip_hash,
-		latestSeal.chained_events,
-		latestSeal.sealed_at,
-	);
-	const sigValid = verifySeal(payload, latestSeal.signature, key);
-
-	if (!sigValid) {
-		return {
-			seal_checked: true,
-			seal_present: true,
-			seal_valid: false,
-			seal_tip_match: false,
-			seal_age_seconds: null,
-			seal_corrupt_lines: scanResult.corrupt_lines,
-			seal_failure_reason: "Seal signature is invalid (key mismatch or tampered seal)",
-		};
-	}
-
-	// Tip consistency
-	let currentTip: string | null = null;
-	for (let i = events.length - 1; i >= 0; i--) {
-		const h = events[i].event_hash;
-		if (typeof h === "string") {
-			currentTip = h;
-			break;
-		}
-	}
-	const tipMatch = currentTip === latestSeal.tip_hash;
-
-	// Seal age
-	const sealTime = new Date(latestSeal.sealed_at).getTime();
-	const ageSeconds = Math.round((Date.now() - sealTime) / 1000);
-
-	if (!tipMatch) {
-		return {
-			seal_checked: true,
-			seal_present: true,
-			seal_valid: true,
-			seal_tip_match: false,
-			seal_age_seconds: ageSeconds,
-			seal_corrupt_lines: scanResult.corrupt_lines,
-			seal_failure_reason: `Chain tip mismatch: sealed=${latestSeal.tip_hash.slice(0, 20)}... current=${currentTip?.slice(0, 20) ?? "null"}...`,
-		};
-	}
-
-	// Freshness check
-	if (maxAge !== null && ageSeconds > maxAge) {
-		return {
-			seal_checked: true,
-			seal_present: true,
-			seal_valid: true,
-			seal_tip_match: true,
-			seal_age_seconds: ageSeconds,
-			seal_corrupt_lines: scanResult.corrupt_lines,
-			seal_failure_reason: `Seal too old: ${ageSeconds}s exceeds max ${maxAge}s`,
-		};
-	}
-
-	return {
-		seal_checked: true,
-		seal_present: true,
-		seal_valid: true,
-		seal_tip_match: true,
-		seal_age_seconds: ageSeconds,
-		seal_corrupt_lines: scanResult.corrupt_lines,
-		seal_failure_reason: null,
-	};
-}
-
-/**
- * Run the witness check, applying --require-witness, --max-witness-age-seconds,
- * and --strict-witness-file policies.
- */
-function runWitnessCheck(
-	opts: Record<string, unknown>,
-	currentTip: string | null,
-	maxAge: number | null,
-): WitnessCheckResult {
-	// --no-witness-check skips everything
-	if (opts.witnessCheck === false) {
-		return {
-			witness_checked: false,
-			witness_present: false,
-			witness_matching_tip_count: 0,
-			witness_valid_count: 0,
-			witness_latest_age_seconds: null,
-			witness_corrupt_lines: 0,
-			witness_failure_reason: null,
-		};
-	}
-
-	const witnessPath = (opts.witnessFile as string) || WITNESSES_PATH;
-	const requireWitness = opts.requireWitness === true;
-	const strictWitnessFile = opts.strictWitnessFile === true;
-
-	// Witness file missing
-	if (!existsSync(witnessPath)) {
-		const needsFail = requireWitness || maxAge !== null;
-		return {
-			witness_checked: true,
-			witness_present: false,
-			witness_matching_tip_count: 0,
-			witness_valid_count: 0,
-			witness_latest_age_seconds: null,
-			witness_corrupt_lines: 0,
-			witness_failure_reason: needsFail
-				? "No witness file found (required by policy)"
-				: null,
-		};
-	}
-
-	// Reconcile permissions
-	reconcileMode(witnessPath, 0o600);
-
-	// Parse witness records
-	const witnessContent = readFileSync(witnessPath, "utf-8");
-	const witnessLines = witnessContent.split("\n").filter((l) => l.trim().length > 0);
-	if (witnessLines.length === 0) {
-		const needsFail = requireWitness || maxAge !== null;
-		return {
-			witness_checked: true,
-			witness_present: true,
-			witness_matching_tip_count: 0,
-			witness_valid_count: 0,
-			witness_latest_age_seconds: null,
-			witness_corrupt_lines: 0,
-			witness_failure_reason: needsFail
-				? "Witness file is empty (required by policy)"
-				: null,
-		};
-	}
-
-	let corruptLines = 0;
-	const validRecords: WitnessRecord[] = [];
-
-	for (const line of witnessLines) {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(line);
-		} catch {
-			corruptLines++;
-			continue;
-		}
-
-		const result = WitnessRecordSchema.safeParse(parsed);
-		if (result.success) {
-			validRecords.push(result.data);
-		} else {
-			corruptLines++;
-		}
-	}
-
-	// --strict-witness-file: fail if any corrupt lines
-	if (strictWitnessFile && corruptLines > 0) {
-		return {
-			witness_checked: true,
-			witness_present: true,
-			witness_matching_tip_count: 0,
-			witness_valid_count: validRecords.length,
-			witness_latest_age_seconds: null,
-			witness_corrupt_lines: corruptLines,
-			witness_failure_reason: `${corruptLines} corrupt witness line(s) detected (--strict-witness-file)`,
-		};
-	}
-
-	// Find records matching current tip
-	const matchingRecords = currentTip
-		? validRecords.filter((r) => r.tip_hash === currentTip)
-		: [];
-
-	// Find latest matching witness age
-	let latestAgeSeconds: number | null = null;
-	if (matchingRecords.length > 0) {
-		let latestTime = 0;
-		for (const r of matchingRecords) {
-			const t = new Date(r.witnessed_at).getTime();
-			if (t > latestTime) latestTime = t;
-		}
-		latestAgeSeconds = Math.round((Date.now() - latestTime) / 1000);
-	}
-
-	// --require-witness: fail if no matching records
-	if (requireWitness && matchingRecords.length === 0) {
-		return {
-			witness_checked: true,
-			witness_present: true,
-			witness_matching_tip_count: 0,
-			witness_valid_count: validRecords.length,
-			witness_latest_age_seconds: latestAgeSeconds,
-			witness_corrupt_lines: corruptLines,
-			witness_failure_reason: "No witness record matches current chain tip (required by --require-witness)",
-		};
-	}
-
-	// --max-witness-age-seconds: fail if latest matching witness is too old
-	if (maxAge !== null && matchingRecords.length > 0 && latestAgeSeconds !== null && latestAgeSeconds > maxAge) {
-		return {
-			witness_checked: true,
-			witness_present: true,
-			witness_matching_tip_count: matchingRecords.length,
-			witness_valid_count: validRecords.length,
-			witness_latest_age_seconds: latestAgeSeconds,
-			witness_corrupt_lines: corruptLines,
-			witness_failure_reason: `Witness too old: ${latestAgeSeconds}s exceeds max ${maxAge}s`,
-		};
-	}
-
-	// --max-witness-age-seconds without matching records
-	if (maxAge !== null && matchingRecords.length === 0) {
-		return {
-			witness_checked: true,
-			witness_present: true,
-			witness_matching_tip_count: 0,
-			witness_valid_count: validRecords.length,
-			witness_latest_age_seconds: latestAgeSeconds,
-			witness_corrupt_lines: corruptLines,
-			witness_failure_reason: "No witness record matches current chain tip (required by --max-witness-age-seconds)",
-		};
-	}
-
-	return {
-		witness_checked: true,
-		witness_present: true,
-		witness_matching_tip_count: matchingRecords.length,
-		witness_valid_count: validRecords.length,
-		witness_latest_age_seconds: latestAgeSeconds,
-		witness_corrupt_lines: corruptLines,
-		witness_failure_reason: null,
-	};
-}
-
-/** Chmod path to target mode if current mode doesn't match. Safe if path doesn't exist. */
-function reconcileMode(path: string, targetMode: number): void {
-	try {
-		const stat = statSync(path);
-		if ((stat.mode & 0o777) !== targetMode) {
-			chmodSync(path, targetMode);
-		}
-	} catch {
-		// Path disappeared between check and chmod — safe to ignore
 	}
 }

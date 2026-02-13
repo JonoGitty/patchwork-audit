@@ -59,6 +59,12 @@ export {
 	hashWitnessPayload,
 	type WitnessRecord,
 } from "./hash/witness.js";
+export {
+	buildAttestationPayload,
+	hashAttestationPayload,
+	signAttestation,
+	verifyAttestation,
+} from "./hash/attestation.js";
 
 // ID
 export { generateEventId, generateSessionId } from "./id/ulid.js";

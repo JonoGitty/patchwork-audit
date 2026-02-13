@@ -76,7 +76,69 @@ patchwork sync codex                  # Import Codex CLI history
 patchwork init claude-code            # Install Claude Code hooks
 patchwork init codex                  # Set up Codex CLI sync
 patchwork status                      # Show config, agents, event stats
+
+# CI attestation
+patchwork attest                      # Generate attestation artifact
+patchwork attest --require-seal --require-witness  # Strict policy
+patchwork attest --json               # Also print to stdout
+patchwork attest --out artifact.json  # Custom output path
 ```
+
+## CI Attestation
+
+`patchwork attest` runs the full verification pipeline (chain + seal + witness) and writes a machine-readable JSON artifact. Use it in CI to produce durable evidence that an AI coding session was audited.
+
+```bash
+# In CI — fail the pipeline if audit trail is incomplete
+patchwork attest \
+  --require-seal \
+  --require-witness \
+  --max-seal-age-seconds 3600 \
+  --max-witness-age-seconds 3600 \
+  --out audit-attestation.json
+
+# Upload the artifact
+# (GitHub Actions example)
+# - uses: actions/upload-artifact@v4
+#   with:
+#     name: patchwork-attestation
+#     path: audit-attestation.json
+```
+
+Attestation artifacts are **HMAC-signed** using the same seal key/keyring model. When a keyring or legacy seal key is available, the artifact includes a `payload_hash` (SHA-256 of the canonical payload) and a `signature` (HMAC-SHA256). If no key is found, the signature field is set to `"unsigned"`.
+
+```bash
+# Signed attestation with history (keeps timestamped copies)
+patchwork attest \
+  --require-seal \
+  --require-witness \
+  --max-seal-age-seconds 3600 \
+  --max-witness-age-seconds 3600 \
+  --history \
+  --max-history-files 30 \
+  --out audit-attestation.json
+```
+
+The `--history` flag writes a timestamped copy (`attestation-<ISO-timestamp>.json`) alongside the latest artifact. Use `--max-history-files <n>` to bound retention.
+
+The attestation artifact includes:
+
+| Field | Description |
+|---|---|
+| `schema_version` | Always `1` |
+| `generated_at` | ISO timestamp of generation |
+| `tool_version` | Patchwork version (dynamic from `package.json`) |
+| `pass` | Overall pass/fail boolean |
+| `chain` | Hash chain verification results |
+| `seal` | Seal verification results (presence, validity, age) |
+| `witness` | Witness verification results (matching records, age) |
+| `input_paths` | Paths to events, seals, and witness files used |
+| `error` | Error message if verification could not run, else `null` |
+| `payload_hash` | SHA-256 hash of the canonical payload |
+| `signature` | HMAC-SHA256 signature (or `"unsigned"` if no key) |
+| `key_id` | Signing key ID from keyring (omitted for legacy keys) |
+
+Exit code is non-zero when verification fails, so CI pipelines can gate on audit completeness.
 
 ## Policy Engine
 
