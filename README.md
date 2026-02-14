@@ -374,6 +374,3 @@ Three packages:
 - Run `pnpm hooks:install` once to enable the repo `pre-push` hook that runs `pnpm test:log` automatically before each push.
 - CI runs `pnpm test:log` on the Node 22 job and uploads `docs/TEST_LOG.md` as a workflow artifact.
 
-## License
-
-Business Source License 1.1 — free for individual and non-competing commercial use. Converts to Apache 2.0 after 3 years.
