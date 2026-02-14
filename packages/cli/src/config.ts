@@ -12,6 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
+import { getHomeDir } from "@patchwork/core";
 
 // ---------------------------------------------------------------------------
 // Zod schemas — strict variant rejects unknown keys, base strips them
@@ -128,7 +129,7 @@ export function loadConfig(cwd?: string): LoadedConfig {
 		}
 	}
 
-	const userPath = join(process.env.HOME || "~", ".patchwork", "config.yml");
+	const userPath = join(getHomeDir(), ".patchwork", "config.yml");
 	if (existsSync(userPath)) {
 		const parsed = parseConfigFile(userPath);
 		return { config: parsed.config, source: userPath, validation: parsed.validation };

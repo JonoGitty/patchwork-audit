@@ -18,6 +18,11 @@
     "turbo": "^2.3.0",
     "typescript": "^5.7.0"
   },
+  "license": "BUSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JonoGitty/codex-audit.git"
+  },
   "packageManager": "pnpm@9.15.0",
   "engines": {
     "node": ">=20.0.0"

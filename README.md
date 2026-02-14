@@ -13,18 +13,23 @@ Patchwork hooks into AI coding agents (Claude Code, Codex CLI) and records every
 ## Quickstart
 
 ```bash
-npm install -g patchwork-audit
+# Clone and build from source (npm package coming soon)
+git clone https://github.com/JonoGitty/codex-audit.git
+cd codex-audit
+pnpm install
+pnpm build
 
 # Set up hooks for your AI coding agents
-patchwork init claude-code
-patchwork init codex
+node packages/cli/dist/index.js init claude-code
 
 # Use your AI coding agent normally...
 # Then see what it did:
-patchwork log
-patchwork log --risk high
-patchwork summary
+node packages/cli/dist/index.js log
+node packages/cli/dist/index.js log --risk high
+node packages/cli/dist/index.js summary
 ```
+
+Once published to npm, the above simplifies to `npm install -g patchwork-audit && patchwork init claude-code`.
 
 ## What it records
 
@@ -367,6 +372,33 @@ Three packages:
 - **JSON** — Full event data, pipe to `jq` for custom queries
 - **CSV** — Import into spreadsheets, BI tools, databases
 - **SARIF** — Static Analysis Results Interchange Format, import into GitHub Code Scanning, Snyk, or any SARIF-compatible security tool
+
+## Platform Support
+
+| Platform | Status | Notes |
+|---|---|---|
+| Linux | Fully supported | CI-tested on Ubuntu with Node 20 and 22 |
+| macOS | Fully supported | Same POSIX semantics as Linux |
+| Windows | Partial | Core functionality works. File permission hardening (chmod 0o600/0o700) is not enforced by the OS. Some tests fail on Windows due to this; all 265 tests pass on Linux/macOS. |
+
+## Known Limitations
+
+- **v0.1.0 — early release.** APIs and storage format may change.
+- **Not yet on npm.** Install from source (see Quickstart).
+- **Windows file permissions** are not enforced by the OS. The audit trail itself works, but the permission-hardening layer (0o600 files, 0o700 directories) has no effect on Windows.
+- **Cursor and GitHub Copilot adapters** are planned but not yet implemented.
+- **Cloud sync and team dashboard** are planned for a future release.
+- **Sealing and attestation** use local HMAC keys. A compromised machine with both key and data can forge signatures. KMS-backed signing is on the roadmap.
+- **JSONL storage scales linearly** for full-log reads. For large audit trails, use SQLite queries via `patchwork search`.
+
+## Development
+
+```bash
+pnpm install
+pnpm build
+pnpm test
+pnpm lint
+```
 
 ## Development Test Log
 

@@ -17,7 +17,11 @@ describe("handleClaudeCodeHook", () => {
 
 	afterEach(() => {
 		process.env.HOME = originalHome;
-		rmSync(tmpDir, { recursive: true, force: true });
+		try {
+			rmSync(tmpDir, { recursive: true, force: true });
+		} catch {
+			// Windows: open file handles (e.g. better-sqlite3) may prevent cleanup
+		}
 	});
 
 	function makeInput(overrides: Partial<ClaudeCodeHookInput> = {}): ClaudeCodeHookInput {
@@ -320,7 +324,8 @@ describe("handleClaudeCodeHook", () => {
 		});
 	});
 
-	describe("directory permissions", () => {
+	// Windows does not enforce POSIX file permissions
+	describe.skipIf(process.platform === "win32")("directory permissions", () => {
 		it("creates .patchwork directory with 0700", () => {
 			handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
 			const { statSync } = require("node:fs");
@@ -358,7 +363,7 @@ describe("handleClaudeCodeHook", () => {
 				}),
 			);
 			const events = readEvents(tmpDir);
-			expect(events[0].target.path).toBe("src/index.ts");
+			expect(events[0].target.path).toBe(join("src", "index.ts"));
 		});
 
 		it("keeps absolute path when file is outside cwd", () => {
@@ -522,7 +527,11 @@ describe("divergence marker", () => {
 
 	afterEach(() => {
 		process.env.HOME = originalHome;
-		rmSync(tmpDir, { recursive: true, force: true });
+		try {
+			rmSync(tmpDir, { recursive: true, force: true });
+		} catch {
+			// Windows: open file handles may prevent cleanup
+		}
 	});
 
 	function makeInput(overrides: Partial<ClaudeCodeHookInput> = {}): ClaudeCodeHookInput {

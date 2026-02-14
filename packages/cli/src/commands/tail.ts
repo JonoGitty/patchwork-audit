@@ -3,9 +3,9 @@ import chalk from "chalk";
 import { watch, existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { formatEvent, formatEventCompact } from "../output/formatter.js";
-import type { AuditEvent } from "@patchwork/core";
+import { type AuditEvent, getHomeDir } from "@patchwork/core";
 
-const EVENTS_PATH = join(process.env.HOME || "~", ".patchwork", "events.jsonl");
+const EVENTS_PATH = join(getHomeDir(), ".patchwork", "events.jsonl");
 
 export const tailCommand = new Command("tail")
 	.description("Live stream of audit events (like tail -f)")

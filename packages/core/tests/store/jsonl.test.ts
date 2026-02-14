@@ -18,6 +18,9 @@ import { hostname, tmpdir } from "node:os";
 import { JsonlStore, _setLockIO } from "../../src/store/jsonl.js";
 import type { AuditEvent } from "../../src/schema/event.js";
 
+// Windows does not enforce POSIX file permissions (chmod 0o600/0o700 is a no-op)
+const isWindows = process.platform === "win32";
+
 function makeEvent(overrides: Partial<AuditEvent> = {}): AuditEvent {
 	return {
 		id: `evt_${Date.now()}_${Math.random().toString(36).slice(2)}`,
@@ -133,7 +136,7 @@ describe("JsonlStore", () => {
 		});
 	});
 
-	describe("file permissions", () => {
+	describe.skipIf(isWindows)("file permissions", () => {
 		it("creates directory with 0700", () => {
 			const subDir = join(tmpDir, "secure", "nested");
 			new JsonlStore(join(subDir, "events.jsonl"));

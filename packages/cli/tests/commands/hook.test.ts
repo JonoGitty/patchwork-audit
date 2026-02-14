@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Windows does not enforce POSIX file permissions (chmod 0o600/0o700 is a no-op)
+const isWindows = process.platform === "win32";
+
 import { Readable, Writable } from "node:stream";
 import { mkdtempSync, rmSync, readFileSync, existsSync, statSync, mkdirSync, chmodSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
@@ -260,7 +264,7 @@ describe("hook PreToolUse telemetry file sink", () => {
 		expect(fileRecord.event).toBe("PreToolUse");
 	});
 
-	it("C: file/dir permissions are enforced (0o600/0o700)", async () => {
+	it.skipIf(isWindows)("C: file/dir permissions are enforced (0o600/0o700)", async () => {
 		const telemetryFile = join(tmpDir, "telemetry", "pretool.jsonl");
 
 		await runHook("pre-tool", "NOT_JSON", {
@@ -408,7 +412,7 @@ describe("hook PreToolUse telemetry file rotation", () => {
 		expect(JSON.parse(lines[1]).event).toBe("PreToolUse");
 	});
 
-	it("D: rotated files keep secure perms (0o600)", async () => {
+	it.skipIf(isWindows)("D: rotated files keep secure perms (0o600)", async () => {
 		const telemetryDir = join(tmpDir, "telemetry");
 		mkdirSync(telemetryDir, { recursive: true, mode: 0o700 });
 		const telemetryFile = join(telemetryDir, "pretool.jsonl");

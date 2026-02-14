@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { getHomeDir } from "@patchwork/core";
 
-const CLAUDE_SETTINGS_DIR = join(process.env.HOME || "~", ".claude");
+const CLAUDE_SETTINGS_DIR = join(getHomeDir(), ".claude");
 const CLAUDE_SETTINGS_PATH = join(CLAUDE_SETTINGS_DIR, "settings.json");
 
 /**

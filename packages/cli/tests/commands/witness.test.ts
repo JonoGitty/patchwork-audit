@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Windows does not enforce POSIX file permissions (chmod 0o600/0o700 is a no-op)
+const isWindows = process.platform === "win32";
+
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, mkdirSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -278,7 +282,7 @@ describe("witness publish", () => {
 		expect(joined).toContain("seal");
 	});
 
-	it("D: witness file perms enforced (0o600 file, 0o700 dir)", async () => {
+	it.skipIf(isWindows)("D: witness file perms enforced (0o600 file, 0o700 dir)", async () => {
 		const events = makeChainedEvents(3);
 		const eventsPath = join(tmpDir, "events.jsonl");
 		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
@@ -313,7 +317,7 @@ describe("witness publish", () => {
 		}
 	});
 
-	it("D2: reconciles insecure existing witness file perms", async () => {
+	it.skipIf(isWindows)("D2: reconciles insecure existing witness file perms", async () => {
 		const events = makeChainedEvents(3);
 		const eventsPath = join(tmpDir, "events.jsonl");
 		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
@@ -425,7 +429,7 @@ describe("witness lock concurrency", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("F: concurrent appends produce valid JSONL and lock file is cleaned up", () => {
+	it.skipIf(isWindows)("F: concurrent appends produce valid JSONL and lock file is cleaned up", () => {
 		const witnessFile = join(tmpDir, "witnesses.jsonl");
 		writeFileSync(witnessFile, "", { mode: 0o600 });
 

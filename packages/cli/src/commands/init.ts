@@ -198,5 +198,5 @@ function installCodex() {
 	// Codex uses history parsing + notify, not hooks
 	console.log(chalk.green("  Codex CLI configured for history sync."));
 	console.log(chalk.dim("  Run 'patchwork sync codex' after sessions to ingest events."));
-	console.log(chalk.dim("  Real-time: Add notify hook to ~/.codex/config.yaml (see docs)"));
+	console.log(chalk.dim("  Real-time: Add notify hook to ~/.codex/config.toml (or config.yaml, depending on version)."));
 }

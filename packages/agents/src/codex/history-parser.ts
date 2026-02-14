@@ -5,12 +5,14 @@ import {
 	classifyRisk,
 	generateEventId,
 	generateSessionId,
+	getHomeDir,
 	hashContent,
 	JsonlStore,
 } from "@patchwork/core";
 
-const CODEX_HISTORY_PATH = join(process.env.HOME || "~", ".codex", "history.jsonl");
-const PATCHWORK_EVENTS_PATH = join(process.env.HOME || "~", ".patchwork", "events.jsonl");
+const HOME_DIR = getHomeDir();
+const CODEX_HISTORY_PATH = join(HOME_DIR, ".codex", "history.jsonl");
+const PATCHWORK_EVENTS_PATH = join(HOME_DIR, ".patchwork", "events.jsonl");
 
 interface CodexHistoryEntry {
 	timestamp?: string;

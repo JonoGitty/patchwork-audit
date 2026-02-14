@@ -68,6 +68,7 @@ export {
 
 // ID
 export { generateEventId, generateSessionId } from "./id/ulid.js";
+export { getHomeDir, homePath } from "./path/home.js";
 
 // Policy
 export {

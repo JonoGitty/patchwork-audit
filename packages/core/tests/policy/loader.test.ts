@@ -103,7 +103,7 @@ describe("loadActivePolicy", () => {
 			"utf-8",
 		);
 		const { policy, source } = loadActivePolicy("/nonexistent");
-		expect(source).toContain(".patchwork/policy.yml");
+		expect(source).toContain(join(".patchwork", "policy.yml"));
 		expect(policy.name).toBe("user-policy");
 	});
 

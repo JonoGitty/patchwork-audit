@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Windows does not enforce POSIX file permissions (chmod 0o600/0o700 is a no-op)
+const isWindows = process.platform === "win32";
+
 import {
 	mkdtempSync,
 	mkdirSync,
@@ -422,7 +426,7 @@ describe("sync db partial rebuild failure", () => {
 		expect(report.failures[0].timestamp).toBeTruthy();
 	});
 
-	it("B: failure report has secure permissions (0o600 file, 0o700 dir)", async () => {
+	it.skipIf(isWindows)("B: failure report has secure permissions (0o600 file, 0o700 dir)", async () => {
 		setupEventsFile();
 		const stateDir = join(tmpDir, ".patchwork", "state");
 		const reportPath = join(stateDir, "sync-db-last-failures.json");

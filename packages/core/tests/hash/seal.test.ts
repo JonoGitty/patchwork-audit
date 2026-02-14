@@ -24,6 +24,9 @@ import {
 	rotateKey,
 } from "../../src/hash/seal.js";
 
+// Windows does not enforce POSIX file permissions (chmod 0o600/0o700 is a no-op)
+const isWindows = process.platform === "win32";
+
 describe("computeSealPayload", () => {
 	it("returns a deterministic versioned string", () => {
 		const payload = computeSealPayload("sha256:abc", 42, "2026-01-01T00:00:00.000Z");
@@ -97,7 +100,7 @@ describe("ensureSealKey", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("creates key dir with 0700 and key file with 0600", () => {
+	it.skipIf(isWindows)("creates key dir with 0700 and key file with 0600", () => {
 		const keyPath = join(tmpDir, "keys", "seal.key");
 		ensureSealKey(keyPath);
 
@@ -121,7 +124,7 @@ describe("ensureSealKey", () => {
 		expect(key1.equals(key2)).toBe(true);
 	});
 
-	it("reconciles insecure existing dir permissions", () => {
+	it.skipIf(isWindows)("reconciles insecure existing dir permissions", () => {
 		const keyDir = join(tmpDir, "keys");
 		mkdirSync(keyDir, { recursive: true, mode: 0o755 });
 		const keyPath = join(keyDir, "seal.key");
@@ -132,7 +135,7 @@ describe("ensureSealKey", () => {
 		expect(dirStat.mode & 0o777).toBe(0o700);
 	});
 
-	it("reconciles insecure existing file permissions", () => {
+	it.skipIf(isWindows)("reconciles insecure existing file permissions", () => {
 		const keyDir = join(tmpDir, "keys");
 		mkdirSync(keyDir, { recursive: true, mode: 0o700 });
 		const keyPath = join(keyDir, "seal.key");
@@ -172,7 +175,7 @@ describe("readSealKey", () => {
 		expect(() => readSealKey(keyPath)).toThrow("Seal key not found");
 	});
 
-	it("reconciles insecure file permissions on read", () => {
+	it.skipIf(isWindows)("reconciles insecure file permissions on read", () => {
 		const keyDir = join(tmpDir, "keys");
 		mkdirSync(keyDir, { mode: 0o700 });
 		const keyPath = join(keyDir, "seal.key");
@@ -215,7 +218,7 @@ describe("ensureKeyring", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("creates keyring dir with 0700, key file with 0600, and ACTIVE pointer", () => {
+	it.skipIf(isWindows)("creates keyring dir with 0700, key file with 0600, and ACTIVE pointer", () => {
 		const keyringDir = join(tmpDir, "seal");
 		const { keyId, key } = ensureKeyring(keyringDir);
 
@@ -257,7 +260,7 @@ describe("ensureKeyring", () => {
 		expect(() => ensureKeyring(keyringDir)).toThrow("not found in keyring");
 	});
 
-	it("reconciles insecure keyring dir permissions", () => {
+	it.skipIf(isWindows)("reconciles insecure keyring dir permissions", () => {
 		const keyringDir = join(tmpDir, "seal");
 		mkdirSync(keyringDir, { recursive: true, mode: 0o755 });
 
@@ -293,7 +296,7 @@ describe("loadKeyById", () => {
 		expect(() => loadKeyById(keyringDir, "nonexistent123")).toThrow("not found in keyring");
 	});
 
-	it("reconciles insecure key file permissions", () => {
+	it.skipIf(isWindows)("reconciles insecure key file permissions", () => {
 		const keyringDir = join(tmpDir, "seal");
 		const { keyId } = ensureKeyring(keyringDir);
 
@@ -353,7 +356,7 @@ describe("rotateKey", () => {
 		expect(current.key.equals(rotated.key)).toBe(true);
 	});
 
-	it("creates keyring dir if it does not exist", () => {
+	it.skipIf(isWindows)("creates keyring dir if it does not exist", () => {
 		const keyringDir = join(tmpDir, "new-seal");
 		const { keyId } = rotateKey(keyringDir);
 

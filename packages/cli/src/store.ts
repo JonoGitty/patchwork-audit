@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { JsonlStore, SqliteStore, type Store, type SearchableStore } from "@patchwork/core";
+import { JsonlStore, SqliteStore, type Store, type SearchableStore, getHomeDir } from "@patchwork/core";
 
-const DATA_DIR = join(process.env.HOME || "~", ".patchwork");
+const DATA_DIR = join(getHomeDir(), ".patchwork");
 const EVENTS_PATH = join(DATA_DIR, "events.jsonl");
 const DB_PATH = join(DATA_DIR, "db", "audit.db");
 const SEAL_KEY_PATH = join(DATA_DIR, "keys", "seal.key");

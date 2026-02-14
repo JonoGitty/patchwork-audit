@@ -12,6 +12,12 @@
     }
   },
   "files": ["dist"],
+  "license": "BUSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JonoGitty/codex-audit.git",
+    "directory": "packages/agents"
+  },
   "publishConfig": {
     "access": "public"
   },

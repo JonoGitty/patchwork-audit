@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { getHomeDir } from "@patchwork/core";
 
 export interface DetectedAgent {
 	name: string;
@@ -16,6 +17,7 @@ export interface DetectedAgent {
  */
 export function detectInstalledAgents(): DetectedAgent[] {
 	const agents: DetectedAgent[] = [];
+	const homeDir = getHomeDir();
 
 	// Claude Code
 	const claudePath = findBinary("claude");
@@ -24,8 +26,8 @@ export function detectInstalledAgents(): DetectedAgent[] {
 		type: "claude-code",
 		version: claudePath ? getVersion(claudePath, "--version") : null,
 		binaryPath: claudePath,
-		configDir: existsSync(join(process.env.HOME || "~", ".claude"))
-			? join(process.env.HOME || "~", ".claude")
+		configDir: existsSync(join(homeDir, ".claude"))
+			? join(homeDir, ".claude")
 			: null,
 		installed: claudePath !== null,
 	});
@@ -37,8 +39,8 @@ export function detectInstalledAgents(): DetectedAgent[] {
 		type: "codex",
 		version: codexPath ? getVersion(codexPath, "--version") : null,
 		binaryPath: codexPath,
-		configDir: existsSync(join(process.env.HOME || "~", ".codex"))
-			? join(process.env.HOME || "~", ".codex")
+		configDir: existsSync(join(homeDir, ".codex"))
+			? join(homeDir, ".codex")
 			: null,
 		installed: codexPath !== null,
 	});
@@ -59,8 +61,10 @@ export function detectInstalledAgents(): DetectedAgent[] {
 
 function findBinary(name: string): string | null {
 	try {
-		const result = execSync(`which ${name}`, { encoding: "utf-8", timeout: 3000 }).trim();
-		return result || null;
+		const cmd = process.platform === "win32" ? `where ${name}` : `which ${name}`;
+		const result = execSync(cmd, { encoding: "utf-8", timeout: 3000 }).trim();
+		if (!result) return null;
+		return result.split(/\r?\n/)[0]?.trim() || null;
 	} catch {
 		return null;
 	}

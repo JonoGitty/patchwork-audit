@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import YAML from "yaml";
 import { PolicySchema, type Policy } from "./engine.js";
+import { getHomeDir } from "../path/home.js";
 
 /**
  * Load a policy from a YAML file.
@@ -28,7 +29,7 @@ export function loadActivePolicy(cwd?: string): { policy: Policy; source: string
 	}
 
 	// User-level
-	const userPath = join(process.env.HOME || "~", ".patchwork", "policy.yml");
+	const userPath = join(getHomeDir(), ".patchwork", "policy.yml");
 	if (existsSync(userPath)) {
 		return { policy: loadPolicyFromFile(userPath), source: userPath };
 	}
