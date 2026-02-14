@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Windows does not enforce POSIX file permissions (chmod 0o600/0o700 is a no-op)
+const isWindows = process.platform === "win32";
+
 import {
 	chmodSync,
 	mkdtempSync,
@@ -104,7 +108,7 @@ describe("seal command", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("creates seal key with secure permissions", async () => {
+	it.skipIf(isWindows)("creates seal key with secure permissions", async () => {
 		const events = makeChainedEvents(3);
 		const eventsPath = join(tmpDir, "events.jsonl");
 		const keyPath = join(tmpDir, "keys", "seal.key");
@@ -557,7 +561,7 @@ describe("verify --max-seal-age-seconds", () => {
 	});
 });
 
-describe("seal file permission hardening", () => {
+describe.skipIf(isWindows)("seal file permission hardening", () => {
 	let tmpDir: string;
 
 	beforeEach(() => {

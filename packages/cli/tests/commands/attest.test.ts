@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Windows does not enforce POSIX file permissions (chmod 0o600/0o700 is a no-op)
+const isWindows = process.platform === "win32";
+
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -358,7 +362,7 @@ describe("patchwork attest", () => {
 		expect(verifyAttestation(tamperedPayload, artifact.signature, key)).toBe(false);
 	});
 
-	it("F: secure permissions — dir 0o700, file 0o600", async () => {
+	it.skipIf(isWindows)("F: secure permissions — dir 0o700, file 0o600", async () => {
 		const events = makeChainedEvents(3);
 		const eventsPath = join(tmpDir, "events.jsonl");
 		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
@@ -380,7 +384,7 @@ describe("patchwork attest", () => {
 		expect(dirStat.mode & 0o777).toBe(0o700);
 	});
 
-	it("F2: reconciles insecure existing dir/file permissions", async () => {
+	it.skipIf(isWindows)("F2: reconciles insecure existing dir/file permissions", async () => {
 		const events = makeChainedEvents(3);
 		const eventsPath = join(tmpDir, "events.jsonl");
 		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));
@@ -534,7 +538,7 @@ describe("attest history mode", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("L: --history writes timestamped artifact and latest", async () => {
+	it.skipIf(isWindows)("L: --history writes timestamped artifact and latest", async () => {
 		const events = makeChainedEvents(3);
 		const eventsPath = join(tmpDir, "events.jsonl");
 		writeJsonl(eventsPath, events.map((e) => JSON.stringify(e)));

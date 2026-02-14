@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { SqliteStore } from "../../src/store/sqlite.js";
 import type { AuditEvent } from "../../src/schema/event.js";
 
+// Windows does not enforce POSIX file permissions (chmod 0o600/0o700 is a no-op)
+const isWindows = process.platform === "win32";
+
 function makeEvent(overrides: Partial<AuditEvent> = {}): AuditEvent {
 	return {
 		id: `evt_${Date.now()}_${Math.random().toString(36).slice(2)}`,
@@ -217,7 +220,7 @@ describe("SqliteStore", () => {
 		});
 	});
 
-	describe("file permissions", () => {
+	describe.skipIf(isWindows)("file permissions", () => {
 		it("creates directory with 0700", () => {
 			const subDir = join(tmpDir, "secure-db");
 			const s = new SqliteStore(join(subDir, "audit.db"));

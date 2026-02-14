@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { handleClaudeCodeHook } from "../../src/claude-code/adapter.js";
@@ -12,11 +12,13 @@ import type { ClaudeCodeHookInput } from "../../src/claude-code/types.js";
  * and verifies the full audit pipeline.
  */
 describe("E2E: Claude Code session pipeline", () => {
-	const testDir = join(tmpdir(), `patchwork-e2e-${Date.now()}`);
-	const eventsPath = join(testDir, ".patchwork", "events.jsonl");
+	let testDir: string;
+	let eventsPath: string;
 	let originalHome: string | undefined;
 
 	beforeEach(() => {
+		testDir = mkdtempSync(join(tmpdir(), "patchwork-e2e-"));
+		eventsPath = join(testDir, ".patchwork", "events.jsonl");
 		originalHome = process.env.HOME;
 		process.env.HOME = testDir;
 		mkdirSync(join(testDir, ".patchwork"), { recursive: true });
@@ -24,7 +26,11 @@ describe("E2E: Claude Code session pipeline", () => {
 
 	afterEach(() => {
 		process.env.HOME = originalHome;
-		rmSync(testDir, { recursive: true, force: true });
+		try {
+			rmSync(testDir, { recursive: true, force: true });
+		} catch {
+			// Windows: open file handles (e.g. better-sqlite3) may prevent cleanup
+		}
 	});
 
 	function makeInput(overrides: Partial<ClaudeCodeHookInput>): ClaudeCodeHookInput {
