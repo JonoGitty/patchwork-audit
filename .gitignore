@@ -8,3 +8,4 @@ dist/
 *.sqlite
 coverage/
 .DS_Store
+.claude/
