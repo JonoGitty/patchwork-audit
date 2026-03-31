@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.patchwork.watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/jonogompels/.patchwork/watchdog.sh</string>
+    </array>
+
+    <!-- Run every 30 minutes -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <!-- Also run at load (boot/login) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/jonogompels/.patchwork/watchdog-stderr.log</string>
+
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

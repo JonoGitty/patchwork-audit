@@ -10,26 +10,54 @@ Patchwork hooks into AI coding agents (Claude Code, Codex CLI) and records every
 
 **Local-first.** Everything works offline. Your data never leaves your machine.
 
+**Tamper-resistant.** The AI agent cannot disable its own monitoring, corrupt the audit log, or weaken its security policy. A watchdog LaunchAgent auto-repairs hooks if they are removed.
+
 ## Quickstart
 
 ```bash
-# Clone and build from source (npm package coming soon)
+# Clone and build
 git clone https://github.com/JonoGitty/codex-audit.git
 cd codex-audit
 pnpm install
 pnpm build
 
-# Set up hooks for your AI coding agents
-node packages/cli/dist/index.js init claude-code
+# Install CLI globally
+cd packages/cli && npm link && cd ../..
 
-# Use your AI coding agent normally...
-# Then see what it did:
-node packages/cli/dist/index.js log
-node packages/cli/dist/index.js log --risk high
-node packages/cli/dist/index.js summary
+# Install hooks with strict enforcement (fail-closed)
+patchwork init claude-code --strict-profile --policy-mode fail-closed
+
+# Create a security policy
+patchwork policy init --strict
+# Or copy the included hardened policy:
+cp docs/default-policy.yml ~/.patchwork/policy.yml
+
+# Verify it works
+patchwork status
 ```
 
-Once published to npm, the above simplifies to `npm install -g patchwork-audit && patchwork init claude-code`.
+### Permanent installation (macOS)
+
+To make Patchwork survive Claude Code updates and persist across reboots:
+
+```bash
+# Install the session guard (verifies audit system before Claude starts)
+cp scripts/guard.sh ~/.patchwork/guard.sh
+chmod +x ~/.patchwork/guard.sh
+
+# Install the watchdog LaunchAgent (auto-repairs hooks every 30 min)
+cp scripts/com.patchwork.watchdog.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.patchwork.watchdog.plist
+```
+
+The watchdog checks every 30 minutes (and on login) that:
+- `patchwork` CLI is available
+- Hooks are present in `~/.claude/settings.json`
+- Fail-closed mode is enabled
+- The guard script and policy file exist
+- Audit data permissions are correct (0600 files, 0700 dirs)
+
+If anything is missing, it reinstalls automatically and logs the repair to `~/.patchwork/watchdog.log`.
 
 ## What it records
 
@@ -42,7 +70,7 @@ Once published to npm, the above simplifies to `npm install -g patchwork-audit &
 | Web requests | AI fetched `https://docs.example.com/api` |
 | MCP tool calls | AI called `mcp__github__create_pr` |
 | Sessions | AI session started at 14:22, 47 actions |
-| Risk events | AI modified `.env` — CRITICAL (sensitive file) |
+| Risk events | AI modified `.env` -- CRITICAL (sensitive file) |
 | Subagents | AI spawned Explore subagent |
 
 ## CLI Commands
@@ -71,6 +99,11 @@ patchwork policy init                 # Create default policy
 patchwork policy init --strict        # Create strict enterprise policy
 patchwork policy validate policy.yml  # Validate a policy file
 
+# Integrity verification
+patchwork verify                      # Hash chain + seal + witness
+patchwork seal                        # HMAC-sign the audit trail
+patchwork witness publish             # Publish to remote witness
+
 # Export & sync
 patchwork export                      # Export as JSON
 patchwork export --format csv         # Export as CSV
@@ -81,228 +114,27 @@ patchwork sync codex                  # Import Codex CLI history
 patchwork init claude-code            # Install Claude Code hooks
 patchwork init codex                  # Set up Codex CLI sync
 patchwork status                      # Show config, agents, event stats
-
-# CI attestation
-patchwork attest                      # Generate attestation artifact
-patchwork attest --require-seal --require-witness  # Strict policy
-patchwork attest --json               # Also print to stdout
-patchwork attest --out artifact.json  # Custom output path
 ```
 
-## CI Attestation
+## Security Model
 
-`patchwork attest` runs the full verification pipeline (chain + seal + witness) and writes a machine-readable JSON artifact. Use it in CI to produce durable evidence that an AI coding session was audited.
+### Policy enforcement
 
-```bash
-# In CI — fail the pipeline if audit trail is incomplete
-patchwork attest \
-  --require-seal \
-  --require-witness \
-  --max-seal-age-seconds 3600 \
-  --max-witness-age-seconds 3600 \
-  --out audit-attestation.json
-
-# Upload the artifact
-# (GitHub Actions example)
-# - uses: actions/upload-artifact@v4
-#   with:
-#     name: patchwork-attestation
-#     path: audit-attestation.json
-```
-
-Attestation artifacts are **HMAC-signed** using the same seal key/keyring model. When a keyring or legacy seal key is available, the artifact includes a `payload_hash` (SHA-256 of the canonical payload) and a `signature` (HMAC-SHA256). If no key is found, the signature field is set to `"unsigned"`.
-
-```bash
-# Signed attestation with history (keeps timestamped copies)
-patchwork attest \
-  --require-seal \
-  --require-witness \
-  --max-seal-age-seconds 3600 \
-  --max-witness-age-seconds 3600 \
-  --history \
-  --max-history-files 30 \
-  --out audit-attestation.json
-```
-
-The `--history` flag writes a timestamped copy (`attestation-<ISO-timestamp>.json`) alongside the latest artifact. Use `--max-history-files <n>` to bound retention.
-
-The attestation artifact includes:
-
-| Field | Description |
-|---|---|
-| `schema_version` | Always `1` |
-| `generated_at` | ISO timestamp of generation |
-| `tool_version` | Patchwork version (dynamic from `package.json`) |
-| `pass` | Overall pass/fail boolean |
-| `chain` | Hash chain verification results |
-| `seal` | Seal verification results (presence, validity, age) |
-| `witness` | Witness verification results (matching records, age) |
-| `input_paths` | Paths to events, seals, and witness files used |
-| `chain_tip_hash` | Hash of the last chained event at attestation time (binding field) |
-| `chain_chained_events` | Number of chained events at attestation time (binding field) |
-| `seal_tip_hash` | Seal's tip hash at attestation time, or `null` (binding field) |
-| `witness_latest_matching_tip_hash` | Witness-matched tip hash at attestation time, or `null` (binding field) |
-| `error` | Error message if verification could not run, else `null` |
-| `payload_hash` | SHA-256 hash of the canonical payload |
-| `signature` | HMAC-SHA256 signature (or `"unsigned"` if no key) |
-| `key_id` | Signing key ID from keyring (omitted for legacy keys) |
-
-Binding fields tie the attestation to the exact audit state at generation time. During `patchwork verify`, these fields are compared against the current chain/seal/witness state. If the audit log has changed since the attestation was generated (e.g., new events appended), verification fails with a clear mismatch reason. This prevents replay of stale attestations against a different audit state.
-
-Exit code is non-zero when verification fails, so CI pipelines can gate on audit completeness.
-
-### Verifying Signed Attestations
-
-`patchwork verify` can validate attestation artifacts as part of the verification pipeline. This closes the loop: `attest` produces signed evidence, and `verify` enforces it.
-
-```bash
-# Verify chain + require a valid, signed attestation
-patchwork verify \
-  --require-signed-attestation \
-  --attestation-file audit-attestation.json \
-  --max-attestation-age-seconds 3600
-
-# Full enforcement: chain + seal + witness + signed attestation
-patchwork verify \
-  --require-seal \
-  --require-witness \
-  --require-signed-attestation \
-  --attestation-file audit-attestation.json \
-  --max-attestation-age-seconds 3600 \
-  --max-seal-age-seconds 3600 \
-  --max-witness-age-seconds 3600
-```
-
-Attestation verification checks (when any attestation flag is set):
-- **Integrity** (always enforced): recomputes canonical payload and verifies `payload_hash` matches. Hash mismatch always fails — no flag needed for tamper detection.
-- **Signature** (always enforced when present): if the attestation carries a signature (not `"unsigned"`), it must verify. Invalid signatures always fail.
-- **State binding** (always enforced when binding fields present): compares `chain_tip_hash`, `chain_chained_events`, `seal_tip_hash`, and `witness_latest_matching_tip_hash` against the current verification state. Mismatches fail with specific field details. Seal/witness fields are only compared when those checks are active in the current run. Legacy attestations without binding fields pass vacuously unless `--require-attestation-binding` or `--strict-attestation-file` is set.
-- **Schema**: all required fields present (`schema_version`, `generated_at`, `tool_version`, `pass`, `payload_hash`, `signature`)
-- **Freshness**: `--max-attestation-age-seconds` enforces recency of `generated_at`
-
-| Flag | Effect |
-|---|---|
-| `--attestation-file <path>` | Path to attestation artifact (default: `~/.patchwork/attestations/latest.json`) |
-| `--require-attestation` | Fail if attestation is missing, tampered (hash mismatch), or has invalid signature |
-| `--require-signed-attestation` | Fail if attestation is unsigned or signature is invalid |
-| `--max-attestation-age-seconds <n>` | Fail if attestation is older than n seconds |
-| `--strict-attestation-file` | Additionally require that the attestation's own `pass` field is `true` and binding fields are present |
-| `--require-attestation-binding` | Fail if attestation lacks binding fields (prevents legacy vacuous pass) |
-| `--no-attestation-check` | Skip attestation verification entirely |
-| `--require-remote-witness-proof` | Fail if remote witness proof quorum is not met |
-| `--remote-witness-quorum <n>` | Minimum remote witness proofs required (default: 1) |
-| `--remote-witness-timeout-ms <n>` | HTTP timeout per remote witness endpoint in ms (default: 5000) |
-| `--no-remote-witness-check` | Skip remote witness proof checks |
-| `--token-env <name>` | Environment variable name for bearer token (remote witness) |
-
-## Remote Witness Verification
-
-`patchwork witness verify` checks that locally-stored witness records actually exist at their remote endpoints. This prevents accepting fabricated witness records.
-
-```bash
-# Verify all witness records against their remote endpoints
-patchwork witness verify
-patchwork witness verify --quorum 2 --json
-
-# Verify only witnesses matching a specific chain tip
-patchwork witness verify --tip-hash <hash>
-
-# Use as part of full CI enforcement
-patchwork verify \
-  --require-seal \
-  --require-witness \
-  --require-remote-witness-proof \
-  --require-signed-attestation \
-  --require-attestation-binding \
-  --attestation-file audit-attestation.json \
-  --max-seal-age-seconds 3600 \
-  --max-witness-age-seconds 3600 \
-  --max-attestation-age-seconds 3600
-```
-
-For each witness record with a `witness_url` and `anchor_id`, the tool performs `GET {witness_url}/anchors/{anchor_id}` and confirms the endpoint returns a 200 response with a matching `anchor_id` in the body.
-
-## Enforcement Profiles
-
-Profiles bundle enforcement flags for `patchwork verify` and `patchwork attest`, so teams don't need to pass 8+ flags on every CI invocation.
-
-| Profile | Behavior |
-|---|---|
-| `baseline` (default) | No enforcement — current behavior |
-| `strict` | Require seal, witness, remote witness proof, signed attestation, attestation binding, strict attestation file |
-
-```bash
-# Use strict profile (all enforcement on)
-patchwork verify --profile strict
-
-# Profile + explicit override
-patchwork verify --profile strict --no-seal-check
-
-# Attest with strict profile
-patchwork attest --profile strict --out audit-attestation.json
-```
-
-### Config-Driven Defaults
-
-Set defaults in a YAML config file instead of passing flags. Project-level config takes precedence over user-level.
+Policies are YAML files that define allow/deny rules. When a policy denies an action, Patchwork tells Claude Code to block it and logs a `denied` event.
 
 ```yaml
-# ~/.patchwork/config.yml (or .patchwork/config.yml in project root)
-verify:
-  profile: strict
-  max_seal_age_seconds: 3600
-  max_witness_age_seconds: 3600
-  max_attestation_age_seconds: 3600
-  remote_witness_quorum: 2
-  token_env: WITNESS_TOKEN
-```
-
-With a config file in place, `patchwork verify` and `patchwork attest` use those defaults automatically. CLI flags still override config values.
-
-Resolution order: CLI flags > config file > profile defaults > built-in defaults.
-
-```bash
-# CI — config-driven, no flags needed
-patchwork verify
-patchwork attest --out audit-attestation.json
-
-# CI — strict profile with age thresholds from config
-patchwork verify --profile strict
-```
-
-### Config Validation
-
-Config files are schema-validated using Zod strict schemas. Unknown keys and type errors are detected and reported with full paths (e.g., `verify.unknown_key: Unrecognized key`).
-
-- **Strict profile**: invalid config causes immediate failure (exit 1) before verification runs.
-- **Baseline profile**: invalid config produces a warning on stderr and continues with the valid keys that could be extracted.
-
-Use `--show-effective-policy` to inspect the resolved configuration without running verification:
-
-```bash
-# See what the resolved policy looks like (text)
-patchwork verify --show-effective-policy
-
-# Machine-readable output
-patchwork verify --show-effective-policy --json
-patchwork attest --show-effective-policy --json
-```
-
-## Policy Engine
-
-Patchwork can enforce rules on what AI agents are allowed to do. Policies are YAML files that define allow/deny rules for files, commands, network access, and MCP tools.
-
-```yaml
-# .patchwork/policy.yml
-name: my-team-policy
-max_risk: high  # Auto-deny anything above this risk level
+# ~/.patchwork/policy.yml
+name: my-policy
+max_risk: high  # Auto-deny above this level
 
 files:
   deny:
     - pattern: "**/.env"
       reason: Environment files contain secrets
-    - pattern: "**/*.key"
-      reason: Private key files
+    - pattern: "**/.claude/settings.json"
+      reason: Audit hooks must not be modified
+    - pattern: "**/.patchwork/**"
+      reason: Audit data must not be tampered with
   default_action: allow
 
 commands:
@@ -311,21 +143,46 @@ commands:
       reason: Recursive force delete
     - prefix: sudo
       reason: Elevated privileges
-    - regex: "curl.*|.*sh"
-      reason: Pipe to shell
-  default_action: allow
-
-network:
-  deny:
-    - domain: evil.com
+    - prefix: "git push --force"
+      reason: Force push blocked
   default_action: allow
 ```
 
-When a policy denies an action, Patchwork tells Claude Code to block it and logs a `denied` event in the audit trail.
+### Self-protection
 
-**Built-in presets:**
-- `default` — Audit-only, everything allowed
-- `strict` — Blocks dangerous operations (secrets access, `rm -rf`, `sudo`, force push, etc.)
+The included hardened policy (`docs/default-policy.yml`) prevents the AI agent from:
+
+| Attack | Defence |
+|---|---|
+| Editing `~/.claude/settings.json` to remove hooks | File deny rule blocks all writes |
+| Truncating/deleting `~/.patchwork/events.jsonl` | File deny rule + command regex blocks redirects |
+| Weakening `~/.patchwork/policy.yml` | File deny rule blocks writes to policy |
+| Reading seal keys | File deny rule blocks access to `.patchwork/keys/**` |
+| Timeout-based bypass | Fail-closed mode denies on hook timeout |
+| Shell metacharacter evasion | Regex command rules catch pipes/redirects targeting audit data |
+
+### Fail-closed mode
+
+When installed with `--policy-mode fail-closed`, any hook error (crash, timeout, bad input) results in the action being **denied** rather than allowed. This is the recommended mode for production use.
+
+### Session guard
+
+The guard script (`scripts/guard.sh`) runs at the start of every Claude Code session and verifies:
+1. `patchwork` CLI is available
+2. Audit store directory exists and is writable
+3. Policy file is present
+4. File permissions are correct
+
+If any check fails, the session starts with a warning and the guard status is recorded for the PreToolUse hook to reference.
+
+### What Patchwork cannot prevent
+
+- A human with direct filesystem access can always modify files (Patchwork runs at user-level, not root)
+- Unloading the watchdog LaunchAgent (`launchctl unload ...`)
+- A future Claude Code update that changes the hook format entirely
+- Using a separate Claude Code profile that doesn't read `~/.claude/settings.json`
+
+For truly tamper-proof auditing, combine Patchwork with OS-level controls (MDM profiles, SIP, or file immutability flags).
 
 ## Risk Classification
 
@@ -341,6 +198,55 @@ Every event is automatically classified:
 
 Sensitive file detection covers: `.env`, private keys (`.pem`, `.key`, `id_rsa`), cloud credentials (`.aws/credentials`), API tokens, database files, and more.
 
+## CI Attestation
+
+`patchwork attest` runs the full verification pipeline (chain + seal + witness) and writes a machine-readable JSON artifact. Use it in CI to produce durable evidence that an AI coding session was audited.
+
+```bash
+# In CI -- fail the pipeline if audit trail is incomplete
+patchwork attest \
+  --require-seal \
+  --require-witness \
+  --max-seal-age-seconds 3600 \
+  --max-witness-age-seconds 3600 \
+  --out audit-attestation.json
+```
+
+Attestation artifacts are **HMAC-signed** and include **state-binding fields** that tie the attestation to the exact audit state at generation time.
+
+```bash
+# Verify chain + require a valid, signed attestation
+patchwork verify \
+  --require-signed-attestation \
+  --attestation-file audit-attestation.json \
+  --max-attestation-age-seconds 3600
+```
+
+## Enforcement Profiles
+
+Profiles bundle enforcement flags so teams don't need to pass many flags on every CI invocation.
+
+| Profile | Behavior |
+|---|---|
+| `baseline` (default) | No enforcement -- audit-only |
+| `strict` | Require seal, witness, remote witness proof, signed attestation, binding |
+
+```bash
+patchwork verify --profile strict
+patchwork attest --profile strict --out audit-attestation.json
+```
+
+### Config-driven defaults
+
+```yaml
+# ~/.patchwork/config.yml
+verify:
+  profile: strict
+  max_seal_age_seconds: 3600
+  max_witness_age_seconds: 3600
+  max_attestation_age_seconds: 3600
+```
+
 ## Supported Agents
 
 | Agent | Status | Integration |
@@ -354,55 +260,59 @@ Sensitive file detection covers: `.env`, private keys (`.pem`, `.key`, `id_rsa`)
 
 ```
 ~/.patchwork/
-  events.jsonl          # Append-only audit trail
-  policy.yml            # User-level policy (optional)
-
-project/.patchwork/
-  policy.yml            # Project-level policy (takes precedence)
+  events.jsonl          # Append-only audit trail (JSONL + hash chain)
+  db/audit.db           # SQLite indexed mirror (FTS5 search)
+  policy.yml            # User-level security policy
+  keys/seal/            # HMAC seal keyring
+  seals.jsonl           # Seal records
+  witnesses.jsonl       # Remote witness records
+  attestations/         # CI attestation artifacts
+  state/                # Guard status, divergence markers
+  watchdog.log          # Watchdog repair log
+  guard.sh              # Session start guard script
+  watchdog.sh           # LaunchAgent watchdog script
 ```
 
 Three packages:
 
-- **`@patchwork/core`** — Schema (Zod), risk classifier, policy engine, JSONL store, content hashing
-- **`@patchwork/agents`** — Agent adapters (Claude Code hooks, Codex parser, auto-detection)
-- **`patchwork-audit`** — CLI (Commander.js)
+- **`@patchwork/core`** -- Schema (Zod), risk classifier, policy engine, JSONL + SQLite stores, hash chain, HMAC sealing, remote witness
+- **`@patchwork/agents`** -- Agent adapters (Claude Code hooks, Codex parser, auto-detection)
+- **`patchwork-audit`** -- CLI (Commander.js, 19 commands)
 
 ## Export Formats
 
-- **JSON** — Full event data, pipe to `jq` for custom queries
-- **CSV** — Import into spreadsheets, BI tools, databases
-- **SARIF** — Static Analysis Results Interchange Format, import into GitHub Code Scanning, Snyk, or any SARIF-compatible security tool
+- **JSON** -- Full event data, pipe to `jq` for custom queries
+- **CSV** -- Import into spreadsheets, BI tools, databases
+- **SARIF** -- Static Analysis Results Interchange Format, import into GitHub Code Scanning
 
 ## Platform Support
 
 | Platform | Status | Notes |
 |---|---|---|
 | Linux | Fully supported | CI-tested on Ubuntu with Node 20 and 22 |
-| macOS | Fully supported | Same POSIX semantics as Linux |
-| Windows | Partial | Core functionality works. File permission hardening (chmod 0o600/0o700) is not enforced by the OS. Some tests fail on Windows due to this; all 265 tests pass on Linux/macOS. |
+| macOS | Fully supported | LaunchAgent watchdog for permanent installation |
+| Windows | Partial | Core works. File permissions not enforced by OS. |
 
 ## Known Limitations
 
-- **v0.1.0 — early release.** APIs and storage format may change.
+- **v0.1.0 -- early release.** APIs and storage format may change.
 - **Not yet on npm.** Install from source (see Quickstart).
-- **Windows file permissions** are not enforced by the OS. The audit trail itself works, but the permission-hardening layer (0o600 files, 0o700 directories) has no effect on Windows.
+- **Windows file permissions** are not enforced by the OS.
 - **Cursor and GitHub Copilot adapters** are planned but not yet implemented.
-- **Cloud sync and team dashboard** are planned for a future release.
-- **Sealing and attestation** use local HMAC keys. A compromised machine with both key and data can forge signatures. KMS-backed signing is on the roadmap.
-- **JSONL storage scales linearly** for full-log reads. For large audit trails, use SQLite queries via `patchwork search`.
+- **JSONL storage scales linearly** for full-log reads. Use `patchwork search` for large trails.
+- **Seal keys are local.** A compromised machine with both key and data can forge signatures. KMS-backed signing is on the roadmap.
+- **Command policy matching is prefix-based.** Complex shell metacharacter evasion may bypass simple prefix rules. The hardened policy includes regex rules for common evasion patterns.
 
 ## Development
 
 ```bash
 pnpm install
 pnpm build
-pnpm test
+pnpm test          # 671 tests across 31 files
 pnpm lint
 ```
 
-## Development Test Log
+## Test Log
 
 - Run `pnpm test:log` to execute tests and append a timestamped summary to `docs/TEST_LOG.md`.
-- Run `pnpm hooks:install` once to enable the repo `pre-push` hook that runs `pnpm test:log` automatically before each push.
-- CI runs `pnpm test:log` on the Node 22 job and uploads `docs/TEST_LOG.md` as a workflow artifact.
-
+- The repo `pre-push` hook runs `pnpm test:log` automatically before each push.
