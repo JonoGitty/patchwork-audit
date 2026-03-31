@@ -17,6 +17,7 @@ import { verifyCommand } from "./commands/verify.js";
 import { sealCommand } from "./commands/seal.js";
 import { witnessCommand } from "./commands/witness.js";
 import { attestCommand } from "./commands/attest.js";
+import { dashboardCommand } from "./commands/dashboard.js";
 
 const program = new Command();
 
@@ -43,5 +44,6 @@ program.addCommand(verifyCommand);
 program.addCommand(sealCommand);
 program.addCommand(witnessCommand);
 program.addCommand(attestCommand);
+program.addCommand(dashboardCommand);
 
 program.parse();
