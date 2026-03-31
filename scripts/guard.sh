@@ -64,4 +64,10 @@ mkdir -p "$PATCHWORK_DIR/state" 2>/dev/null
 echo '{"status":"ok","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$GUARD_STATUS_FILE"
 
 # Forward stdin to patchwork hook session-start
-exec patchwork hook session-start
+# Use explicit node path to avoid #!/usr/bin/env finding wrong architecture
+NODE_BIN=$(dirname "$(command -v patchwork 2>/dev/null || echo "")")/node
+if [ -x "$NODE_BIN" ]; then
+    exec "$NODE_BIN" "$(command -v patchwork)" hook session-start
+else
+    exec patchwork hook session-start
+fi

@@ -24,6 +24,28 @@ export function layout(title: string, activePath: string, content: string): stri
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <style>${CSS}</style>
 </head>
+<script>
+// Auto-refresh: reload page every 15 seconds to show new events
+let _pw_refresh = setInterval(() => {
+    // Only refresh if tab is visible and user hasn't scrolled deep
+    if (!document.hidden && window.scrollY < 200) {
+        fetch(window.location.href, {headers:{"X-Patchwork-Poll":"1"}})
+            .then(r => r.text())
+            .then(html => {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, "text/html");
+                const newMain = doc.querySelector("main");
+                if (newMain) document.querySelector("main").innerHTML = newMain.innerHTML;
+                // Re-init Chart.js canvases
+                document.querySelectorAll("canvas").forEach(c => {
+                    const script = c.nextElementSibling;
+                    if (script && script.tagName === "SCRIPT") eval(script.textContent);
+                });
+            })
+            .catch(() => {}); // Silently fail if server is down
+    }
+}, 15000);
+</script>
 <body>
     <header>
         <div class="header-inner">
