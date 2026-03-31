@@ -1,0 +1,233 @@
+name: "Patchwork Audit"
+description: "Verify and attest your AI coding agent audit trail. Gate deployments on audit completeness, hash chain integrity, and policy compliance."
+author: "JonoGitty"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  profile:
+    description: "Enforcement profile: strict (all checks) or baseline (audit-only)"
+    required: false
+    default: "strict"
+  events-file:
+    description: "Path to audit events JSONL file"
+    required: false
+    default: ""
+  seals-file:
+    description: "Path to seals JSONL file"
+    required: false
+    default: ""
+  witnesses-file:
+    description: "Path to witness records JSONL file"
+    required: false
+    default: ""
+  attestation-output:
+    description: "Path to write the attestation artifact"
+    required: false
+    default: "audit-attestation.json"
+  node-version:
+    description: "Node.js version to use"
+    required: false
+    default: "22"
+  patchwork-version:
+    description: "patchwork-audit npm package version"
+    required: false
+    default: "latest"
+  fail-on-error:
+    description: "Fail the workflow step if verification fails"
+    required: false
+    default: "true"
+  upload-attestation:
+    description: "Upload attestation artifact to GitHub"
+    required: false
+    default: "true"
+  verify-flags:
+    description: "Additional flags for patchwork verify"
+    required: false
+    default: ""
+  attest-flags:
+    description: "Additional flags for patchwork attest"
+    required: false
+    default: ""
+
+outputs:
+  pass:
+    description: "Whether verification passed (true/false)"
+    value: ${{ steps.verify.outputs.pass }}
+  total-events:
+    description: "Total number of audit events"
+    value: ${{ steps.verify.outputs.total-events }}
+  chained-events:
+    description: "Number of hash-chained events"
+    value: ${{ steps.verify.outputs.chained-events }}
+  attestation-path:
+    description: "Path to the generated attestation artifact"
+    value: ${{ steps.attest.outputs.attestation-path }}
+  verify-json:
+    description: "Full verification result as JSON"
+    value: ${{ steps.verify.outputs.verify-json }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install Patchwork CLI
+      shell: bash
+      run: |
+        echo "::group::Installing patchwork-audit@${{ inputs.patchwork-version }}"
+        npm install -g patchwork-audit@${{ inputs.patchwork-version }}
+        echo "Installed: $(patchwork --version)"
+        echo "::endgroup::"
+
+    - name: Discover audit data
+      id: discover
+      shell: bash
+      run: |
+        # Resolve file paths — use inputs if provided, otherwise search common locations
+        EVENTS="${{ inputs.events-file }}"
+        SEALS="${{ inputs.seals-file }}"
+        WITNESSES="${{ inputs.witnesses-file }}"
+
+        # Auto-discover if not specified
+        if [ -z "$EVENTS" ]; then
+          for candidate in \
+            ".patchwork/events.jsonl" \
+            "$HOME/.patchwork/events.jsonl" \
+            "audit/events.jsonl"; do
+            if [ -f "$candidate" ]; then
+              EVENTS="$candidate"
+              break
+            fi
+          done
+        fi
+
+        if [ -z "$EVENTS" ] || [ ! -f "$EVENTS" ]; then
+          echo "::warning::No audit events file found."
+          echo "::warning::Provide audit data via: (1) commit .patchwork/events.jsonl to your repo, (2) pass events-file input, or (3) download from a previous workflow artifact."
+          echo "found=false" >> $GITHUB_OUTPUT
+        else
+          echo "found=true" >> $GITHUB_OUTPUT
+          echo "events=$EVENTS" >> $GITHUB_OUTPUT
+          echo "Found events: $EVENTS ($(wc -l < "$EVENTS") lines)"
+        fi
+
+        # Seals and witnesses are optional
+        if [ -z "$SEALS" ]; then
+          for candidate in ".patchwork/seals.jsonl" "$HOME/.patchwork/seals.jsonl"; do
+            [ -f "$candidate" ] && SEALS="$candidate" && break
+          done
+        fi
+
+        if [ -z "$WITNESSES" ]; then
+          for candidate in ".patchwork/witnesses.jsonl" "$HOME/.patchwork/witnesses.jsonl"; do
+            [ -f "$candidate" ] && WITNESSES="$candidate" && break
+          done
+        fi
+
+        echo "seals=${SEALS:-}" >> $GITHUB_OUTPUT
+        echo "witnesses=${WITNESSES:-}" >> $GITHUB_OUTPUT
+
+    - name: Run verification
+      id: verify
+      if: steps.discover.outputs.found == 'true'
+      shell: bash
+      run: |
+        ARGS="--json --profile ${{ inputs.profile }}"
+
+        [ -n "${{ steps.discover.outputs.events }}" ] && ARGS="$ARGS --file ${{ steps.discover.outputs.events }}"
+        [ -n "${{ steps.discover.outputs.seals }}" ] && ARGS="$ARGS --seal-file ${{ steps.discover.outputs.seals }}"
+        [ -n "${{ steps.discover.outputs.witnesses }}" ] && ARGS="$ARGS --witness-file ${{ steps.discover.outputs.witnesses }}"
+
+        ARGS="$ARGS ${{ inputs.verify-flags }}"
+
+        echo "::group::Patchwork Verify"
+        VERIFY_RESULT=$(patchwork verify $ARGS 2>&1) || true
+        echo "$VERIFY_RESULT"
+        echo "::endgroup::"
+
+        # Parse JSON results
+        PASS=$(echo "$VERIFY_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(str(d.get('pass',False)).lower())" 2>/dev/null || echo "false")
+        TOTAL=$(echo "$VERIFY_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('total_events',0))" 2>/dev/null || echo "0")
+        CHAINED=$(echo "$VERIFY_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('chained_events',0))" 2>/dev/null || echo "0")
+
+        echo "pass=$PASS" >> $GITHUB_OUTPUT
+        echo "total-events=$TOTAL" >> $GITHUB_OUTPUT
+        echo "chained-events=$CHAINED" >> $GITHUB_OUTPUT
+
+        # Store full JSON (truncated for output limits)
+        VERIFY_SHORT=$(echo "$VERIFY_RESULT" | head -c 50000)
+        {
+          echo "verify-json<<PATCHWORK_EOF"
+          echo "$VERIFY_SHORT"
+          echo "PATCHWORK_EOF"
+        } >> $GITHUB_OUTPUT
+
+        # Summary annotation
+        if [ "$PASS" = "true" ]; then
+          echo "::notice::Patchwork audit verification PASSED ($TOTAL events, $CHAINED chained)"
+        else
+          echo "::warning::Patchwork audit verification FAILED ($TOTAL events, $CHAINED chained)"
+        fi
+
+    - name: Set defaults if no data found
+      id: verify-fallback
+      if: steps.discover.outputs.found != 'true'
+      shell: bash
+      run: |
+        echo "pass=false" >> $GITHUB_OUTPUT
+        echo "total-events=0" >> $GITHUB_OUTPUT
+        echo "chained-events=0" >> $GITHUB_OUTPUT
+        echo "verify-json={}" >> $GITHUB_OUTPUT
+
+    - name: Generate attestation
+      id: attest
+      if: steps.discover.outputs.found == 'true'
+      shell: bash
+      run: |
+        ARGS="--json --profile ${{ inputs.profile }}"
+
+        [ -n "${{ steps.discover.outputs.events }}" ] && ARGS="$ARGS --file ${{ steps.discover.outputs.events }}"
+        [ -n "${{ steps.discover.outputs.seals }}" ] && ARGS="$ARGS --seal-file ${{ steps.discover.outputs.seals }}"
+        [ -n "${{ steps.discover.outputs.witnesses }}" ] && ARGS="$ARGS --witness-file ${{ steps.discover.outputs.witnesses }}"
+
+        ARGS="$ARGS --out ${{ inputs.attestation-output }} ${{ inputs.attest-flags }}"
+
+        echo "::group::Patchwork Attest"
+        patchwork attest $ARGS 2>&1 || echo "::warning::Attestation generation had warnings (non-fatal)"
+        echo "::endgroup::"
+
+        if [ -f "${{ inputs.attestation-output }}" ]; then
+          echo "attestation-path=${{ inputs.attestation-output }}" >> $GITHUB_OUTPUT
+          echo "Generated attestation: ${{ inputs.attestation-output }}"
+        else
+          echo "attestation-path=" >> $GITHUB_OUTPUT
+          echo "::warning::Attestation file was not generated"
+        fi
+
+    - name: Upload attestation artifact
+      if: inputs.upload-attestation == 'true' && steps.attest.outputs.attestation-path != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: patchwork-attestation
+        path: ${{ steps.attest.outputs.attestation-path }}
+        retention-days: 90
+
+    - name: Audit gate
+      if: inputs.fail-on-error == 'true' && steps.verify.outputs.pass != 'true'
+      shell: bash
+      run: |
+        echo "::error::Patchwork audit verification failed. The audit trail is incomplete, tampered, or does not meet the '${{ inputs.profile }}' enforcement profile."
+        echo ""
+        echo "To investigate locally:"
+        echo "  patchwork verify --profile ${{ inputs.profile }}"
+        echo "  patchwork log --risk high"
+        echo "  patchwork status"
+        echo ""
+        echo "For help: https://github.com/JonoGitty/patchwork/blob/main/docs/github-action.md"
+        exit 1

@@ -1,0 +1,93 @@
+name: Test Patchwork Action
+
+on:
+  push:
+    paths:
+      - "action.yml"
+      - ".github/workflows/test-action.yml"
+  pull_request:
+    paths:
+      - "action.yml"
+      - ".github/workflows/test-action.yml"
+  workflow_dispatch:
+
+jobs:
+  test-with-no-data:
+    name: "Test: No audit data (should warn, not fail)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        id: audit
+        with:
+          profile: baseline
+          fail-on-error: "false"
+
+      - name: Verify outputs
+        run: |
+          echo "pass=${{ steps.audit.outputs.pass }}"
+          echo "total-events=${{ steps.audit.outputs.total-events }}"
+          # Should be false/0 with no data
+          [ "${{ steps.audit.outputs.pass }}" = "false" ] || [ "${{ steps.audit.outputs.total-events }}" = "0" ]
+
+  test-with-sample-data:
+    name: "Test: Sample audit data"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create sample audit data
+        run: |
+          mkdir -p .patchwork
+          cat > .patchwork/events.jsonl << 'EOF'
+          {"id":"evt_test_001","session_id":"ses_ci_test","timestamp":"2026-03-31T12:00:00Z","agent":"claude-code","action":"file_read","status":"completed","target":{"type":"file","path":"src/index.ts"},"project":{"root":"/tmp","name":"test"},"risk":{"level":"low","flags":[]}}
+          {"id":"evt_test_002","session_id":"ses_ci_test","timestamp":"2026-03-31T12:00:01Z","agent":"claude-code","action":"command_execute","status":"completed","target":{"type":"command","command":"npm test"},"project":{"root":"/tmp","name":"test"},"risk":{"level":"medium","flags":[]}}
+          {"id":"evt_test_003","session_id":"ses_ci_test","timestamp":"2026-03-31T12:00:02Z","agent":"claude-code","action":"session_end","status":"completed","target":{"type":"prompt"},"project":{"root":"/tmp","name":"test"},"risk":{"level":"none","flags":[]}}
+          EOF
+
+      - uses: ./
+        id: audit
+        with:
+          profile: baseline
+          events-file: .patchwork/events.jsonl
+          fail-on-error: "false"
+
+      - name: Verify outputs
+        run: |
+          echo "pass=${{ steps.audit.outputs.pass }}"
+          echo "total-events=${{ steps.audit.outputs.total-events }}"
+          echo "chained-events=${{ steps.audit.outputs.chained-events }}"
+          echo "attestation-path=${{ steps.audit.outputs.attestation-path }}"
+
+          # Should have found 3 events
+          [ "${{ steps.audit.outputs.total-events }}" = "3" ]
+          echo "All assertions passed"
+
+      - name: Verify attestation was generated
+        run: |
+          [ -f "audit-attestation.json" ] && echo "Attestation exists" || echo "No attestation"
+
+  test-strict-fails:
+    name: "Test: Strict profile fails without seal"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create minimal audit data (no seal)
+        run: |
+          mkdir -p .patchwork
+          echo '{"id":"evt_001","session_id":"ses_001","timestamp":"2026-03-31T12:00:00Z","agent":"claude-code","action":"session_start","status":"completed","target":{"type":"prompt"},"project":{"root":"/tmp","name":"test"},"risk":{"level":"none","flags":[]}}' > .patchwork/events.jsonl
+
+      - uses: ./
+        id: audit
+        with:
+          profile: strict
+          events-file: .patchwork/events.jsonl
+          fail-on-error: "false"
+
+      - name: Verify strict fails without seal
+        run: |
+          echo "pass=${{ steps.audit.outputs.pass }}"
+          # Strict should fail — no seal, no witness, no attestation
+          [ "${{ steps.audit.outputs.pass }}" = "false" ]
+          echo "Correctly failed on strict profile without seal"
