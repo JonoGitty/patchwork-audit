@@ -1,0 +1,211 @@
+name: jono-personal
+version: "1"
+description: >
+  Personal security policy for Jono's Mac. Blocks destructive operations,
+  flags sensitive file access, allows normal dev workflows.
+
+# Deny anything classified above 'high' risk automatically
+max_risk: high
+
+files:
+  deny:
+    # CRITICAL: Self-protection — prevent AI from disabling its own audit
+    # (C-2: AI agent can disable hooks by editing settings.json)
+    - pattern: "**/.claude/settings.json"
+      action: deny
+      reason: "Claude Code settings contain audit hooks — modification would disable monitoring"
+    - pattern: "**/.claude/settings.local.json"
+      action: deny
+      reason: "Claude Code local settings — modification could disable audit hooks"
+    # CRITICAL: Protect audit trail itself from tampering
+    # (C-3: AI agent can corrupt or truncate the audit log)
+    - pattern: "**/.patchwork/**"
+      action: deny
+      reason: "Patchwork audit data — tampering would destroy audit trail"
+    - pattern: "**/.patchwork/events.jsonl"
+      action: deny
+      reason: "Audit event log — must not be modified by AI agent"
+    - pattern: "**/.patchwork/db/**"
+      action: deny
+      reason: "Audit database — must not be modified by AI agent"
+    - pattern: "**/.patchwork/policy.yml"
+      action: deny
+      reason: "Security policy — must not be weakened by AI agent"
+    - pattern: "**/.patchwork/keys/**"
+      action: deny
+      reason: "Seal keys — must not be accessed by AI agent"
+    # Secrets & credentials
+    - pattern: "**/.env"
+      action: deny
+      reason: "Environment files contain secrets"
+    - pattern: "**/.env.*"
+      action: deny
+      reason: "Environment files contain secrets"
+    - pattern: "**/*.key"
+      action: deny
+      reason: "Private key files"
+    - pattern: "**/*.pem"
+      action: deny
+      reason: "Certificate/key files"
+    - pattern: "**/.ssh/*"
+      action: deny
+      reason: "SSH configuration and keys"
+    - pattern: "**/.aws/credentials"
+      action: deny
+      reason: "AWS credentials"
+    - pattern: "**/.gcloud/**"
+      action: deny
+      reason: "Google Cloud credentials"
+    - pattern: "**/*secret*"
+      action: deny
+      reason: "Files likely containing secrets"
+    - pattern: "**/*password*"
+      action: deny
+      reason: "Files likely containing passwords"
+    - pattern: "**/Keychain/**"
+      action: deny
+      reason: "macOS Keychain data"
+    # System files
+    - pattern: "/etc/shadow"
+      action: deny
+      reason: "System password file"
+    - pattern: "/etc/sudoers"
+      action: deny
+      reason: "Sudo configuration"
+  default_action: allow
+
+commands:
+  deny:
+    # Destructive filesystem
+    - prefix: "rm -rf /"
+      action: deny
+      reason: "Root filesystem deletion"
+    - prefix: "rm -rf ~"
+      action: deny
+      reason: "Home directory deletion"
+    - prefix: "rm -rf *"
+      action: deny
+      reason: "Wildcard recursive deletion"
+    # Elevated privileges
+    - prefix: "sudo"
+      action: deny
+      reason: "Elevated privileges — ask Jono to run manually"
+    # Dangerous git operations
+    - prefix: "git push --force"
+      action: deny
+      reason: "Force push can destroy remote history"
+    - prefix: "git push -f"
+      action: deny
+      reason: "Force push can destroy remote history"
+    - prefix: "git reset --hard"
+      action: deny
+      reason: "Hard reset destroys uncommitted work"
+    - prefix: "git clean -fd"
+      action: deny
+      reason: "Removes untracked files permanently"
+    # Remote access
+    - prefix: "ssh"
+      action: deny
+      reason: "Remote access — ask Jono first"
+    - prefix: "scp"
+      action: deny
+      reason: "Remote file copy — ask Jono first"
+    # Package publishing
+    - prefix: "npm publish"
+      action: deny
+      reason: "Publishing to npm registry"
+    - prefix: "pip upload"
+      action: deny
+      reason: "Publishing to PyPI"
+    # Dangerous permissions
+    - prefix: "chmod 777"
+      action: deny
+      reason: "World-writable permissions"
+    - prefix: "chmod -R 777"
+      action: deny
+      reason: "Recursive world-writable permissions"
+    # Process manipulation
+    - prefix: "kill -9"
+      action: deny
+      reason: "Force kill process — ask Jono first"
+    - prefix: "killall"
+      action: deny
+      reason: "Kill all processes by name — ask Jono first"
+    # Audit self-protection: block commands targeting patchwork data
+    - regex: ".*[>|;].*\\.patchwork"
+      action: deny
+      reason: "Command targets patchwork audit data"
+    - regex: ".*rm.*\\.patchwork"
+      action: deny
+      reason: "Attempted deletion of patchwork audit data"
+    - regex: ".*>.*settings\\.json"
+      action: deny
+      reason: "Redirect to Claude settings file blocked"
+  allow:
+    # Safe dev operations
+    - prefix: "git status"
+      action: allow
+      reason: "Git status check"
+    - prefix: "git diff"
+      action: allow
+      reason: "Git diff"
+    - prefix: "git log"
+      action: allow
+      reason: "Git log"
+    - prefix: "git add"
+      action: allow
+      reason: "Git staging"
+    - prefix: "git commit"
+      action: allow
+      reason: "Git commit"
+    - prefix: "git push"
+      action: allow
+      reason: "Normal git push"
+    - prefix: "npm test"
+      action: allow
+      reason: "Test execution"
+    - prefix: "npm run"
+      action: allow
+      reason: "npm scripts"
+    - prefix: "npx"
+      action: allow
+      reason: "Package runner"
+    - prefix: "pnpm"
+      action: allow
+      reason: "pnpm commands"
+    - prefix: "python3"
+      action: allow
+      reason: "Python execution"
+    - prefix: "pip install"
+      action: allow
+      reason: "Python package install"
+    - prefix: "brew"
+      action: allow
+      reason: "Homebrew commands"
+    - prefix: "ls"
+      action: allow
+      reason: "Directory listing"
+    - prefix: "cat"
+      action: allow
+      reason: "File reading"
+    - prefix: "head"
+      action: allow
+      reason: "File reading"
+    - prefix: "tail"
+      action: allow
+      reason: "File reading"
+    - prefix: "which"
+      action: allow
+      reason: "Command lookup"
+    - prefix: "uname"
+      action: allow
+      reason: "System info"
+  default_action: allow
+
+network:
+  deny: []
+  default_action: allow
+
+mcp:
+  deny: []
+  default_action: allow
