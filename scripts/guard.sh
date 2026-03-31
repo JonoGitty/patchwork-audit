@@ -89,7 +89,17 @@ if [ -n "$DIR_PERMS" ] && [ "$DIR_PERMS" != "700" ]; then
     chmod 700 "$PATCHWORK_DIR" 2>/dev/null
 fi
 
-# 5. All checks passed — record guard success and forward to patchwork
+# 5. Check hooks in settings.json use correct node path
+SETTINGS_FILE="$HOME/.claude/settings.json"
+if [ -f "$SETTINGS_FILE" ]; then
+    if grep -q "/node " "$SETTINGS_FILE" 2>/dev/null; then
+        : # explicit node path — good
+    elif grep -q "patchwork hook" "$SETTINGS_FILE" 2>/dev/null; then
+        echo "[patchwork-guard] WARNING: Hooks use bare 'patchwork' — may fail on mixed-arch Macs. Run: patchwork init claude-code --strict-profile --policy-mode fail-closed" >&2
+    fi
+fi
+
+# 6. All checks passed — record guard success and forward to patchwork
 mkdir -p "$PATCHWORK_DIR/state" 2>/dev/null
 echo '{"status":"ok","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$GUARD_STATUS_FILE"
 

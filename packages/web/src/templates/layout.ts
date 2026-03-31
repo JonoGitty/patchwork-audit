@@ -25,6 +25,24 @@ export function layout(title: string, activePath: string, content: string): stri
     <style>${CSS}</style>
 </head>
 <script>
+// Health check: poll /api/health every 30 seconds
+fetch('/api/health').then(r=>r.json()).then(h=>{
+    const dot=document.getElementById('health-dot');
+    if(!dot)return;
+    if(h.healthy){dot.className='health-dot ok';dot.title='Patchwork healthy';}
+    else if(h.hooks.present){dot.className='health-dot warn';dot.title='Hooks present but guard stale';}
+    else{dot.className='health-dot fail';dot.title='Hooks missing — run patchwork doctor';}
+}).catch(()=>{});
+setInterval(()=>{
+    fetch('/api/health').then(r=>r.json()).then(h=>{
+        const dot=document.getElementById('health-dot');
+        if(!dot)return;
+        if(h.healthy){dot.className='health-dot ok';dot.title='Patchwork healthy';}
+        else if(h.hooks.present){dot.className='health-dot warn';dot.title='Hooks present but guard stale';}
+        else{dot.className='health-dot fail';dot.title='Hooks missing — run patchwork doctor';}
+    }).catch(()=>{});
+},30000);
+
 // Auto-refresh: reload page every 15 seconds to show new events
 let _pw_refresh = setInterval(() => {
     // Only refresh if tab is visible and user hasn't scrolled deep
@@ -49,7 +67,7 @@ let _pw_refresh = setInterval(() => {
 <body>
     <header>
         <div class="header-inner">
-            <a href="/" class="logo">&#9641; Patchwork</a>
+            <a href="/" class="logo">&#9641; Patchwork <span id="health-dot" class="health-dot" title="Checking...">&#9679;</span></a>
             <nav>
                 ${nav}
             </nav>
@@ -300,6 +318,12 @@ h3 { font-size: 15px; margin-bottom: 12px; color: var(--text-dim); }
 .settings-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(48,54,61,0.5); }
 .settings-label { color: var(--text-dim); font-size: 14px; }
 .settings-value { font-size: 14px; }
+
+/* Health dot */
+.health-dot { font-size: 10px; vertical-align: middle; color: var(--text-muted); transition: color 0.3s; }
+.health-dot.ok { color: var(--green); }
+.health-dot.warn { color: var(--medium); }
+.health-dot.fail { color: var(--critical); }
 
 /* Utility */
 .mb-16 { margin-bottom: 16px; }

@@ -131,7 +131,7 @@ describe("init --pretool flags", () => {
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].command;
-		expect(cmd).toBe("patchwork hook pre-tool");
+		expect(cmd).toContain("patchwork hook pre-tool");
 	});
 
 	it("E: --pretool-telemetry-dest and --pretool-telemetry-file pass through to hook command", async () => {
@@ -301,7 +301,7 @@ describe("init --strict-profile", () => {
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].command;
-		expect(cmd).toBe("patchwork hook pre-tool");
+		expect(cmd).toContain("patchwork hook pre-tool");
 	});
 
 	it("E: re-run with strict profile updates existing hook (no duplication)", async () => {
@@ -309,7 +309,7 @@ describe("init --strict-profile", () => {
 		await runInit(["claude-code", "--project", tmpDir]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		let settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		expect(settings.hooks.PreToolUse[0].command).toBe("patchwork hook pre-tool");
+		expect(settings.hooks.PreToolUse[0].command).toContain("patchwork hook pre-tool");
 
 		// Re-run with strict
 		const { output } = await runInit([

@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import type { Store } from "@patchwork/core";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { computeStats, groupSessions, riskTimeline, riskFlagCounts } from "../data/queries.js";
 
 export function apiRoutes(store: Store) {
@@ -41,6 +43,47 @@ export function apiRoutes(store: Store) {
 	app.get("/api/risk-flags", (c) => {
 		const events = store.readAll();
 		return c.json(riskFlagCounts(events));
+	});
+
+	app.get("/api/health", (c) => {
+		const home = process.env.HOME || "";
+		const guardStatusPath = join(home, ".patchwork", "state", "guard-status.json");
+		const settingsPath = join(home, ".claude", "settings.json");
+
+		let guardOk = false;
+		let guardAge = -1;
+		let hooksPresent = false;
+		let failClosed = false;
+		let nodeExplicit = false;
+
+		// Check guard status
+		try {
+			if (existsSync(guardStatusPath)) {
+				const guard = JSON.parse(readFileSync(guardStatusPath, "utf-8"));
+				guardAge = Math.floor((Date.now() - new Date(guard.ts).getTime()) / 60000);
+				guardOk = guard.status === "ok" && guardAge < 60;
+			}
+		} catch { /* ignore */ }
+
+		// Check hooks
+		try {
+			if (existsSync(settingsPath)) {
+				const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+				const hooks = settings.hooks || {};
+				hooksPresent = !!(hooks.PreToolUse?.length && hooks.PostToolUse?.length);
+				const cmd = hooks.PreToolUse?.[0]?.command || "";
+				failClosed = cmd.includes("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
+				nodeExplicit = cmd.includes("/node ");
+			}
+		} catch { /* ignore */ }
+
+		const healthy = hooksPresent && (guardOk || guardAge === -1);
+
+		return c.json({
+			healthy,
+			guard: { ok: guardOk, ageMinutes: guardAge },
+			hooks: { present: hooksPresent, failClosed, nodeExplicit },
+		});
 	});
 
 	return app;

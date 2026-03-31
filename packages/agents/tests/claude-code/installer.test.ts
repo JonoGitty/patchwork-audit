@@ -44,7 +44,7 @@ describe("installClaudeCodeHooks", () => {
 
 		for (const hookList of Object.values(settings.hooks) as any[]) {
 			for (const hook of hookList) {
-				expect(hook.command).toMatch(/^patchwork hook /);
+				expect(hook.command).toContain("patchwork hook ");
 				expect(hook.type).toBe("command");
 				expect(hook.timeout).toBeGreaterThan(0);
 			}
@@ -83,7 +83,7 @@ describe("installClaudeCodeHooks", () => {
 		// Should have both the existing hook and our new hook
 		expect(settings.hooks.PostToolUse).toHaveLength(2);
 		expect(settings.hooks.PostToolUse[0].command).toBe("other-tool log");
-		expect(settings.hooks.PostToolUse[1].command).toMatch(/^patchwork hook/);
+		expect(settings.hooks.PostToolUse[1].command).toContain("patchwork hook");
 	});
 
 	it("does not duplicate hooks on repeated install", () => {
@@ -97,7 +97,7 @@ describe("installClaudeCodeHooks", () => {
 		// Each event should have exactly 1 patchwork hook
 		for (const hookList of Object.values(settings.hooks) as any[]) {
 			const patchworkHooks = hookList.filter(
-				(h: any) => typeof h.command === "string" && h.command.startsWith("patchwork hook"),
+				(h: any) => typeof h.command === "string" && h.command.includes("patchwork hook"),
 			);
 			expect(patchworkHooks).toHaveLength(1);
 		}
@@ -129,7 +129,7 @@ describe("uninstallClaudeCodeHooks", () => {
 		// All hook arrays should be empty or removed
 		for (const hookList of Object.values(settings.hooks) as any[]) {
 			const patchworkHooks = hookList.filter(
-				(h: any) => typeof h.command === "string" && h.command.startsWith("patchwork hook"),
+				(h: any) => typeof h.command === "string" && h.command.includes("patchwork hook"),
 			);
 			expect(patchworkHooks).toHaveLength(0);
 		}
@@ -189,7 +189,7 @@ describe("installer PreToolUse options", () => {
 
 		// Other hooks should not have env prefixes
 		const postCmd = settings.hooks.PostToolUse[0].command;
-		expect(postCmd).toBe("patchwork hook post-tool");
+		expect(postCmd).toContain("patchwork hook post-tool");
 	});
 
 	it("B: defaults remain unchanged without options", () => {
@@ -197,7 +197,7 @@ describe("installer PreToolUse options", () => {
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].command;
-		expect(cmd).toBe("patchwork hook pre-tool");
+		expect(cmd).toContain("patchwork hook pre-tool");
 		expect(cmd).not.toContain("PATCHWORK_PRETOOL");
 	});
 
@@ -206,7 +206,8 @@ describe("installer PreToolUse options", () => {
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].command;
-		expect(cmd).toBe("PATCHWORK_PRETOOL_FAIL_CLOSED=1 patchwork hook pre-tool");
+		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
+		expect(cmd).toContain("patchwork hook pre-tool");
 	});
 
 	it("C: re-running install with prefixed command does not duplicate", () => {
@@ -255,7 +256,7 @@ describe("upgrade-in-place hook reconfiguration", () => {
 		installClaudeCodeHooks(projectPath);
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		let settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		expect(settings.hooks.PreToolUse[0].command).toBe("patchwork hook pre-tool");
+		expect(settings.hooks.PreToolUse[0].command).toContain("patchwork hook pre-tool");
 
 		// Reinstall with fail-closed
 		const result = installClaudeCodeHooks(projectPath, undefined, { pretoolFailClosed: true });
@@ -328,7 +329,9 @@ describe("upgrade-in-place hook reconfiguration", () => {
 
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		expect(settings.hooks.PreToolUse[0].command).toBe("patchwork hook pre-tool");
+		const cmd = settings.hooks.PreToolUse[0].command;
+		expect(cmd).toContain("patchwork hook pre-tool");
+		expect(cmd).not.toContain("PATCHWORK_PRETOOL");
 	});
 
 	it("preserves user hooks in same event during update", () => {
@@ -383,7 +386,7 @@ describe("installer policyMode option", () => {
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].command;
-		expect(cmd).toBe("patchwork hook pre-tool");
+		expect(cmd).toContain("patchwork hook pre-tool");
 	});
 
 	it("conflicting policyMode and pretoolFailClosed returns error", () => {

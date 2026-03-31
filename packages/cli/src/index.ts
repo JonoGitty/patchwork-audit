@@ -20,6 +20,7 @@ import { attestCommand } from "./commands/attest.js";
 import { dashboardCommand } from "./commands/dashboard.js";
 import { reportCommand } from "./commands/report.js";
 import { replayCommand } from "./commands/replay.js";
+import { doctorCommand } from "./commands/doctor.js";
 
 const program = new Command();
 
@@ -49,5 +50,6 @@ program.addCommand(attestCommand);
 program.addCommand(dashboardCommand);
 program.addCommand(reportCommand);
 program.addCommand(replayCommand);
+program.addCommand(doctorCommand);
 
 program.parse();

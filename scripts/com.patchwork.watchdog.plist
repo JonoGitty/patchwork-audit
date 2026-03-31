@@ -11,11 +11,17 @@
         <string>/Users/jonogompels/.patchwork/watchdog.sh</string>
     </array>
 
-    <!-- Run every 30 minutes -->
+    <!-- Run every 5 minutes -->
     <key>StartInterval</key>
-    <integer>1800</integer>
+    <integer>300</integer>
 
-    <!-- Also run at load (boot/login) -->
+    <!-- Trigger immediately when settings.json changes (e.g. Claude Code update) -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Users/jonogompels/.claude/settings.json</string>
+    </array>
+
+    <!-- Run at login -->
     <key>RunAtLoad</key>
     <true/>
 

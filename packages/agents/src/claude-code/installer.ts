@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { getHomeDir } from "@patchwork/core";
 
 const CLAUDE_SETTINGS_DIR = join(getHomeDir(), ".claude");
@@ -69,7 +69,24 @@ export function resolveFailClosed(options?: InstallOptions): { enabled: boolean;
 }
 
 function buildHooks(binPath?: string, options?: InstallOptions) {
-	const cmd = binPath || "patchwork";
+	// Use explicit "node patchwork" to bypass #!/usr/bin/env node shebang issues
+	// on mixed-architecture Macs (Intel machine with ARM homebrew node).
+	// process.execPath gives us the node binary that is CURRENTLY running — guaranteed correct arch.
+	const nodeExec = process.execPath;
+	let patchworkBin = binPath || "";
+
+	if (!patchworkBin) {
+		// Resolve patchwork binary from the same directory as the running node
+		const nodeDir = dirname(nodeExec);
+		const candidate = join(nodeDir, "patchwork");
+		if (existsSync(candidate)) {
+			patchworkBin = candidate;
+		} else {
+			patchworkBin = "patchwork"; // fallback to PATH
+		}
+	}
+
+	const cmd = `${nodeExec} ${patchworkBin}`;
 
 	// Build env prefix for PreToolUse command
 	const { enabled: failClosed } = resolveFailClosed(options);
