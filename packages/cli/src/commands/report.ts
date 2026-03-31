@@ -22,11 +22,29 @@ export const reportCommand = new Command("report")
 		const store = getReadStore();
 
 		// Query events
+		// Validate framework early (before heavy computation)
+		const frameworkIds = opts.framework === "all"
+			? FRAMEWORK_IDS
+			: [opts.framework];
+
+		for (const fwId of frameworkIds) {
+			if (!FRAMEWORKS[fwId]) {
+				console.error(chalk.red(`Unknown framework: ${fwId}`));
+				console.error(chalk.dim(`Available: ${FRAMEWORK_IDS.join(", ")}, all`));
+				return;
+			}
+		}
+
 		let events: AuditEvent[];
 		if (opts.session) {
 			events = store.query({ sessionId: opts.session });
 		} else if (opts.since) {
-			events = store.query({ since: new Date(opts.since) });
+			const sinceDate = new Date(opts.since);
+			if (isNaN(sinceDate.getTime())) {
+				console.error(chalk.red(`Invalid date: ${opts.since}`));
+				return;
+			}
+			events = store.query({ since: sinceDate });
 		} else {
 			events = store.readAll();
 		}
@@ -37,10 +55,16 @@ export const reportCommand = new Command("report")
 			return;
 		}
 
-		// Determine period
-		const timestamps = events.map(e => new Date(e.timestamp).getTime());
-		const periodStart = new Date(Math.min(...timestamps));
-		const periodEnd = new Date(Math.max(...timestamps));
+		// Determine period (safe for >65K events — no spread operator)
+		let minTs = Infinity;
+		let maxTs = -Infinity;
+		for (const e of events) {
+			const t = new Date(e.timestamp).getTime();
+			if (t < minTs) minTs = t;
+			if (t > maxTs) maxTs = t;
+		}
+		const periodStart = new Date(minTs);
+		const periodEnd = new Date(maxTs);
 
 		// Compute stats
 		const stats = computeStats(events);
@@ -123,20 +147,10 @@ export const reportCommand = new Command("report")
 			mcpEvents,
 		};
 
-		// Evaluate frameworks
-		const frameworkIds = opts.framework === "all"
-			? FRAMEWORK_IDS
-			: [opts.framework];
-
+		// Evaluate frameworks (already validated above)
 		const frameworkReports: FrameworkReport[] = [];
 		for (const fwId of frameworkIds) {
-			const fw = FRAMEWORKS[fwId];
-			if (!fw) {
-				console.error(chalk.red(`Unknown framework: ${fwId}`));
-				console.error(chalk.dim(`Available: ${FRAMEWORK_IDS.join(", ")}, all`));
-				return;
-			}
-			frameworkReports.push(evaluateFramework(fw, reportData));
+			frameworkReports.push(evaluateFramework(FRAMEWORKS[fwId], reportData));
 		}
 
 		// Overall grade
@@ -170,7 +184,14 @@ export const reportCommand = new Command("report")
 					})),
 					summary: fw.summary,
 				})),
-				data: undefined, // Don't dump all events in JSON — too large
+				data: {
+					stats: report.data.stats,
+					integrity: report.data.integrity,
+					policySource: report.data.policySource,
+					sessionCount: report.data.sessions.length,
+					denialCount: report.data.denials.length,
+					highRiskCount: report.data.highRiskEvents.length,
+				},
 			};
 			output = JSON.stringify(jsonSafe, null, 2);
 		} else {
@@ -179,7 +200,13 @@ export const reportCommand = new Command("report")
 
 		// Output
 		if (opts.output) {
-			writeFileSync(opts.output, output, "utf-8");
+			try {
+				writeFileSync(opts.output, output, "utf-8");
+			} catch (err: unknown) {
+				console.error(chalk.red(`Failed to write report: ${err instanceof Error ? err.message : String(err)}`));
+				process.exitCode = 1;
+				return;
+			}
 			console.error(chalk.green(`Compliance report written to ${opts.output}`));
 			console.error(chalk.dim(`Framework(s): ${frameworkIds.join(", ")}`));
 			console.error(chalk.dim(`Events: ${events.length}, Sessions: ${sessions.length}`));
