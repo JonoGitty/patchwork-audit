@@ -107,7 +107,7 @@ describe("loadActivePolicy", () => {
 		expect(policy.name).toBe("user-policy");
 	});
 
-	it("project policy takes precedence over user policy", () => {
+	it("user policy takes precedence over project policy (prevents malicious repo override)", () => {
 		writeFileSync(
 			join(testDir, ".patchwork", "policy.yml"),
 			"name: user-policy\n",
@@ -116,6 +116,17 @@ describe("loadActivePolicy", () => {
 		writeFileSync(
 			join(projectDir, ".patchwork", "policy.yml"),
 			"name: project-policy\n",
+			"utf-8",
+		);
+		const { policy } = loadActivePolicy(projectDir);
+		expect(policy.name).toBe("user-policy");
+	});
+
+	it("project policy is used when no user policy exists", () => {
+		rmSync(join(testDir, ".patchwork"), { recursive: true, force: true });
+		writeFileSync(
+			join(projectDir, ".patchwork", "policy.yml"),
+			"name: project-policy\nmax_risk: low\n",
 			"utf-8",
 		);
 		const { policy } = loadActivePolicy(projectDir);

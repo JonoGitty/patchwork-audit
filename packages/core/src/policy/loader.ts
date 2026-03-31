@@ -13,25 +13,41 @@ export function loadPolicyFromFile(filePath: string): Policy {
 	return PolicySchema.parse(raw);
 }
 
+/** System-level policy path (root-owned, non-admin users cannot modify). */
+export const SYSTEM_POLICY_PATH = process.platform === "darwin"
+	? "/Library/Patchwork/policy.yml"
+	: process.platform === "win32"
+		? join(process.env.PROGRAMDATA || "C:\\ProgramData", "Patchwork", "policy.yml")
+		: "/etc/patchwork/policy.yml";
+
 /**
  * Load the active policy. Resolution order:
- * 1. Project-level: .patchwork/policy.yml in cwd
+ * 1. System-level: /Library/Patchwork/policy.yml (root-owned, highest priority)
  * 2. User-level: ~/.patchwork/policy.yml
- * 3. Built-in default (audit-only, no enforcement)
+ * 3. Project-level: .patchwork/policy.yml in cwd (lowest — cannot weaken system/user policy)
+ * 4. Built-in default (audit-only, no enforcement)
+ *
+ * When a system-level policy exists, project-level policies are ignored entirely.
+ * This prevents a malicious repo from weakening enforcement.
  */
 export function loadActivePolicy(cwd?: string): { policy: Policy; source: string } {
-	// Project-level
-	if (cwd) {
-		const projectPath = join(cwd, ".patchwork", "policy.yml");
-		if (existsSync(projectPath)) {
-			return { policy: loadPolicyFromFile(projectPath), source: projectPath };
-		}
+	// System-level (root-owned — highest priority, non-admin cannot modify)
+	if (existsSync(SYSTEM_POLICY_PATH)) {
+		return { policy: loadPolicyFromFile(SYSTEM_POLICY_PATH), source: `system:${SYSTEM_POLICY_PATH}` };
 	}
 
 	// User-level
 	const userPath = join(getHomeDir(), ".patchwork", "policy.yml");
 	if (existsSync(userPath)) {
 		return { policy: loadPolicyFromFile(userPath), source: userPath };
+	}
+
+	// Project-level (only if no system or user policy exists)
+	if (cwd) {
+		const projectPath = join(cwd, ".patchwork", "policy.yml");
+		if (existsSync(projectPath)) {
+			return { policy: loadPolicyFromFile(projectPath), source: projectPath };
+		}
 	}
 
 	// Default: audit-only (everything allowed)

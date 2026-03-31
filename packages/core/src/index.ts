@@ -85,4 +85,5 @@ export {
 	policyToYaml,
 	DEFAULT_POLICY,
 	STRICT_POLICY,
+	SYSTEM_POLICY_PATH,
 } from "./policy/loader.js";
