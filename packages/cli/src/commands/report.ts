@@ -79,7 +79,7 @@ export const reportCommand = new Command("report")
 			chainValid = chainResult.is_valid;
 			chainedEvents = chainResult.chained_events;
 			legacyEvents = chainResult.legacy_events;
-			invalidEvents = chainResult.invalid_events;
+			invalidEvents = chainResult.invalid_schema_events;
 		} catch { /* verification failed */ }
 
 		const sealed = existsSync(SEALS_PATH);
