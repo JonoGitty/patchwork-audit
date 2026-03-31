@@ -1,131 +1,122 @@
 # Patchwork
 
-> The audit trail for AI coding agents.
+**The audit trail for AI coding agents.**
 
-Every stitch the AI makes, tracked.
+AI agents are black boxes. They read your files, execute commands, make web requests, and modify your codebase -- and you have no record of what they did or why. As organisations adopt AI coding assistants, this becomes a compliance and security problem:
+
+- **The EU AI Act** requires logging of AI system outputs and decision-making processes
+- **SOC 2 / ISO 27001** demand audit trails for systems that access production code and infrastructure
+- **Enterprise security teams** can't approve AI tools they can't monitor
+- **Developers** can't trust autonomous agents they can't audit after the fact
+
+Patchwork solves this. It hooks into AI coding agents and records everything they do -- files read, files written, commands executed, web requests made -- into a tamper-evident, queryable audit trail with real-time risk classification and policy enforcement.
+
+**Local-first.** Your data never leaves your machine. No cloud. No telemetry. Everything works offline.
+
+**Tamper-resistant.** The AI agent cannot disable its own monitoring, corrupt the audit log, or weaken the security policy. System-level install makes it impossible for non-admin users to remove.
+
+**Policy enforcement.** Define what the AI can and cannot do. Patchwork blocks dangerous actions in real-time -- before they execute.
 
 ---
 
-Patchwork hooks into AI coding agents (Claude Code, Codex CLI) and records everything they do — files read, files written, commands executed, web requests made — into a unified, queryable audit trail with risk classification and policy enforcement.
+## What it catches
 
-**Local-first.** Everything works offline. Your data never leaves your machine.
+```
+15:31:04  claude-code   command_execute   rm -rf /                    CRITICAL  DENIED
+15:31:05  claude-code   file_read         .env                        HIGH      DENIED
+15:31:07  claude-code   command_execute   git push --force origin     HIGH      DENIED
+15:31:08  claude-code   command_execute   sudo rm /etc/hosts          CRITICAL  DENIED
+15:31:10  claude-code   file_edit         src/auth/middleware.ts       MEDIUM    completed
+15:31:12  claude-code   command_execute   npm test                    MEDIUM    completed
+```
 
-**Tamper-resistant.** The AI agent cannot disable its own monitoring, corrupt the audit log, or weaken its security policy. A watchdog LaunchAgent auto-repairs hooks if they are removed.
+Every action is classified, logged, and -- if it violates policy -- blocked before it executes.
+
+---
 
 ## Quickstart
 
 ```bash
-# Clone and build
 git clone https://github.com/JonoGitty/codex-audit.git
 cd codex-audit
-pnpm install
-pnpm build
+pnpm install && pnpm build
 
 # Install CLI globally
 cd packages/cli && npm link && cd ../..
 
-# Install hooks with strict enforcement (fail-closed)
+# Set up hooks with strict enforcement
 patchwork init claude-code --strict-profile --policy-mode fail-closed
 
-# Create a security policy
-patchwork policy init --strict
-# Or copy the included hardened policy:
-cp docs/default-policy.yml ~/.patchwork/policy.yml
-
-# Verify it works
-patchwork status
+# See what the AI is doing
+patchwork dashboard      # web UI at localhost:3000
+patchwork log            # CLI event stream
+patchwork summary        # today's activity
 ```
 
-### Permanent installation (macOS)
+### System-level install (tamper-proof)
 
-To make Patchwork survive Claude Code updates and persist across reboots:
+For managed machines where non-admin users should not be able to disable auditing:
 
 ```bash
-# Install the session guard (verifies audit system before Claude starts)
-cp scripts/guard.sh ~/.patchwork/guard.sh
-chmod +x ~/.patchwork/guard.sh
+# Single user
+sudo bash scripts/system-install.sh
 
-# Install the watchdog LaunchAgent (auto-repairs hooks every 30 min)
-cp scripts/com.patchwork.watchdog.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.patchwork.watchdog.plist
+# All users on this Mac
+sudo bash scripts/system-install.sh --all-users
+
+# Specific users
+sudo bash scripts/system-install.sh --users alice,bob,charlie
 ```
 
-The watchdog checks every 30 minutes (and on login) that:
-- `patchwork` CLI is available
-- Hooks are present in `~/.claude/settings.json`
-- Fail-closed mode is enabled
-- The guard script and policy file exist
-- Audit data permissions are correct (0600 files, 0700 dirs)
+This locks `settings.json` as root-owned with the system immutable flag, installs a LaunchDaemon watchdog, and makes it impossible for the AI agent or non-admin users to disable monitoring.
 
-If anything is missing, it reinstalls automatically and logs the repair to `~/.patchwork/watchdog.log`.
+---
 
-## What it records
+## How it works
 
-| Action | Example |
-|---|---|
-| File reads | AI read `src/auth/login.ts` |
-| File writes | AI modified `src/auth/middleware.ts` |
-| File edits | AI edited `src/api/routes.ts` |
-| Commands | AI ran `npm test` |
-| Web requests | AI fetched `https://docs.example.com/api` |
-| MCP tool calls | AI called `mcp__github__create_pr` |
-| Sessions | AI session started at 14:22, 47 actions |
-| Risk events | AI modified `.env` -- CRITICAL (sensitive file) |
-| Subagents | AI spawned Explore subagent |
-
-## CLI Commands
-
-```bash
-# View events
-patchwork log                         # Recent events
-patchwork log --agent claude-code     # Filter by agent
-patchwork log --risk high             # High-risk events only
-patchwork log --session latest        # Last session's events
-patchwork log --since "2 hours ago"   # Events since a time
-patchwork log --json                  # Raw JSON output
-patchwork tail                        # Live event stream (tail -f)
-patchwork tail --risk high            # Stream only high-risk events
-
-# Sessions & summaries
-patchwork sessions                    # List sessions with stats
-patchwork summary                     # Today's activity summary
-patchwork summary --period week       # Weekly summary
-patchwork show <event-id>             # Full event detail
-patchwork show <session-id>           # Full session timeline
-
-# Policy enforcement
-patchwork policy show                 # Show active policy
-patchwork policy init                 # Create default policy
-patchwork policy init --strict        # Create strict enterprise policy
-patchwork policy validate policy.yml  # Validate a policy file
-
-# Integrity verification
-patchwork verify                      # Hash chain + seal + witness
-patchwork seal                        # HMAC-sign the audit trail
-patchwork witness publish             # Publish to remote witness
-
-# Export & sync
-patchwork export                      # Export as JSON
-patchwork export --format csv         # Export as CSV
-patchwork export --format sarif       # Export as SARIF (GitHub Code Scanning)
-patchwork sync codex                  # Import Codex CLI history
-
-# Setup
-patchwork init claude-code            # Install Claude Code hooks
-patchwork init codex                  # Set up Codex CLI sync
-patchwork status                      # Show config, agents, event stats
+```
+Claude Code                    Patchwork                        Audit Store
+    |                              |                                |
+    |-- PreToolUse hook ---------> |                                |
+    |                              |-- classify risk                |
+    |                              |-- evaluate policy              |
+    |                              |-- ALLOW or DENY ------------> stdout
+    |                              |                                |
+    |-- PostToolUse hook -------> |                                |
+    |                              |-- record event                |
+    |                              |-- compute hash chain -------> events.jsonl
+    |                              |-- index -------- -----------> audit.db (SQLite)
+    |                              |-- webhook alert (if high risk)|
 ```
 
-## Security Model
+Patchwork hooks into Claude Code's native hook system. Every tool call passes through the policy engine before execution. Denied actions are blocked and logged. Completed actions are recorded with tamper-evident hash chaining.
 
-### Policy enforcement
+---
 
-Policies are YAML files that define allow/deny rules. When a policy denies an action, Patchwork tells Claude Code to block it and logs a `denied` event.
+## Web Dashboard
+
+`patchwork dashboard` launches a local web UI with six pages:
+
+| Page | What you see |
+|------|-------------|
+| **Overview** | Stat cards, 14-day activity chart, risk donut, recent events + sessions |
+| **Events** | Filterable event log with live htmx filtering (agent, action, risk) |
+| **Sessions** | Session list with drill-down timeline -- every action the AI took |
+| **Risk** | Risk-over-time chart, flags breakdown, denials table |
+| **Search** | Full-text search across all events (powered by SQLite FTS5) |
+| **Settings** | System status, installed agents, policy rules display |
+
+Plus a JSON API at `/api/stats`, `/api/events`, `/api/sessions`, `/api/risk-timeline`.
+
+---
+
+## Policy Enforcement
+
+Policies are YAML files that define allow/deny rules. When a policy denies an action, Patchwork blocks it in real-time.
 
 ```yaml
-# ~/.patchwork/policy.yml
-name: my-policy
-max_risk: high  # Auto-deny above this level
+name: my-team-policy
+max_risk: high  # Auto-deny anything above this level
 
 files:
   deny:
@@ -148,104 +139,129 @@ commands:
   default_action: allow
 ```
 
+Built-in presets: `default` (audit-only) and `strict` (blocks dangerous operations).
+
 ### Self-protection
 
-The included hardened policy (`docs/default-policy.yml`) prevents the AI agent from:
+The AI agent cannot disable its own monitoring:
 
-| Attack | Defence |
+| Attack vector | Defence |
 |---|---|
-| Editing `~/.claude/settings.json` to remove hooks | File deny rule blocks all writes |
-| Truncating/deleting `~/.patchwork/events.jsonl` | File deny rule + command regex blocks redirects |
-| Weakening `~/.patchwork/policy.yml` | File deny rule blocks writes to policy |
-| Reading seal keys | File deny rule blocks access to `.patchwork/keys/**` |
+| Editing settings.json to remove hooks | Policy deny rule + file locked as root:wheel + schg flag |
+| Truncating/deleting the audit log | Policy deny rule + command regex blocks redirects |
+| Weakening the security policy | Policy deny rule blocks writes to policy.yml |
 | Timeout-based bypass | Fail-closed mode denies on hook timeout |
-| Shell metacharacter evasion | Regex command rules catch pipes/redirects targeting audit data |
+| Shell metacharacter evasion | Regex command rules catch pipes/redirects |
 
 ### Fail-closed mode
 
-When installed with `--policy-mode fail-closed`, any hook error (crash, timeout, bad input) results in the action being **denied** rather than allowed. This is the recommended mode for production use.
+When installed with `--policy-mode fail-closed`, any hook error (crash, timeout, bad input) results in the action being **denied** rather than allowed.
 
-### Session guard
-
-The guard script (`scripts/guard.sh`) runs at the start of every Claude Code session and verifies:
-1. `patchwork` CLI is available
-2. Audit store directory exists and is writable
-3. Policy file is present
-4. File permissions are correct
-
-If any check fails, the session starts with a warning and the guard status is recorded for the PreToolUse hook to reference.
-
-### What Patchwork cannot prevent
-
-- A human with direct filesystem access can always modify files (Patchwork runs at user-level, not root)
-- Unloading the watchdog LaunchAgent (`launchctl unload ...`)
-- A future Claude Code update that changes the hook format entirely
-- Using a separate Claude Code profile that doesn't read `~/.claude/settings.json`
-
-For truly tamper-proof auditing, combine Patchwork with OS-level controls (MDM profiles, SIP, or file immutability flags).
+---
 
 ## Risk Classification
 
 Every event is automatically classified:
 
-| Level | Example |
+| Level | Example triggers |
 |---|---|
-| **CRITICAL** | Writing to `.env`, running `rm -rf`, `sudo` commands |
-| **HIGH** | Modifying `package.json`, `npm install`, `git push --force` |
-| **MEDIUM** | File writes, command execution, web requests, MCP tools |
+| **CRITICAL** | `.env` access, `rm -rf`, `sudo`, SSH key files |
+| **HIGH** | `package.json` modification, `npm install`, force push, credential files |
+| **MEDIUM** | File writes, command execution, web requests, MCP tool calls |
 | **LOW** | File reads, glob/grep searches |
 | **NONE** | Session start/end, prompt submit |
 
-Sensitive file detection covers: `.env`, private keys (`.pem`, `.key`, `id_rsa`), cloud credentials (`.aws/credentials`), API tokens, database files, and more.
+Sensitive file detection covers: `.env`, private keys, cloud credentials, API tokens, database files, Docker configs, Kubernetes configs, and more.
 
-## CI Attestation
+---
 
-`patchwork attest` runs the full verification pipeline (chain + seal + witness) and writes a machine-readable JSON artifact. Use it in CI to produce durable evidence that an AI coding session was audited.
+## Integrity & Compliance
 
-```bash
-# In CI -- fail the pipeline if audit trail is incomplete
-patchwork attest \
-  --require-seal \
-  --require-witness \
-  --max-seal-age-seconds 3600 \
-  --max-witness-age-seconds 3600 \
-  --out audit-attestation.json
-```
+### Tamper-evident hash chain
 
-Attestation artifacts are **HMAC-signed** and include **state-binding fields** that tie the attestation to the exact audit state at generation time.
+Every audit event is linked to the previous one via SHA-256 hash chaining. Inserting, deleting, or modifying any event breaks the chain and is detected by `patchwork verify`.
 
-```bash
-# Verify chain + require a valid, signed attestation
-patchwork verify \
-  --require-signed-attestation \
-  --attestation-file audit-attestation.json \
-  --max-attestation-age-seconds 3600
-```
+### HMAC sealing
 
-## Enforcement Profiles
+`patchwork seal` signs the audit trail with a local HMAC key. Sealed logs can be verified for authenticity.
 
-Profiles bundle enforcement flags so teams don't need to pass many flags on every CI invocation.
+### CI attestation
 
-| Profile | Behavior |
-|---|---|
-| `baseline` (default) | No enforcement -- audit-only |
-| `strict` | Require seal, witness, remote witness proof, signed attestation, binding |
+`patchwork attest` generates a signed JSON artifact proving the audit trail is complete and verified. Use it in CI to gate deployments on audit completeness.
 
 ```bash
-patchwork verify --profile strict
+# In CI -- fail if audit trail is incomplete
 patchwork attest --profile strict --out audit-attestation.json
+
+# Verify in another pipeline
+patchwork verify --require-signed-attestation --attestation-file audit-attestation.json
 ```
 
-### Config-driven defaults
+### Webhook alerts
 
-```yaml
-# ~/.patchwork/config.yml
-verify:
-  profile: strict
-  max_seal_age_seconds: 3600
-  max_witness_age_seconds: 3600
-  max_attestation_age_seconds: 3600
+Set `PATCHWORK_WEBHOOK_URL` to receive real-time alerts on high-risk or denied events. Supports Slack, Discord, and generic JSON webhooks.
+
+---
+
+## Multi-user & Enterprise
+
+### System-level enforcement (macOS)
+
+```bash
+# Enrol all users -- non-admin users cannot remove or modify hooks
+sudo bash scripts/system-install.sh --all-users
+
+# Add/remove users after initial install
+sudo bash scripts/system-add-user.sh --user newuser
+sudo bash scripts/system-remove-user.sh --user olduser
 ```
+
+- Settings.json locked with `chflags schg` (system immutable flag -- requires root to remove)
+- System policy at `/Library/Patchwork/policy.yml` (root-owned, shared across all users)
+- LaunchDaemon watchdog monitors all enrolled users every 15 minutes
+- Runtime Node discovery supports mixed Intel/Apple Silicon machines
+
+### User registry
+
+`/Library/Patchwork/users.conf` lists all enrolled users. The watchdog iterates this file and independently monitors each user's Claude Code hooks.
+
+---
+
+## CLI Commands
+
+```bash
+# Events
+patchwork log                         # Recent events
+patchwork log --risk high             # High-risk only
+patchwork log --session latest        # Last session
+patchwork tail                        # Live stream
+
+# Sessions
+patchwork sessions                    # List sessions
+patchwork summary                     # Today's activity
+
+# Dashboard
+patchwork dashboard                   # Web UI at localhost:3000
+
+# Policy
+patchwork policy show                 # Active policy
+patchwork policy init --strict        # Create strict policy
+
+# Integrity
+patchwork verify                      # Hash chain verification
+patchwork seal                        # HMAC signing
+patchwork attest --profile strict     # CI attestation
+
+# Export
+patchwork export --format sarif       # SARIF for GitHub Code Scanning
+patchwork export --format csv         # CSV for spreadsheets
+
+# Setup
+patchwork init claude-code            # Install hooks
+patchwork status                      # System health
+```
+
+---
 
 ## Supported Agents
 
@@ -253,66 +269,75 @@ verify:
 |---|---|---|
 | Claude Code | Working | Native hooks (PreToolUse, PostToolUse, Session lifecycle, Subagents) |
 | Codex CLI | Working | History parsing + sync |
-| Cursor | Planned | Hooks beta |
-| GitHub Copilot | Planned | Enterprise audit log API |
+| Cursor | Planned | |
+| GitHub Copilot | Planned | |
+
+---
 
 ## Architecture
 
+Four packages in a TypeScript monorepo:
+
+- **`@patchwork/core`** -- Schema (Zod), risk classifier, policy engine, JSONL + SQLite stores, hash chain, HMAC sealing
+- **`@patchwork/agents`** -- Agent adapters (Claude Code hooks, Codex parser, auto-detection)
+- **`@patchwork/web`** -- Dashboard server (Hono + htmx + Chart.js)
+- **`patchwork-audit`** -- CLI (Commander.js, 20 commands)
+
 ```
 ~/.patchwork/
-  events.jsonl          # Append-only audit trail (JSONL + hash chain)
-  db/audit.db           # SQLite indexed mirror (FTS5 search)
-  policy.yml            # User-level security policy
+  events.jsonl          # Append-only audit trail (hash-chained)
+  db/audit.db           # SQLite indexed mirror (FTS5 full-text search)
+  policy.yml            # Security policy
   keys/seal/            # HMAC seal keyring
   seals.jsonl           # Seal records
-  witnesses.jsonl       # Remote witness records
+  witnesses.jsonl       # Remote witness anchors
   attestations/         # CI attestation artifacts
-  state/                # Guard status, divergence markers
-  watchdog.log          # Watchdog repair log
-  guard.sh              # Session start guard script
-  watchdog.sh           # LaunchAgent watchdog script
+
+/Library/Patchwork/     # System-level (root-owned, multi-user)
+  policy.yml            # System policy (overrides user/project)
+  users.conf            # Enrolled user registry
+  guard.sh              # Session start guard
+  hook-wrapper.sh       # Shared hook shim (runtime Node discovery)
+  system-watchdog.sh    # Multi-user watchdog
 ```
 
-Three packages:
+---
 
-- **`@patchwork/core`** -- Schema (Zod), risk classifier, policy engine, JSONL + SQLite stores, hash chain, HMAC sealing, remote witness
-- **`@patchwork/agents`** -- Agent adapters (Claude Code hooks, Codex parser, auto-detection)
-- **`patchwork-audit`** -- CLI (Commander.js, 19 commands)
+## Roadmap
 
-## Export Formats
+- [ ] **Compliance report generation** -- `patchwork report --framework soc2` outputting PDF/HTML mapped to SOC 2 / ISO 27001 / EU AI Act controls
+- [ ] **Session replay** -- `patchwork replay <session-id>` walking through file diffs chronologically
+- [ ] **Diff-aware risk scoring** -- parse actual code changes, not just file paths
+- [ ] **Team mode** -- local-first with aggregated sealed bundles pushed to a team server
+- [ ] **npm publish** -- `npm install -g patchwork-audit`
+- [ ] **GitHub Action** -- `patchwork/audit@v1` for CI integration
+- [ ] **KMS-backed sealing** -- macOS Keychain / cloud KMS for seal keys
 
-- **JSON** -- Full event data, pipe to `jq` for custom queries
-- **CSV** -- Import into spreadsheets, BI tools, databases
-- **SARIF** -- Static Analysis Results Interchange Format, import into GitHub Code Scanning
+---
 
 ## Platform Support
 
-| Platform | Status | Notes |
-|---|---|---|
-| Linux | Fully supported | CI-tested on Ubuntu with Node 20 and 22 |
-| macOS | Fully supported | LaunchAgent watchdog for permanent installation |
-| Windows | Partial | Core works. File permissions not enforced by OS. |
+| Platform | Status |
+|---|---|
+| macOS | Fully supported (LaunchDaemon watchdog, system-level install, multi-user) |
+| Linux | Fully supported (CI-tested on Ubuntu with Node 20 and 22) |
+| Windows | Partial (core works, file permission hardening not enforced by OS) |
 
-## Known Limitations
-
-- **v0.1.0 -- early release.** APIs and storage format may change.
-- **Not yet on npm.** Install from source (see Quickstart).
-- **Windows file permissions** are not enforced by the OS.
-- **Cursor and GitHub Copilot adapters** are planned but not yet implemented.
-- **JSONL storage scales linearly** for full-log reads. Use `patchwork search` for large trails.
-- **Seal keys are local.** A compromised machine with both key and data can forge signatures. KMS-backed signing is on the roadmap.
-- **Command policy matching is prefix-based.** Complex shell metacharacter evasion may bypass simple prefix rules. The hardened policy includes regex rules for common evasion patterns.
+---
 
 ## Development
 
 ```bash
 pnpm install
 pnpm build
-pnpm test          # 671 tests across 31 files
+pnpm test          # 684 tests across 32 files
 pnpm lint
 ```
 
-## Test Log
+Test log is maintained at `docs/TEST_LOG.md` and updated automatically by the pre-push hook.
 
-- Run `pnpm test:log` to execute tests and append a timestamped summary to `docs/TEST_LOG.md`.
-- The repo `pre-push` hook runs `pnpm test:log` automatically before each push.
+---
+
+## License
+
+BUSL-1.1
