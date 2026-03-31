@@ -4,6 +4,7 @@ import { writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import {
 	loadActivePolicy,
+	loadPolicyFromFile,
 	policyToYaml,
 	STRICT_POLICY,
 	DEFAULT_POLICY,
@@ -88,7 +89,6 @@ policyCommand
 	.argument("<file>", "Path to policy YAML file")
 	.action((file) => {
 		try {
-			const { loadPolicyFromFile } = require("@patchwork/core");
 			loadPolicyFromFile(file);
 			console.log(chalk.green("Policy is valid."));
 		} catch (err: unknown) {
