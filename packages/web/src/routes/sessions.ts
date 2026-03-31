@@ -35,7 +35,10 @@ export function sessionRoutes(store: Store) {
 		const stats = computeStats(events);
 
 		const content = `
-		<h1>Session: <span class="mono" style="font-size:18px">${escapeHtml(id.slice(0, 24))}</span></h1>
+		<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+			<h1 style="margin-bottom:0">Session: <span class="mono" style="font-size:18px">${escapeHtml(id.slice(0, 24))}</span></h1>
+			<a href="/replay/${encodeURIComponent(id)}" class="nav-item" style="background:var(--bg-card);border:1px solid var(--border)">&#9654; View Replay</a>
+		</div>
 		<p class="subtitle">${session.agent} &middot; ${escapeHtml(session.project)} &middot; ${formatTime(session.started)} &middot; ${formatDuration(session.durationMs)}</p>
 
 		<div class="card-grid">

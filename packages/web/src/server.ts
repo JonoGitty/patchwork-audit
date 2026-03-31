@@ -10,6 +10,9 @@ import { riskRoutes } from "./routes/risk.js";
 import { searchRoutes } from "./routes/search.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { apiRoutes } from "./routes/api.js";
+import { replayRoutes } from "./routes/replay.js";
+import { complianceRoutes } from "./routes/compliance.js";
+import { doctorRoutes } from "./routes/doctor.js";
 
 export interface DashboardOptions {
 	port?: number;
@@ -26,6 +29,9 @@ export function createApp(store: Store, searchStore: SearchableStore | null, dat
 	app.route("/", searchRoutes(store, searchStore));
 	app.route("/", settingsRoutes(store, dataDir));
 	app.route("/", apiRoutes(store));
+	app.route("/", replayRoutes(store));
+	app.route("/", complianceRoutes(store));
+	app.route("/", doctorRoutes(store, dataDir));
 
 	return app;
 }

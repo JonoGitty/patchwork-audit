@@ -45,6 +45,26 @@ export function apiRoutes(store: Store) {
 		return c.json(riskFlagCounts(events));
 	});
 
+	app.get("/api/export/json", (c) => {
+		const events = store.readAll();
+		c.header("Content-Disposition", "attachment; filename=patchwork-events.json");
+		return c.json(events);
+	});
+
+	app.get("/api/export/csv", (c) => {
+		const events = store.readAll();
+		const headers = "id,timestamp,session_id,agent,action,status,risk_level,risk_flags,target_path,target_command,project_name";
+		const rows = events.map(e => [
+			e.id, e.timestamp, e.session_id, e.agent, e.action, e.status,
+			e.risk.level, (e.risk.flags || []).join(";"),
+			e.target?.path || "", e.target?.command || "",
+			e.project?.name || "",
+		].map(v => `"${String(v).replace(/"/g, '""')}"`).join(","));
+		c.header("Content-Type", "text/csv");
+		c.header("Content-Disposition", "attachment; filename=patchwork-events.csv");
+		return c.text([headers, ...rows].join("\n"));
+	});
+
 	app.get("/api/health", (c) => {
 		const home = process.env.HOME || "";
 		const guardStatusPath = join(home, ".patchwork", "state", "guard-status.json");

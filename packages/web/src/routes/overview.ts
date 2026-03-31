@@ -19,7 +19,14 @@ export function overviewRoutes(store: Store) {
 		const agents = Object.keys(stats.byAgent).join(", ") || "none";
 
 		const content = `
-		<h1>Dashboard</h1>
+		<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+			<h1 style="margin-bottom:0">Dashboard</h1>
+			<div style="display:flex;gap:8px">
+				<a href="/compliance" class="nav-item" style="background:var(--bg-card);border:1px solid var(--border)">&#9878; Compliance Report</a>
+				<a href="/api/export/json" class="nav-item" style="background:var(--bg-card);border:1px solid var(--border)">&#8615; Export JSON</a>
+				<a href="/api/export/csv" class="nav-item" style="background:var(--bg-card);border:1px solid var(--border)">&#8615; Export CSV</a>
+			</div>
+		</div>
 		<div class="card-grid">
 			${statCard("Total Events", stats.totalEvents)}
 			${statCard("Sessions", stats.totalSessions)}
