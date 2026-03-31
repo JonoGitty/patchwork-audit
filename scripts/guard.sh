@@ -3,8 +3,21 @@
 # If patchwork CLI is not available or the audit store is not writable, this hook
 # outputs an error to stderr. In fail-closed mode, the PreToolUse hook will
 # deny all actions if patchwork is broken, so this acts as an early warning.
+#
+# Works for any user on any architecture (runtime Node discovery).
 
-export PATH="$HOME/local/nodejs/node-v22.16.0-darwin-x64/bin:$PATH"
+# --- Runtime Node discovery ---
+for _candidate in \
+    "$HOME/local/nodejs/"node-*/bin \
+    /usr/local/bin \
+    /opt/homebrew/bin \
+    "$HOME/.nvm/versions/node/"*/bin \
+    "$HOME/.volta/bin"; do
+    if [ -x "$_candidate/node" ]; then
+        export PATH="$_candidate:$PATH"
+        break
+    fi
+done
 
 PATCHWORK_DIR="$HOME/.patchwork"
 EVENTS_FILE="$PATCHWORK_DIR/events.jsonl"
@@ -13,7 +26,6 @@ GUARD_STATUS_FILE="$PATCHWORK_DIR/state/guard-status.json"
 # 1. Check patchwork CLI is available
 if ! command -v patchwork &>/dev/null; then
     echo '{"error": "Patchwork CLI not found. Audit trail is not active."}' >&2
-    # Write guard failure status so PreToolUse can check it
     mkdir -p "$PATCHWORK_DIR/state"
     echo '{"status":"failed","reason":"cli_not_found","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$GUARD_STATUS_FILE"
     exit 1
@@ -31,9 +43,9 @@ if [ ! -w "$PATCHWORK_DIR" ]; then
     exit 1
 fi
 
-# 3. Check policy file exists
-if [ ! -f "$PATCHWORK_DIR/policy.yml" ]; then
-    echo "[patchwork-guard] Warning: No policy file at $PATCHWORK_DIR/policy.yml" >&2
+# 3. Check for policy (system-level or user-level)
+if [ ! -f "/Library/Patchwork/policy.yml" ] && [ ! -f "$PATCHWORK_DIR/policy.yml" ]; then
+    echo "[patchwork-guard] Warning: No policy file found" >&2
 fi
 
 # 4. Verify permissions on audit data
