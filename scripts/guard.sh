@@ -23,13 +23,43 @@ PATCHWORK_DIR="$HOME/.patchwork"
 EVENTS_FILE="$PATCHWORK_DIR/events.jsonl"
 GUARD_STATUS_FILE="$PATCHWORK_DIR/state/guard-status.json"
 
-# 1. Check patchwork CLI is available
-if ! command -v patchwork &>/dev/null; then
-    echo '{"error": "Patchwork CLI not found. Audit trail is not active."}' >&2
-    mkdir -p "$PATCHWORK_DIR/state"
-    echo '{"status":"failed","reason":"cli_not_found","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$GUARD_STATUS_FILE"
-    exit 1
+# 1. Check patchwork CLI is available AND executable
+# Find the correct node binary (handles Intel Mac with ARM homebrew)
+_NODE=""
+_PW=""
+for _candidate in \
+    "$HOME/local/nodejs/"node-*/bin \
+    /usr/local/bin \
+    /opt/homebrew/bin \
+    "$HOME/.nvm/versions/node/"*/bin \
+    "$HOME/.volta/bin"; do
+    if [ -x "$_candidate/node" ] && [ -x "$_candidate/patchwork" ]; then
+        # Verify this node can actually run (correct architecture)
+        if "$_candidate/node" --version &>/dev/null; then
+            _NODE="$_candidate/node"
+            _PW="$_candidate/patchwork"
+            export PATH="$_candidate:$PATH"
+            break
+        fi
+    fi
+done
+
+if [ -z "$_NODE" ]; then
+    # Fallback: try bare patchwork
+    if command -v patchwork &>/dev/null && patchwork --version &>/dev/null; then
+        _PW="$(command -v patchwork)"
+        _NODE=""
+    else
+        echo '{"error": "Patchwork CLI not found or node has wrong architecture."}' >&2
+        mkdir -p "$PATCHWORK_DIR/state"
+        echo '{"status":"failed","reason":"cli_not_found","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$GUARD_STATUS_FILE"
+        exit 1
+    fi
 fi
+
+# Store for later use
+echo "$_NODE" > "$PATCHWORK_DIR/state/node-path"
+echo "$_PW" > "$PATCHWORK_DIR/state/patchwork-path"
 
 # 2. Check audit store directory exists and is writable
 if [ ! -d "$PATCHWORK_DIR" ]; then
@@ -64,10 +94,8 @@ mkdir -p "$PATCHWORK_DIR/state" 2>/dev/null
 echo '{"status":"ok","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$GUARD_STATUS_FILE"
 
 # Forward stdin to patchwork hook session-start
-# Use explicit node path to avoid #!/usr/bin/env finding wrong architecture
-NODE_BIN=$(dirname "$(command -v patchwork 2>/dev/null || echo "")")/node
-if [ -x "$NODE_BIN" ]; then
-    exec "$NODE_BIN" "$(command -v patchwork)" hook session-start
+if [ -n "$_NODE" ]; then
+    exec "$_NODE" "$_PW" hook session-start
 else
     exec patchwork hook session-start
 fi
