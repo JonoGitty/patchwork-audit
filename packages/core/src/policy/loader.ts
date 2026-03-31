@@ -13,12 +13,20 @@ export function loadPolicyFromFile(filePath: string): Policy {
 	return PolicySchema.parse(raw);
 }
 
-/** System-level policy path (root-owned, non-admin users cannot modify). */
-export const SYSTEM_POLICY_PATH = process.platform === "darwin"
+/** Default system-level policy path (root-owned, non-admin users cannot modify). */
+const DEFAULT_SYSTEM_POLICY_PATH = process.platform === "darwin"
 	? "/Library/Patchwork/policy.yml"
 	: process.platform === "win32"
 		? join(process.env.PROGRAMDATA || "C:\\ProgramData", "Patchwork", "policy.yml")
 		: "/etc/patchwork/policy.yml";
+
+/** Resolved system policy path. Override via PATCHWORK_SYSTEM_POLICY_PATH env var for testing. */
+export function getSystemPolicyPath(): string {
+	return process.env.PATCHWORK_SYSTEM_POLICY_PATH || DEFAULT_SYSTEM_POLICY_PATH;
+}
+
+/** Exported for display in settings/status. */
+export const SYSTEM_POLICY_PATH = DEFAULT_SYSTEM_POLICY_PATH;
 
 /**
  * Load the active policy. Resolution order:
@@ -32,8 +40,9 @@ export const SYSTEM_POLICY_PATH = process.platform === "darwin"
  */
 export function loadActivePolicy(cwd?: string): { policy: Policy; source: string } {
 	// System-level (root-owned — highest priority, non-admin cannot modify)
-	if (existsSync(SYSTEM_POLICY_PATH)) {
-		return { policy: loadPolicyFromFile(SYSTEM_POLICY_PATH), source: `system:${SYSTEM_POLICY_PATH}` };
+	const systemPath = getSystemPolicyPath();
+	if (existsSync(systemPath)) {
+		return { policy: loadPolicyFromFile(systemPath), source: `system:${systemPath}` };
 	}
 
 	// User-level

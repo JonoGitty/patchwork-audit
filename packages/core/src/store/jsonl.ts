@@ -6,6 +6,8 @@ import {
 	mkdirSync,
 	openSync,
 	readFileSync,
+	readdirSync,
+	renameSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
@@ -71,6 +73,14 @@ export function _setLockIO(overrides: Partial<LockIO> | null): void {
  * - Uses advisory file lock for process-level concurrency safety.
  * - Reconciles dir/file permissions on init.
  */
+/** Options for JSONL log rotation. */
+export interface JsonlRotationOptions {
+	/** Max file size in bytes before rotating. 0 = disabled (default). */
+	maxBytes?: number;
+	/** Max number of rotated files to keep. Default: 5. */
+	maxFiles?: number;
+}
+
 export class JsonlStore implements Store {
 	/** Count of corrupt/invalid lines skipped during the last read operation. */
 	lastReadErrors = 0;
@@ -84,7 +94,12 @@ export class JsonlStore implements Store {
 	/** Count of corrupt/invalid lines when cache was last built. */
 	private cacheErrorCount = 0;
 
-	constructor(private readonly filePath: string) {
+	private readonly rotationMaxBytes: number;
+	private readonly rotationMaxFiles: number;
+
+	constructor(private readonly filePath: string, rotation?: JsonlRotationOptions) {
+		this.rotationMaxBytes = rotation?.maxBytes ?? 0;
+		this.rotationMaxFiles = rotation?.maxFiles ?? 5;
 		const dir = dirname(filePath);
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true, mode: DIR_MODE });
@@ -133,6 +148,17 @@ export class JsonlStore implements Store {
 			chained.event_hash = computeEventHash(chained);
 
 			const line = JSON.stringify(chained) + "\n";
+
+			// Rotate if file exceeds max size
+			if (this.rotationMaxBytes > 0 && existsSync(this.filePath)) {
+				try {
+					const currentSize = statSync(this.filePath).size;
+					if (currentSize + Buffer.byteLength(line) > this.rotationMaxBytes) {
+						this.rotateFiles();
+					}
+				} catch { /* stat failure — skip rotation, continue writing */ }
+			}
+
 			const isNew = !existsSync(this.filePath);
 			appendFileSync(this.filePath, line, "utf-8");
 			if (isNew) {
@@ -146,6 +172,47 @@ export class JsonlStore implements Store {
 			this.lastHashCache = chained.event_hash as string;
 			this.cacheMtimeMs = this.fileMtimeMs();
 		});
+	}
+
+	/**
+	 * Rotate the active JSONL file: events.jsonl → events.1.jsonl,
+	 * events.1.jsonl → events.2.jsonl, etc. Deletes files beyond maxFiles.
+	 * Must be called inside the lock critical section.
+	 */
+	private rotateFiles(): void {
+		const base = this.filePath;
+		const dir = dirname(base);
+		const dotIdx = base.lastIndexOf(".");
+		const stem = dotIdx >= 0 ? base.slice(0, dotIdx) : base;
+		const ext = dotIdx >= 0 ? base.slice(dotIdx) : "";
+
+		// Delete files beyond maxFiles
+		for (let i = this.rotationMaxFiles; i < this.rotationMaxFiles + 10; i++) {
+			const old = `${stem}.${i}${ext}`;
+			if (existsSync(old)) {
+				try { unlinkSync(old); } catch { /* best effort */ }
+			}
+		}
+
+		// Shift existing rotated files: N → N+1
+		for (let i = this.rotationMaxFiles - 1; i >= 1; i--) {
+			const src = `${stem}.${i}${ext}`;
+			const dst = `${stem}.${i + 1}${ext}`;
+			if (existsSync(src)) {
+				try { renameSync(src, dst); } catch { /* best effort */ }
+			}
+		}
+
+		// Active file → .1
+		try {
+			renameSync(base, `${stem}.1${ext}`);
+		} catch { /* best effort */ }
+
+		// Reset cache — the active file is now empty
+		this.dedupIndex = null;
+		this.lastHashCache = null;
+		this.cacheMtimeMs = null;
+		this.cacheErrorCount = 0;
 	}
 
 	readAll(): AuditEvent[] {

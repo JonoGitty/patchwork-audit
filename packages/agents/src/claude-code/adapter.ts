@@ -282,6 +282,7 @@ function handlePreToolUse(store: Store, input: ClaudeCodeHookInput): ClaudeCodeH
 			},
 		});
 		store.append(event);
+		fireWebhookAlert(event);
 
 		return {
 			allow: false,
@@ -337,6 +338,7 @@ function handlePostToolUse(
 	});
 
 	store.append(event);
+	fireWebhookAlert(event);
 	return null;
 }
 
@@ -362,6 +364,63 @@ function handleSubagentStop(store: Store, input: ClaudeCodeHookInput): null {
 	});
 	store.append(event);
 	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Webhook alerts for high-risk events
+// ---------------------------------------------------------------------------
+
+/**
+ * Fire a webhook notification for high-risk or denied events.
+ * Configured via PATCHWORK_WEBHOOK_URL env var.
+ * Supports Slack, Discord, and generic JSON webhooks.
+ * Best-effort — never blocks or throws.
+ */
+function fireWebhookAlert(event: AuditEvent): void {
+	const url = process.env.PATCHWORK_WEBHOOK_URL;
+	if (!url) return;
+
+	const isHighRisk = event.risk.level === "critical" || event.risk.level === "high";
+	const isDenied = event.status === "denied";
+	if (!isHighRisk && !isDenied) return;
+
+	const target = event.target?.path
+		|| event.target?.command?.slice(0, 80)
+		|| event.target?.url?.slice(0, 80)
+		|| event.target?.tool_name
+		|| "unknown";
+
+	const emoji = event.risk.level === "critical" ? "\u{1F6A8}" : isDenied ? "\u{1F6AB}" : "\u26A0\uFE0F";
+	const text = `${emoji} **Patchwork Alert** — ${event.status === "denied" ? "DENIED" : event.risk.level.toUpperCase()}\nAction: \`${event.action}\`\nTarget: \`${target}\`\nAgent: ${event.agent}\nFlags: ${(event.risk.flags || []).join(", ") || "none"}`;
+
+	// Detect webhook format
+	const isSlack = url.includes("hooks.slack.com");
+	const isDiscord = url.includes("discord.com/api/webhooks");
+
+	const body = isSlack
+		? JSON.stringify({ text: text.replace(/\*\*/g, "*") })
+		: isDiscord
+			? JSON.stringify({ content: text })
+			: JSON.stringify({
+				event: event.action,
+				risk: event.risk.level,
+				status: event.status,
+				target,
+				agent: event.agent,
+				flags: event.risk.flags,
+				timestamp: event.timestamp,
+				text,
+			});
+
+	// Fire-and-forget — no await, no error propagation
+	fetch(url, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body,
+		signal: AbortSignal.timeout(5000),
+	}).catch(() => {
+		// Best effort — webhook failure must never block the hook pipeline
+	});
 }
 
 // ---------------------------------------------------------------------------

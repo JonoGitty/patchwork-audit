@@ -24,7 +24,7 @@ export {
 export { SessionSchema, type Session } from "./schema/session.js";
 
 // Store
-export { JsonlStore } from "./store/jsonl.js";
+export { JsonlStore, type JsonlRotationOptions } from "./store/jsonl.js";
 export { SqliteStore } from "./store/sqlite.js";
 export type { EventFilter, Store, SearchableStore } from "./store/types.js";
 
@@ -86,4 +86,5 @@ export {
 	DEFAULT_POLICY,
 	STRICT_POLICY,
 	SYSTEM_POLICY_PATH,
+	getSystemPolicyPath,
 } from "./policy/loader.js";

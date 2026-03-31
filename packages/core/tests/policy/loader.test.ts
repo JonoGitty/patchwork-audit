@@ -61,16 +61,25 @@ describe("loadActivePolicy", () => {
 	const testDir = join(tmpdir(), `patchwork-active-policy-${Date.now()}`);
 	const projectDir = join(testDir, "project");
 	let originalHome: string | undefined;
+	let originalSystemPath: string | undefined;
 
 	beforeEach(() => {
 		originalHome = process.env.HOME;
+		originalSystemPath = process.env.PATCHWORK_SYSTEM_POLICY_PATH;
 		process.env.HOME = testDir;
+		// Override system policy path so tests aren't affected by a real /Library/Patchwork install
+		process.env.PATCHWORK_SYSTEM_POLICY_PATH = join(testDir, "nonexistent-system-policy.yml");
 		mkdirSync(join(testDir, ".patchwork"), { recursive: true });
 		mkdirSync(join(projectDir, ".patchwork"), { recursive: true });
 	});
 
 	afterEach(() => {
 		process.env.HOME = originalHome;
+		if (originalSystemPath !== undefined) {
+			process.env.PATCHWORK_SYSTEM_POLICY_PATH = originalSystemPath;
+		} else {
+			delete process.env.PATCHWORK_SYSTEM_POLICY_PATH;
+		}
 		rmSync(testDir, { recursive: true, force: true });
 	});
 
