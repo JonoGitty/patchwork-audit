@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+export PATH="$HOME/local/nodejs/node-v22.16.0-darwin-x64/bin:$PATH"
+
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
