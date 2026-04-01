@@ -233,7 +233,17 @@ export function installClaudeCodeHooks(
 		let settings: Record<string, unknown> = {};
 		if (existsSync(settingsPath)) {
 			const content = readFileSync(settingsPath, "utf-8");
-			settings = JSON.parse(content);
+			try {
+				settings = JSON.parse(content);
+			} catch {
+				return {
+					success: false,
+					settingsPath,
+					hooksInstalled: [],
+					hooksUpdated: [],
+					error: `Failed to parse ${settingsPath} — file contains invalid JSON. Fix or delete it and retry.`,
+				};
+			}
 		}
 
 		// Merge hooks
@@ -301,7 +311,18 @@ export function uninstallClaudeCodeHooks(projectPath?: string): InstallResult {
 		}
 
 		const content = readFileSync(settingsPath, "utf-8");
-		const settings = JSON.parse(content);
+		let settings: Record<string, unknown>;
+		try {
+			settings = JSON.parse(content);
+		} catch {
+			return {
+				success: false,
+				settingsPath,
+				hooksInstalled: [],
+				hooksUpdated: [],
+				error: `Failed to parse ${settingsPath} — file contains invalid JSON.`,
+			};
+		}
 		const hooks = (settings.hooks || {}) as Record<string, unknown[]>;
 		const removed: string[] = [];
 

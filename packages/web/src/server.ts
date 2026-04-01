@@ -22,6 +22,11 @@ export interface DashboardOptions {
 export function createApp(store: Store, searchStore: SearchableStore | null, dataDir: string): Hono {
 	const app = new Hono();
 
+	app.onError((err, c) => {
+		console.error(`[patchwork-web] ${c.req.method} ${c.req.path} error:`, err.message);
+		return c.json({ error: "Internal server error" }, 500);
+	});
+
 	app.route("/", overviewRoutes(store));
 	app.route("/", eventRoutes(store));
 	app.route("/", sessionRoutes(store));

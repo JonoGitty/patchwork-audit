@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import type { Store, AuditEvent } from "@patchwork/core";
+import type { Store, AuditEvent, EventFilter } from "@patchwork/core";
 import { layout } from "../templates/layout.js";
 import { eventTable } from "../templates/components.js";
 
@@ -12,7 +12,7 @@ export function eventRoutes(store: Store) {
 		const risk = c.req.query("risk") || "";
 		const limit = parseInt(c.req.query("limit") || "100", 10);
 
-		const filter: Record<string, any> = { limit };
+		const filter: EventFilter = { limit };
 		if (agent) filter.agent = agent;
 		if (action) filter.action = action;
 		if (risk) filter.minRisk = risk;
@@ -72,7 +72,7 @@ export function eventRoutes(store: Store) {
 		const risk = c.req.query("risk") || "";
 		const limit = parseInt(c.req.query("limit") || "100", 10);
 
-		const filter: Record<string, any> = { limit };
+		const filter: EventFilter = { limit };
 		if (agent) filter.agent = agent;
 		if (action) filter.action = action;
 		if (risk) filter.minRisk = risk;

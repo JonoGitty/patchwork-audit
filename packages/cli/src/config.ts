@@ -218,6 +218,10 @@ export function resolveVerifyDefaults(opts: {
 
 	// 2. Determine profile name (CLI --profile > config.verify.profile > "baseline")
 	const profileName = opts.profile || opts.config.verify?.profile || "baseline";
+	if (!(profileName in PROFILES)) {
+		const known = Object.keys(PROFILES).join(", ");
+		console.warn(`[patchwork] Unknown profile "${profileName}", falling back to "baseline". Known profiles: ${known}`);
+	}
 	const profileDefaults = PROFILES[profileName] || PROFILES.baseline;
 	Object.assign(result, profileDefaults);
 

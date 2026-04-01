@@ -138,13 +138,22 @@ runs:
       if: steps.discover.outputs.found == 'true'
       shell: bash
       run: |
-        ARGS="--json --profile ${{ inputs.profile }}"
+        PROFILE="${{ inputs.profile }}"
+        VERIFY_EXTRA_FLAGS="${{ inputs.verify-flags }}"
+
+        # Validate profile is a known value
+        if [ "$PROFILE" != "strict" ] && [ "$PROFILE" != "baseline" ]; then
+          echo "::error::Invalid profile: $PROFILE. Must be 'strict' or 'baseline'."
+          exit 1
+        fi
+
+        ARGS="--json --profile $PROFILE"
 
         [ -n "${{ steps.discover.outputs.events }}" ] && ARGS="$ARGS --file ${{ steps.discover.outputs.events }}"
         [ -n "${{ steps.discover.outputs.seals }}" ] && ARGS="$ARGS --seal-file ${{ steps.discover.outputs.seals }}"
         [ -n "${{ steps.discover.outputs.witnesses }}" ] && ARGS="$ARGS --witness-file ${{ steps.discover.outputs.witnesses }}"
 
-        ARGS="$ARGS ${{ inputs.verify-flags }}"
+        ARGS="$ARGS $VERIFY_EXTRA_FLAGS"
 
         echo "::group::Patchwork Verify"
         VERIFY_RESULT=$(patchwork verify $ARGS 2>&1) || true
@@ -190,13 +199,17 @@ runs:
       if: steps.discover.outputs.found == 'true'
       shell: bash
       run: |
-        ARGS="--json --profile ${{ inputs.profile }}"
+        PROFILE="${{ inputs.profile }}"
+        ATTEST_OUTPUT="${{ inputs.attestation-output }}"
+        ATTEST_EXTRA_FLAGS="${{ inputs.attest-flags }}"
+
+        ARGS="--json --profile $PROFILE"
 
         [ -n "${{ steps.discover.outputs.events }}" ] && ARGS="$ARGS --file ${{ steps.discover.outputs.events }}"
         [ -n "${{ steps.discover.outputs.seals }}" ] && ARGS="$ARGS --seal-file ${{ steps.discover.outputs.seals }}"
         [ -n "${{ steps.discover.outputs.witnesses }}" ] && ARGS="$ARGS --witness-file ${{ steps.discover.outputs.witnesses }}"
 
-        ARGS="$ARGS --out ${{ inputs.attestation-output }} ${{ inputs.attest-flags }}"
+        ARGS="$ARGS --out $ATTEST_OUTPUT $ATTEST_EXTRA_FLAGS"
 
         echo "::group::Patchwork Attest"
         patchwork attest $ARGS 2>&1 || echo "::warning::Attestation generation had warnings (non-fatal)"

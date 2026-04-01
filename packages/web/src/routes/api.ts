@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import type { Store } from "@patchwork/core";
+import type { Store, EventFilter } from "@patchwork/core";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { computeStats, groupSessions, riskTimeline, riskFlagCounts } from "../data/queries.js";
@@ -25,7 +25,7 @@ export function apiRoutes(store: Store) {
 		const risk = c.req.query("risk") || undefined;
 		const limit = parseInt(c.req.query("limit") || "100", 10);
 
-		const filter: Record<string, any> = { limit };
+		const filter: EventFilter = { limit };
 		if (agent) filter.agent = agent;
 		if (action) filter.action = action;
 		if (risk) filter.minRisk = risk;
