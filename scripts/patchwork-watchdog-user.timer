@@ -1,0 +1,13 @@
+[Unit]
+Description=Patchwork User Watchdog Timer
+Documentation=https://github.com/JonoGitty/patchwork
+
+[Timer]
+# Run 1 minute after user login
+OnStartupSec=1min
+# Then every 5 minutes
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

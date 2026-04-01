@@ -101,7 +101,7 @@ echo ""
 # --- Step 1: Create system directory ---
 echo "[1/5] Creating $SYSTEM_DIR..."
 mkdir -p "$SYSTEM_DIR"
-chown root:wheel "$SYSTEM_DIR"
+chown "root:$(root_group)" "$SYSTEM_DIR"
 chmod 755 "$SYSTEM_DIR"
 
 # --- Step 2: Install shared assets (policy, guard, hook-wrapper) ---
@@ -117,20 +117,20 @@ fi
 
 if [[ -n "$POLICY_SRC" ]]; then
     cp "$POLICY_SRC" "$SYSTEM_DIR/policy.yml"
-    chown root:wheel "$SYSTEM_DIR/policy.yml"
+    chown "root:$(root_group)" "$SYSTEM_DIR/policy.yml"
     chmod 644 "$SYSTEM_DIR/policy.yml"
     echo "  Policy: $SYSTEM_DIR/policy.yml"
 fi
 
 # Guard script
 cp "$REPO_DIR/scripts/guard.sh" "$SYSTEM_DIR/guard.sh"
-chown root:wheel "$SYSTEM_DIR/guard.sh"
+chown "root:$(root_group)" "$SYSTEM_DIR/guard.sh"
 chmod 755 "$SYSTEM_DIR/guard.sh"
 echo "  Guard: $SYSTEM_DIR/guard.sh"
 
 # Hook wrapper
 cp "$REPO_DIR/scripts/hook-wrapper.sh" "$SYSTEM_DIR/hook-wrapper.sh"
-chown root:wheel "$SYSTEM_DIR/hook-wrapper.sh"
+chown "root:$(root_group)" "$SYSTEM_DIR/hook-wrapper.sh"
 chmod 755 "$SYSTEM_DIR/hook-wrapper.sh"
 echo "  Hook wrapper: $SYSTEM_DIR/hook-wrapper.sh"
 
@@ -139,7 +139,7 @@ echo "[3/5] Setting up user registry..."
 if [[ ! -f "$USERS_CONF" ]]; then
     echo "# Patchwork enrolled users — managed by system-install.sh" > "$USERS_CONF"
     echo "# One username per line. Do not edit manually." >> "$USERS_CONF"
-    chown root:wheel "$USERS_CONF"
+    chown "root:$(root_group)" "$USERS_CONF"
     chmod 644 "$USERS_CONF"
 fi
 
@@ -163,192 +163,140 @@ done
 echo ""
 echo "[5/5] Installing system watchdog daemon..."
 
-# Write the multi-user watchdog script
-cat > "$SYSTEM_DIR/system-watchdog.sh" <<'WATCHDOG'
+# Write the multi-user watchdog script (cross-platform)
+cat > "$SYSTEM_DIR/system-watchdog.sh" <<WATCHDOG
 #!/bin/bash
-# Patchwork System Watchdog — runs as root via LaunchDaemon.
+# Patchwork System Watchdog — runs as root via LaunchDaemon (macOS) or systemd (Linux).
 # Monitors ALL enrolled users and re-locks settings if tampered.
-# Cannot be unloaded by non-admin users.
 
 set -euo pipefail
 
-SYSTEM_DIR="/Library/Patchwork"
-USERS_CONF="$SYSTEM_DIR/users.conf"
-LOG_FILE="$SYSTEM_DIR/watchdog.log"
+PLATFORM="\$(uname)"
+SYSTEM_DIR="$SYSTEM_DIR"
+USERS_CONF="\$SYSTEM_DIR/users.conf"
+LOG_FILE="\$SYSTEM_DIR/watchdog.log"
 
-log() {
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $1" >> "$LOG_FILE"
+log() { echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) \$1" >> "\$LOG_FILE"; }
+
+get_file_perms() {
+    if [[ "\$PLATFORM" == "Darwin" ]]; then stat -f "%Lp" "\$1" 2>/dev/null
+    else stat -c "%a" "\$1" 2>/dev/null; fi
+}
+get_file_owner() {
+    if [[ "\$PLATFORM" == "Darwin" ]]; then stat -f "%Su:%Sg" "\$1" 2>/dev/null
+    else stat -c "%U:%G" "\$1" 2>/dev/null; fi
+}
+get_file_size() {
+    if [[ "\$PLATFORM" == "Darwin" ]]; then stat -f%z "\$1" 2>/dev/null || echo 0
+    else stat -c "%s" "\$1" 2>/dev/null || echo 0; fi
+}
+root_group() { if [[ "\$PLATFORM" == "Darwin" ]]; then echo "wheel"; else echo "root"; fi; }
+lock_file() {
+    if [[ "\$PLATFORM" == "Darwin" ]]; then chflags schg "\$1"
+    else chattr +i "\$1" 2>/dev/null || true; fi
+}
+unlock_file() {
+    if [[ "\$PLATFORM" == "Darwin" ]]; then chflags noschg "\$1" 2>/dev/null || true
+    else chattr -i "\$1" 2>/dev/null || true; fi
+}
+is_file_locked() {
+    if [[ "\$PLATFORM" == "Darwin" ]]; then
+        local flags; flags=\$(stat -f "%Sf" "\$1" 2>/dev/null); [[ "\$flags" == *"schg"* ]]
+    else
+        local attrs; attrs=\$(lsattr "\$1" 2>/dev/null | cut -d' ' -f1); [[ "\$attrs" == *"i"* ]]
+    fi
 }
 
-# Find Node.js for a given user
 find_node_for_user() {
-    local user="$1"
-    local home
-    home=$(eval echo "~$user")
-    for candidate in \
-        "$home/local/nodejs/"node-*/bin \
-        /usr/local/bin \
-        /opt/homebrew/bin \
-        "$home/.nvm/versions/node/"*/bin \
-        "$home/.volta/bin"; do
-        if [[ -x "$candidate/node" ]]; then
-            echo "$candidate"
-            return 0
-        fi
+    local user="\$1" home; home=\$(eval echo "~\$user")
+    for candidate in "\$home/local/nodejs/"node-*/bin /usr/local/bin /opt/homebrew/bin "\$home/.nvm/versions/node/"*/bin "\$home/.volta/bin"; do
+        if [[ -x "\$candidate/node" ]] && "\$candidate/node" --version &>/dev/null; then echo "\$candidate"; return 0; fi
     done
     return 1
 }
 
+user_group() {
+    if [[ "\$PLATFORM" == "Darwin" ]]; then echo "staff"
+    else id -gn "\$1" 2>/dev/null || echo "\$1"; fi
+}
+
 monitor_user() {
-    local user="$1"
-    local home
-    home=$(eval echo "~$user")
-    local settings="$home/.claude/settings.json"
+    local user="\$1" home; home=\$(eval echo "~\$user")
+    local settings="\$home/.claude/settings.json"
+    [[ -d "\$home" ]] || return
 
-    # Skip if home directory doesn't exist
-    [[ -d "$home" ]] || return
-
-    # 1. Check settings.json exists
-    if [[ ! -f "$settings" ]]; then
-        log "[$user] CRITICAL: settings.json missing — recreating"
-        sudo -u "$user" mkdir -p "$home/.claude"
-
-        local node_bin
-        node_bin=$(find_node_for_user "$user") || true
-        if [[ -n "$node_bin" && -x "$node_bin/patchwork" ]]; then
-            sudo -u "$user" PATH="$node_bin:$PATH" "$node_bin/patchwork" init claude-code \
-                --strict-profile --policy-mode fail-closed 2>/dev/null || true
+    if [[ ! -f "\$settings" ]]; then
+        log "[\$user] CRITICAL: settings.json missing — recreating"
+        sudo -u "\$user" mkdir -p "\$home/.claude"
+        local node_bin; node_bin=\$(find_node_for_user "\$user") || true
+        if [[ -n "\$node_bin" && -x "\$node_bin/patchwork" ]]; then
+            sudo -u "\$user" PATH="\$node_bin:\$PATH" "\$node_bin/patchwork" init claude-code --strict-profile --policy-mode fail-closed 2>/dev/null || true
         fi
-
-        # Lock
-        if [[ -f "$settings" ]]; then
-            chown root:wheel "$settings"
-            chmod 644 "$settings"
-            chflags schg "$settings"
-            log "[$user] REINSTALLED: settings.json recreated and locked"
+        if [[ -f "\$settings" ]]; then
+            chown "root:\$(root_group)" "\$settings"; chmod 644 "\$settings"; lock_file "\$settings"
+            log "[\$user] REINSTALLED: settings.json recreated and locked"
         fi
         return
     fi
 
-    # 2. Check ownership
-    local owner
-    owner=$(stat -f "%Su:%Sg" "$settings" 2>/dev/null)
-    if [[ "$owner" != "root:wheel" ]]; then
-        log "[$user] WARNING: settings.json owned by $owner — relocking"
-        chflags noschg "$settings" 2>/dev/null || true
-        chown root:wheel "$settings"
-        chmod 644 "$settings"
-        chflags schg "$settings"
-        log "[$user] FIXED: ownership restored"
+    local owner; owner=\$(get_file_owner "\$settings")
+    if [[ "\$owner" != "root:\$(root_group)" ]]; then
+        log "[\$user] WARNING: settings.json owned by \$owner — relocking"
+        unlock_file "\$settings"; chown "root:\$(root_group)" "\$settings"; chmod 644 "\$settings"; lock_file "\$settings"
+        log "[\$user] FIXED: ownership restored"
     fi
 
-    # 3. Check schg flag
-    local flags
-    flags=$(stat -f "%Sf" "$settings" 2>/dev/null)
-    if [[ "$flags" != *"schg"* ]]; then
-        log "[$user] WARNING: settings.json missing schg — relocking"
-        chflags schg "$settings"
-        log "[$user] FIXED: schg restored"
+    if ! is_file_locked "\$settings"; then
+        log "[\$user] WARNING: settings.json not immutable — relocking"
+        lock_file "\$settings"; log "[\$user] FIXED: immutable flag restored"
     fi
 
-    # 4. Check hooks present
-    if ! grep -q "patchwork hook\|hook-wrapper\.sh\|guard\.sh" "$settings" 2>/dev/null; then
-        log "[$user] CRITICAL: patchwork hooks missing — reinstalling"
-        chflags noschg "$settings" 2>/dev/null || true
-        chown "$user:staff" "$settings"
-
-        local node_bin
-        node_bin=$(find_node_for_user "$user") || true
-        if [[ -n "$node_bin" && -x "$node_bin/patchwork" ]]; then
-            sudo -u "$user" PATH="$node_bin:$PATH" "$node_bin/patchwork" init claude-code \
-                --strict-profile --policy-mode fail-closed 2>/dev/null || true
+    if ! grep -q "patchwork hook\|hook-wrapper\.sh\|guard\.sh" "\$settings" 2>/dev/null; then
+        log "[\$user] CRITICAL: patchwork hooks missing — reinstalling"
+        unlock_file "\$settings"; chown "\$user:\$(user_group "\$user")" "\$settings"
+        local node_bin; node_bin=\$(find_node_for_user "\$user") || true
+        if [[ -n "\$node_bin" && -x "\$node_bin/patchwork" ]]; then
+            sudo -u "\$user" PATH="\$node_bin:\$PATH" "\$node_bin/patchwork" init claude-code --strict-profile --policy-mode fail-closed 2>/dev/null || true
         fi
-
-        chown root:wheel "$settings"
-        chmod 644 "$settings"
-        chflags schg "$settings"
-        log "[$user] REINSTALLED: hooks restored and relocked"
+        chown "root:\$(root_group)" "\$settings"; chmod 644 "\$settings"; lock_file "\$settings"
+        log "[\$user] REINSTALLED: hooks restored and relocked"
     fi
 
-    # 5. Check user audit directory permissions
-    local pw_dir="$home/.patchwork"
-    if [[ -d "$pw_dir" ]]; then
-        local perms
-        perms=$(stat -f "%Lp" "$pw_dir" 2>/dev/null)
-        if [[ "$perms" != "700" ]]; then
-            chmod 700 "$pw_dir"
-            log "[$user] FIXED: .patchwork permissions"
-        fi
+    local pw_dir="\$home/.patchwork"
+    if [[ -d "\$pw_dir" ]]; then
+        local perms; perms=\$(get_file_perms "\$pw_dir")
+        if [[ "\$perms" != "700" ]]; then chmod 700 "\$pw_dir"; log "[\$user] FIXED: .patchwork permissions"; fi
     fi
 }
 
-# --- Main ---
+[[ ! -f "\$USERS_CONF" ]] && { log "ERROR: users.conf not found"; exit 1; }
 
-if [[ ! -f "$USERS_CONF" ]]; then
-    log "ERROR: users.conf not found at $USERS_CONF"
-    exit 1
-fi
-
-# Check system policy
-if [[ -f "$SYSTEM_DIR/policy.yml" ]]; then
-    local_owner=$(stat -f "%Su:%Sg" "$SYSTEM_DIR/policy.yml" 2>/dev/null)
-    if [[ "$local_owner" != "root:wheel" ]]; then
-        chown root:wheel "$SYSTEM_DIR/policy.yml"
-        chmod 644 "$SYSTEM_DIR/policy.yml"
+if [[ -f "\$SYSTEM_DIR/policy.yml" ]]; then
+    local_owner=\$(get_file_owner "\$SYSTEM_DIR/policy.yml")
+    if [[ "\$local_owner" != "root:\$(root_group)" ]]; then
+        chown "root:\$(root_group)" "\$SYSTEM_DIR/policy.yml"; chmod 644 "\$SYSTEM_DIR/policy.yml"
         log "FIXED: system policy ownership restored"
     fi
 fi
 
-# Monitor each enrolled user
 while IFS= read -r user; do
-    [[ -z "$user" || "$user" == \#* ]] && continue
-    monitor_user "$user"
-done < "$USERS_CONF"
+    [[ -z "\$user" || "\$user" == \\#* ]] && continue
+    monitor_user "\$user"
+done < "\$USERS_CONF"
 
-# Rotate log if > 500KB
-if [[ -f "$LOG_FILE" ]] && [[ "$(stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)" -gt 512000 ]]; then
-    tail -500 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+if [[ -f "\$LOG_FILE" ]] && [[ "\$(get_file_size "\$LOG_FILE")" -gt 512000 ]]; then
+    tail -500 "\$LOG_FILE" > "\$LOG_FILE.tmp" && mv "\$LOG_FILE.tmp" "\$LOG_FILE"
     log "ROTATED: watchdog log trimmed"
 fi
 WATCHDOG
 
-chown root:wheel "$SYSTEM_DIR/system-watchdog.sh"
+chown "root:$(root_group)" "$SYSTEM_DIR/system-watchdog.sh"
 chmod 755 "$SYSTEM_DIR/system-watchdog.sh"
 
-# Write LaunchDaemon plist (no hardcoded user — reads users.conf)
-cat > "$DAEMON_PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>$DAEMON_LABEL</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>$SYSTEM_DIR/system-watchdog.sh</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>900</integer>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StandardErrorPath</key>
-    <string>$SYSTEM_DIR/watchdog-stderr.log</string>
-    <key>StandardOutPath</key>
-    <string>$SYSTEM_DIR/watchdog-stdout.log</string>
-    <key>KeepAlive</key>
-    <false/>
-</dict>
-</plist>
-PLIST
+# Install the daemon (cross-platform: launchctl on macOS, systemd on Linux)
+install_system_daemon
 
-chown root:wheel "$DAEMON_PLIST"
-chmod 644 "$DAEMON_PLIST"
-
-launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
-launchctl load "$DAEMON_PLIST"
-
-echo "  Daemon installed: $DAEMON_PLIST"
+echo "  Daemon installed"
 
 # --- Summary ---
 echo ""
@@ -362,8 +310,8 @@ done < "$USERS_CONF"
 [[ $FAILED -gt 0 ]] && echo "  Failed: $FAILED"
 echo ""
 echo "  Protected:"
-echo "    ~/.claude/settings.json   (root:wheel, 644, schg) per user"
-echo "    $SYSTEM_DIR/policy.yml    (root:wheel, 644)"
+echo "    ~/.claude/settings.json   (root:$(root_group), 644, immutable) per user"
+echo "    $SYSTEM_DIR/policy.yml    (root:$(root_group), 644)"
 echo ""
 echo "  Manage users:"
 echo "    sudo bash $REPO_DIR/scripts/system-add-user.sh --user USERNAME"

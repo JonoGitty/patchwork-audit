@@ -1,11 +1,108 @@
 #!/bin/bash
 # Patchwork system install — shared library functions.
+# Cross-platform: macOS (launchctl, chflags) and Linux (systemd, chattr).
 # Sourced by system-install.sh, system-add-user.sh, system-remove-user.sh, system-uninstall.sh.
 
-SYSTEM_DIR="/Library/Patchwork"
+# ---------------------------------------------------------------------------
+# Platform detection
+# ---------------------------------------------------------------------------
+PLATFORM="$(uname)"
+
+if [[ "$PLATFORM" == "Darwin" ]]; then
+    SYSTEM_DIR="/Library/Patchwork"
+    DAEMON_LABEL="com.patchwork.system-watchdog"
+    DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+elif [[ "$PLATFORM" == "Linux" ]]; then
+    SYSTEM_DIR="/etc/patchwork"
+    SYSTEMD_SERVICE="patchwork-watchdog.service"
+    SYSTEMD_TIMER="patchwork-watchdog.timer"
+    SYSTEMD_DIR="/etc/systemd/system"
+else
+    echo "Unsupported platform: $PLATFORM"
+    exit 1
+fi
+
 USERS_CONF="$SYSTEM_DIR/users.conf"
-DAEMON_LABEL="com.patchwork.system-watchdog"
-DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+
+# ---------------------------------------------------------------------------
+# Cross-platform helpers
+# ---------------------------------------------------------------------------
+
+# Returns root group name ("wheel" on macOS, "root" on Linux)
+root_group() {
+    if [[ "$PLATFORM" == "Darwin" ]]; then echo "wheel"; else echo "root"; fi
+}
+
+# Returns user's primary group
+user_group() {
+    local user="$1"
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        echo "staff"
+    else
+        id -gn "$user" 2>/dev/null || echo "$user"
+    fi
+}
+
+# Get file permissions as octal (e.g. "600")
+get_file_perms() {
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        stat -f "%Lp" "$1" 2>/dev/null
+    else
+        stat -c "%a" "$1" 2>/dev/null
+    fi
+}
+
+# Get file owner:group (e.g. "root:wheel")
+get_file_owner() {
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        stat -f "%Su:%Sg" "$1" 2>/dev/null
+    else
+        stat -c "%U:%G" "$1" 2>/dev/null
+    fi
+}
+
+# Get file size in bytes
+get_file_size() {
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        stat -f%z "$1" 2>/dev/null || echo 0
+    else
+        stat -c "%s" "$1" 2>/dev/null || echo 0
+    fi
+}
+
+# Make a file immutable (requires root)
+lock_file() {
+    local file="$1"
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        chflags schg "$file"
+    else
+        chattr +i "$file" 2>/dev/null || echo "  Warning: chattr +i not supported on this filesystem"
+    fi
+}
+
+# Remove immutable flag (requires root)
+unlock_file() {
+    local file="$1"
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        chflags noschg "$file" 2>/dev/null || true
+    else
+        chattr -i "$file" 2>/dev/null || true
+    fi
+}
+
+# Check if file has immutable flag
+is_file_locked() {
+    local file="$1"
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        local flags
+        flags=$(stat -f "%Sf" "$file" 2>/dev/null)
+        [[ "$flags" == *"schg"* ]]
+    else
+        local attrs
+        attrs=$(lsattr "$file" 2>/dev/null | cut -d' ' -f1)
+        [[ "$attrs" == *"i"* ]]
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # Node.js discovery — works on Intel and Apple Silicon, any user
@@ -27,42 +124,55 @@ find_node_bin() {
         "$home/.volta/bin" \
         "$home/.fnm/node-versions/"*/installation/bin; do
         if [[ -x "$candidate/node" ]]; then
-            echo "$candidate"
-            return 0
+            # Verify node actually runs (correct architecture)
+            if "$candidate/node" --version &>/dev/null; then
+                echo "$candidate"
+                return 0
+            fi
         fi
     done
     return 1
 }
 
 # ---------------------------------------------------------------------------
-# User detection — list all human users on macOS (UID >= 500, real shell)
+# User detection — list all human users (cross-platform)
 # ---------------------------------------------------------------------------
 list_human_users() {
-    dscl . list /Users UniqueID | while read -r user uid; do
-        [[ "$uid" -ge 500 ]] 2>/dev/null || continue
-        local shell
-        shell=$(dscl . read "/Users/$user" UserShell 2>/dev/null | awk '{print $2}')
-        [[ "$shell" = "/usr/bin/false" ]] && continue
-        [[ "$shell" = "/sbin/nologin" ]] && continue
-        local home
-        home=$(eval echo "~$user" 2>/dev/null)
-        [[ -d "$home" ]] || continue
-        echo "$user"
-    done
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        dscl . list /Users UniqueID | while read -r user uid; do
+            [[ "$uid" -ge 500 ]] 2>/dev/null || continue
+            local shell
+            shell=$(dscl . read "/Users/$user" UserShell 2>/dev/null | awk '{print $2}')
+            [[ "$shell" = "/usr/bin/false" ]] && continue
+            [[ "$shell" = "/sbin/nologin" ]] && continue
+            local home
+            home=$(eval echo "~$user" 2>/dev/null)
+            [[ -d "$home" ]] || continue
+            echo "$user"
+        done
+    else
+        # Linux: parse /etc/passwd via getent
+        getent passwd | awk -F: '{
+            if ($3 >= 1000 && $3 != 65534 && $7 !~ /nologin|false/) print $1
+        }' | while read -r user; do
+            local home
+            home=$(eval echo "~$user" 2>/dev/null)
+            [[ -d "$home" ]] || continue
+            echo "$user"
+        done
+    fi
 }
 
 # ---------------------------------------------------------------------------
-# User registry — /Library/Patchwork/users.conf management
+# User registry — users.conf management
 # ---------------------------------------------------------------------------
 add_to_registry() {
     local user="$1"
-    # Create if not exists
     if [[ ! -f "$USERS_CONF" ]]; then
         echo "# Patchwork enrolled users — one per line" > "$USERS_CONF"
-        chown root:wheel "$USERS_CONF"
+        chown "root:$(root_group)" "$USERS_CONF"
         chmod 644 "$USERS_CONF"
     fi
-    # Add if not already present
     if ! grep -qx "$user" "$USERS_CONF" 2>/dev/null; then
         echo "$user" >> "$USERS_CONF"
     fi
@@ -74,15 +184,13 @@ remove_from_registry() {
         local tmp="$USERS_CONF.tmp.$$"
         grep -vx "$user" "$USERS_CONF" > "$tmp" || true
         mv "$tmp" "$USERS_CONF"
-        chown root:wheel "$USERS_CONF"
+        chown "root:$(root_group)" "$USERS_CONF"
         chmod 644 "$USERS_CONF"
     fi
 }
 
 list_enrolled_users() {
-    if [[ ! -f "$USERS_CONF" ]]; then
-        return
-    fi
+    if [[ ! -f "$USERS_CONF" ]]; then return; fi
     while IFS= read -r line; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         echo "$line"
@@ -101,7 +209,7 @@ install_user_hooks() {
     local settings="$claude_dir/settings.json"
     local patchwork_dir="$home/.patchwork"
 
-    # Ensure directories exist (as the target user)
+    # Ensure directories exist
     sudo -u "$user" mkdir -p "$claude_dir" 2>/dev/null || mkdir -p "$claude_dir"
     sudo -u "$user" mkdir -p "$patchwork_dir" 2>/dev/null || mkdir -p "$patchwork_dir"
     sudo -u "$user" mkdir -p "$patchwork_dir/state" 2>/dev/null || true
@@ -109,8 +217,8 @@ install_user_hooks() {
     chmod 700 "$patchwork_dir" 2>/dev/null || true
 
     # Temporarily unlock if already locked
-    chflags noschg "$settings" 2>/dev/null || true
-    chown "$user:staff" "$settings" 2>/dev/null || true
+    unlock_file "$settings"
+    chown "$user:$(user_group "$user")" "$settings" 2>/dev/null || true
 
     # Try to install hooks via patchwork CLI
     local node_bin
@@ -124,7 +232,7 @@ install_user_hooks() {
     # Patch hooks to use the shared hook-wrapper and guard
     if [[ -f "$settings" ]]; then
         python3 - "$settings" "$SYSTEM_DIR" <<'PYEOF'
-import json, sys
+import json, sys, re
 
 settings_path = sys.argv[1]
 system_dir = sys.argv[2]
@@ -139,7 +247,6 @@ except (json.JSONDecodeError, FileNotFoundError):
 
 hooks = s.get("hooks", {})
 
-# Define desired hook configuration
 desired = {
     "PreToolUse": [{
         "type": "command",
@@ -155,14 +262,11 @@ desired = {
     "SubagentStop": [{"type": "command", "command": f"{wrapper} subagent-stop", "timeout": 500}],
 }
 
-import re
 PATCHWORK_RE = re.compile(r'\bpatchwork hook\b|hook-wrapper\.sh|guard\.sh')
 
 for event, hook_defs in desired.items():
     existing = hooks.get(event, [])
-    # Remove any existing patchwork hooks
     cleaned = [h for h in existing if not (isinstance(h.get("command"), str) and PATCHWORK_RE.search(h["command"]))]
-    # Add desired hooks
     hooks[event] = cleaned + hook_defs
 
 s["hooks"] = hooks
@@ -186,10 +290,10 @@ lock_user_settings() {
     local settings="$home/.claude/settings.json"
 
     if [[ -f "$settings" ]]; then
-        chown root:wheel "$settings"
+        chown "root:$(root_group)" "$settings"
         chmod 644 "$settings"
-        chflags schg "$settings"
-        echo "  [$user] settings.json locked (root:wheel, schg)"
+        lock_file "$settings"
+        echo "  [$user] settings.json locked (root:$(root_group), immutable)"
     fi
 }
 
@@ -200,15 +304,100 @@ unlock_user_settings() {
     local settings="$home/.claude/settings.json"
 
     if [[ -f "$settings" ]]; then
-        chflags noschg "$settings" 2>/dev/null || true
-        chown "$user:staff" "$settings" 2>/dev/null || true
+        unlock_file "$settings"
+        chown "$user:$(user_group "$user")" "$settings" 2>/dev/null || true
         chmod 644 "$settings"
         echo "  [$user] settings.json unlocked"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Full per-user setup (install + lock + register)
+# Daemon install / uninstall (cross-platform)
+# ---------------------------------------------------------------------------
+install_system_daemon() {
+    local watchdog_script="$SYSTEM_DIR/system-watchdog.sh"
+
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        # macOS: LaunchDaemon plist
+        cat > "$DAEMON_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$DAEMON_LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$watchdog_script</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>$SYSTEM_DIR/watchdog-stderr.log</string>
+    <key>StandardOutPath</key>
+    <string>$SYSTEM_DIR/watchdog.log</string>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
+PLIST
+        chown "root:$(root_group)" "$DAEMON_PLIST"
+        chmod 644 "$DAEMON_PLIST"
+        launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
+        launchctl load "$DAEMON_PLIST"
+
+    elif [[ "$PLATFORM" == "Linux" ]]; then
+        # Linux: systemd service + timer
+        cat > "$SYSTEMD_DIR/$SYSTEMD_SERVICE" <<SERVICE
+[Unit]
+Description=Patchwork System Watchdog
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $watchdog_script
+StandardOutput=journal
+StandardError=journal
+SERVICE
+
+        cat > "$SYSTEMD_DIR/$SYSTEMD_TIMER" <<TIMER
+[Unit]
+Description=Patchwork System Watchdog Timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMER
+
+        systemctl daemon-reload
+        systemctl enable --now "$SYSTEMD_TIMER"
+    fi
+}
+
+uninstall_system_daemon() {
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        if [[ -f "$DAEMON_PLIST" ]]; then
+            launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
+            rm -f "$DAEMON_PLIST"
+            echo "  Removed: $DAEMON_PLIST"
+        fi
+    elif [[ "$PLATFORM" == "Linux" ]]; then
+        systemctl disable --now "$SYSTEMD_TIMER" 2>/dev/null || true
+        rm -f "$SYSTEMD_DIR/$SYSTEMD_SERVICE" "$SYSTEMD_DIR/$SYSTEMD_TIMER"
+        systemctl daemon-reload 2>/dev/null || true
+        echo "  Removed: systemd units"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Full per-user setup / teardown
 # ---------------------------------------------------------------------------
 setup_user() {
     local user="$1"
@@ -226,20 +415,28 @@ setup_user() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# Full per-user teardown (unlock + unregister)
-# ---------------------------------------------------------------------------
 teardown_user() {
     local user="$1"
     unlock_user_settings "$user"
     remove_from_registry "$user"
 
-    # Remove user-level LaunchAgent if present
-    local user_agent
-    user_agent=$(eval echo "~$user")/Library/LaunchAgents/com.patchwork.watchdog.plist
-    if [[ -f "$user_agent" ]]; then
-        sudo -u "$user" launchctl unload "$user_agent" 2>/dev/null || true
-        rm -f "$user_agent"
-        echo "  [$user] Removed user LaunchAgent"
+    # Remove user-level daemon/agent
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        local user_agent
+        user_agent=$(eval echo "~$user")/Library/LaunchAgents/com.patchwork.watchdog.plist
+        if [[ -f "$user_agent" ]]; then
+            sudo -u "$user" launchctl unload "$user_agent" 2>/dev/null || true
+            rm -f "$user_agent"
+            echo "  [$user] Removed user LaunchAgent"
+        fi
+    elif [[ "$PLATFORM" == "Linux" ]]; then
+        local user_home
+        user_home=$(eval echo "~$user")
+        local user_timer="$user_home/.config/systemd/user/patchwork-watchdog.timer"
+        if [[ -f "$user_timer" ]]; then
+            sudo -u "$user" systemctl --user disable --now patchwork-watchdog.timer 2>/dev/null || true
+            rm -f "$user_home/.config/systemd/user/patchwork-watchdog."{service,timer}
+            echo "  [$user] Removed user systemd units"
+        fi
     fi
 }

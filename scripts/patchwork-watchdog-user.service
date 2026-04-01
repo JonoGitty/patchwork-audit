@@ -1,0 +1,9 @@
+[Unit]
+Description=Patchwork User Watchdog
+Documentation=https://github.com/JonoGitty/patchwork
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/.patchwork/watchdog.sh
+StandardOutput=journal
+StandardError=journal

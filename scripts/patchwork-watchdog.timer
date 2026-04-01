@@ -1,0 +1,14 @@
+[Unit]
+Description=Patchwork System Watchdog Timer
+Documentation=https://github.com/JonoGitty/patchwork
+
+[Timer]
+# Run 2 minutes after boot
+OnBootSec=2min
+# Then every 5 minutes
+OnUnitActiveSec=5min
+# Remember last run across reboots
+Persistent=true
+
+[Install]
+WantedBy=timers.target

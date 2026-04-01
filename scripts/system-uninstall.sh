@@ -57,16 +57,10 @@ else
     fi
 fi
 
-# 2. Unload and remove system daemon
+# 2. Remove system daemon (cross-platform)
 echo ""
 echo "[2/3] Removing system watchdog daemon..."
-if [[ -f "$DAEMON_PLIST" ]]; then
-    launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
-    rm -f "$DAEMON_PLIST"
-    echo "  Removed: $DAEMON_PLIST"
-else
-    echo "  Not found (already removed)"
-fi
+uninstall_system_daemon
 
 # 3. Remove system directory
 echo ""
