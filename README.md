@@ -197,6 +197,35 @@ patchwork attest --profile strict --out audit-attestation.json
 patchwork verify --require-signed-attestation --attestation-file audit-attestation.json
 ```
 
+### Compliance reports
+
+`patchwork report` maps your audit data to **7 compliance frameworks** with **31 controls**:
+
+| Framework | Controls | What it checks |
+|-----------|----------|---------------|
+| SOC 2 Type II | 6 | Access controls, monitoring, change management |
+| ISO 27001:2022 | 5 | Privileged access, logging, secure development |
+| EU AI Act | 4 | Record-keeping, transparency, human oversight |
+| GDPR | 4 | Lawfulness, processor compliance, security, breach |
+| NIST AI RMF | 4 | Risk mapping, data governance, monitoring, mitigation |
+| HIPAA | 4 | Access controls, audit trail, user identification |
+| PCI DSS | 4 | Config changes, access restriction, logging, policy |
+
+Each control evaluates real events and returns PASS/FAIL/PARTIAL with specific evidence.
+
+```bash
+# Generate full compliance report
+patchwork report --framework all --include-gaps --include-trends -o report.html
+
+# Gap analysis: what controls need attention + remediation steps
+patchwork report --framework soc2 --include-gaps --format json
+
+# Compliance trends: posture over time
+patchwork report --framework all --include-trends --trend-period weekly -o trends.html
+```
+
+See [docs/case-study.md](docs/case-study.md) for a real-world example.
+
 ### Webhook alerts
 
 Set `PATCHWORK_WEBHOOK_URL` to receive real-time alerts on high-risk or denied events. Supports Slack, Discord, and generic JSON webhooks.
@@ -252,13 +281,25 @@ patchwork verify                      # Hash chain verification
 patchwork seal                        # HMAC signing
 patchwork attest --profile strict     # CI attestation
 
+# Compliance
+patchwork report --framework all      # All 7 frameworks
+patchwork report --include-gaps       # Gap analysis + remediation
+patchwork report --include-trends     # Posture over time
+
+# Replay
+patchwork replay <session-id>         # Interactive step-through
+patchwork replay <id> --html -o r.html  # Shareable HTML timeline
+
 # Export
 patchwork export --format sarif       # SARIF for GitHub Code Scanning
 patchwork export --format csv         # CSV for spreadsheets
 
+# Health
+patchwork doctor                      # Full system health check
+patchwork status                      # Quick status
+
 # Setup
 patchwork init claude-code            # Install hooks
-patchwork status                      # System health
 ```
 
 ---
@@ -316,7 +357,7 @@ flowchart TB
 
     subgraph "Outputs"
         DASH[Web Dashboard\nlocalhost:3000]
-        CLI[CLI\n22 commands]
+        CLI[CLI\n24 commands]
         RPT["Compliance Reports\nSOC2 / ISO27001 / EU AI Act"]
         REP[Session Replay]
         GHA["GitHub Action\npatchwork/audit@v1"]
@@ -363,7 +404,7 @@ Four packages in a TypeScript monorepo:
 - **`@patchwork/core`** -- Schema (Zod), risk classifier, policy engine, JSONL + SQLite stores, hash chain, HMAC sealing
 - **`@patchwork/agents`** -- Agent adapters (Claude Code hooks, Codex parser, auto-detection)
 - **`@patchwork/web`** -- Dashboard server (Hono + htmx + Chart.js, 8 pages)
-- **`patchwork-audit`** -- CLI (Commander.js, 22 commands) -- [npm](https://www.npmjs.com/package/patchwork-audit)
+- **`patchwork-audit`** -- CLI (Commander.js, 24 commands) -- [npm](https://www.npmjs.com/package/patchwork-audit)
 
 ### Data layout
 
@@ -390,14 +431,15 @@ Four packages in a TypeScript monorepo:
 ## Roadmap
 
 **Shipped:**
-- [x] **Compliance reports** -- `patchwork report --framework soc2` with SOC 2, ISO 27001, EU AI Act
+- [x] **Compliance reports** -- 7 frameworks (SOC 2, ISO 27001, EU AI Act, GDPR, NIST AI RMF, HIPAA, PCI DSS), 31 controls, evidence linking, gap analysis, trends
 - [x] **Session replay** -- `patchwork replay <session-id>` (CLI + HTML + git diffs)
 - [x] **npm publish** -- `npm install -g patchwork-audit`
 - [x] **GitHub Action** -- `JonoGitty/patchwork@v1` for CI integration
 - [x] **Web dashboard** -- 8 pages including replay, compliance, doctor, export
 - [x] **Webhook alerts** -- Slack / Discord on high-risk events
 - [x] **Health check** -- `patchwork doctor` + dashboard health indicator
-- [x] **Multi-user system install** -- macOS tamper-proof enforcement
+- [x] **Persistent dashboard** -- always-on at localhost:3000 via LaunchAgent
+- [x] **Multi-user system install** -- macOS + Linux + Windows enforcement
 
 **Planned:**
 - [x] **Linux enforcement** -- systemd watchdog + guard, chattr +i, multi-user
@@ -414,7 +456,7 @@ Four packages in a TypeScript monorepo:
 | Component | macOS | Linux | Windows |
 |-----------|-------|-------|---------|
 | Core (hooks, store, policy, risk) | Full | Full | Full |
-| CLI (22 commands) | Full | Full | Full |
+| CLI (24 commands) | Full | Full | Full |
 | Web dashboard (8 pages) | Full | Full | Full |
 | Compliance reports | Full | Full | Full |
 | Session replay | Full | Full | Full |
