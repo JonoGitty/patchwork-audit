@@ -276,12 +276,96 @@ patchwork status                      # System health
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    subgraph "AI Coding Agent"
+        CC[Claude Code / Codex / Cursor]
+    end
+
+    subgraph "Patchwork Hook Pipeline"
+        direction TB
+        SS[SessionStart Guard]
+        PT[PreToolUse Hook]
+        POST[PostToolUse Hook]
+
+        SS -->|session begins| PT
+        PT -->|for each tool call| POST
+    end
+
+    subgraph "Policy Engine"
+        RC[Risk Classifier]
+        PE[Policy Evaluator]
+        RC --> PE
+        PE -->|ALLOW| A1[Continue]
+        PE -->|DENY| A2[Block Action]
+    end
+
+    subgraph "Audit Store"
+        direction LR
+        JSONL["events.jsonl\n(hash-chained)"]
+        SQL["audit.db\n(SQLite + FTS5)"]
+        JSONL --- SQL
+    end
+
+    subgraph "Integrity Layer"
+        HC[SHA-256 Hash Chain]
+        SEAL[HMAC Seal]
+        WIT[Remote Witness]
+        ATT[CI Attestation]
+    end
+
+    subgraph "Outputs"
+        DASH[Web Dashboard\nlocalhost:3000]
+        CLI[CLI\n22 commands]
+        RPT["Compliance Reports\nSOC2 / ISO27001 / EU AI Act"]
+        REP[Session Replay]
+        GHA["GitHub Action\npatchwork/audit@v1"]
+        WH[Webhook Alerts\nSlack / Discord]
+    end
+
+    CC -->|hook events| SS
+    CC -->|tool calls| PT
+    CC -->|tool results| POST
+
+    PT --> RC
+    POST --> JSONL
+
+    JSONL --> HC
+    HC --> SEAL
+    SEAL --> WIT
+    WIT --> ATT
+
+    JSONL --> DASH
+    JSONL --> CLI
+    JSONL --> RPT
+    JSONL --> REP
+    JSONL --> GHA
+    POST -->|high risk| WH
+
+    subgraph "Enforcement"
+        WD["Watchdog\n(5 min + file watch)"]
+        SYS["System Install\n(root-owned, multi-user)"]
+        WD -->|repairs hooks| CC
+        SYS -->|locks settings.json| CC
+    end
+
+    style A2 fill:#cf222e,color:#fff
+    style PE fill:#161b22,color:#e6edf3
+    style RC fill:#161b22,color:#e6edf3
+    style JSONL fill:#161b22,color:#e6edf3
+    style SQL fill:#161b22,color:#e6edf3
+```
+
+### Packages
+
 Four packages in a TypeScript monorepo:
 
 - **`@patchwork/core`** -- Schema (Zod), risk classifier, policy engine, JSONL + SQLite stores, hash chain, HMAC sealing
 - **`@patchwork/agents`** -- Agent adapters (Claude Code hooks, Codex parser, auto-detection)
-- **`@patchwork/web`** -- Dashboard server (Hono + htmx + Chart.js)
-- **`patchwork-audit`** -- CLI (Commander.js, 20 commands)
+- **`@patchwork/web`** -- Dashboard server (Hono + htmx + Chart.js, 8 pages)
+- **`patchwork-audit`** -- CLI (Commander.js, 22 commands) -- [npm](https://www.npmjs.com/package/patchwork-audit)
+
+### Data layout
 
 ```
 ~/.patchwork/
@@ -293,7 +377,7 @@ Four packages in a TypeScript monorepo:
   witnesses.jsonl       # Remote witness anchors
   attestations/         # CI attestation artifacts
 
-/Library/Patchwork/     # System-level (root-owned, multi-user)
+/Library/Patchwork/     # System-level (root-owned, multi-user) [macOS]
   policy.yml            # System policy (overrides user/project)
   users.conf            # Enrolled user registry
   guard.sh              # Session start guard
@@ -305,23 +389,40 @@ Four packages in a TypeScript monorepo:
 
 ## Roadmap
 
-- [ ] **Compliance report generation** -- `patchwork report --framework soc2` outputting PDF/HTML mapped to SOC 2 / ISO 27001 / EU AI Act controls
-- [ ] **Session replay** -- `patchwork replay <session-id>` walking through file diffs chronologically
+**Shipped:**
+- [x] **Compliance reports** -- `patchwork report --framework soc2` with SOC 2, ISO 27001, EU AI Act
+- [x] **Session replay** -- `patchwork replay <session-id>` (CLI + HTML + git diffs)
+- [x] **npm publish** -- `npm install -g patchwork-audit`
+- [x] **GitHub Action** -- `JonoGitty/patchwork@v1` for CI integration
+- [x] **Web dashboard** -- 8 pages including replay, compliance, doctor, export
+- [x] **Webhook alerts** -- Slack / Discord on high-risk events
+- [x] **Health check** -- `patchwork doctor` + dashboard health indicator
+- [x] **Multi-user system install** -- macOS tamper-proof enforcement
+
+**Planned:**
+- [ ] **Linux enforcement** -- systemd watchdog + guard, system-level install
+- [ ] **Windows enforcement** -- PowerShell guard, Task Scheduler watchdog, system-level install
 - [ ] **Diff-aware risk scoring** -- parse actual code changes, not just file paths
 - [ ] **Team mode** -- local-first with aggregated sealed bundles pushed to a team server
-- [ ] **npm publish** -- `npm install -g patchwork-audit`
-- [ ] **GitHub Action** -- `patchwork/audit@v1` for CI integration
 - [ ] **KMS-backed sealing** -- macOS Keychain / cloud KMS for seal keys
+- [ ] **Cursor adapter** -- pending Cursor hook API
 
 ---
 
 ## Platform Support
 
-| Platform | Status |
-|---|---|
-| macOS | Fully supported (LaunchDaemon watchdog, system-level install, multi-user) |
-| Linux | Fully supported (CI-tested on Ubuntu with Node 20 and 22) |
-| Windows | Partial (core works, file permission hardening not enforced by OS) |
+| Component | macOS | Linux | Windows |
+|-----------|-------|-------|---------|
+| Core (hooks, store, policy, risk) | Full | Full | Full |
+| CLI (22 commands) | Full | Full | Full |
+| Web dashboard (8 pages) | Full | Full | Full |
+| Compliance reports | Full | Full | Full |
+| Session replay | Full | Full | Full |
+| GitHub Action | Full | Full | Full |
+| File permissions (0600/0700) | Full | Full | Not enforced by OS |
+| Watchdog (auto-repair hooks) | LaunchAgent (5 min + file watch) | Planned (systemd) | Planned (Task Scheduler) |
+| System install (tamper-proof) | Full (chflags schg, multi-user) | Planned | Planned |
+| Guard script | bash | bash | Planned (PowerShell) |
 
 ---
 
