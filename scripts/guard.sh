@@ -98,8 +98,16 @@ fi
 echo '{"status":"ok","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$GUARD_STATUS_FILE"
 
 # Forward stdin to patchwork hook session-start
+# Strategy 1: tsx from repo source (most reliable)
+REPO_DIR="$HOME/AI/codex-audit"
+if [ -d "$REPO_DIR/packages/cli/src" ] && command -v npx &>/dev/null; then
+    cd "$REPO_DIR" 2>/dev/null && exec npx --yes tsx packages/cli/src/index.ts hook session-start
+fi
+
+# Strategy 2: cached node+patchwork from discovery above
 if [ -n "$_NODE" ]; then
     exec "$_NODE" "$_PW" hook session-start
-else
-    exec patchwork hook session-start
 fi
+
+# Strategy 3: bare patchwork (npm global)
+exec patchwork hook session-start
