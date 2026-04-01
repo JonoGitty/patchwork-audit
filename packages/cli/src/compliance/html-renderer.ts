@@ -192,17 +192,77 @@ ${report.frameworks.map((fw, i) => `
 	<h2>${8 + i}. ${esc(fw.framework.name)} — Control Mapping</h2>
 	<p class="section-desc">${esc(fw.framework.description)} (${fw.framework.version})</p>
 	<table class="control-table">
-		<thead><tr><th>Control</th><th>Name</th><th>Status</th><th>Evidence</th></tr></thead>
+		<thead><tr><th>Control</th><th>Name</th><th>Status</th><th>Evidence</th><th>Events</th></tr></thead>
 		<tbody>
 		${fw.results.map(r => `<tr>
 			<td class="mono"><strong>${esc(r.control.id)}</strong></td>
 			<td>${esc(r.control.name)}</td>
 			<td>${statusBadge(r.result.status)}</td>
 			<td class="evidence">${esc(r.result.evidence)}</td>
+			<td style="text-align:center">${r.result.linkedEvents?.length || r.result.eventCount || "—"}</td>
 		</tr>`).join("")}
 		</tbody>
 	</table>
 </section>`).join("")}
+
+${report.gaps && report.gaps.length > 0 ? `
+<!-- Gap Analysis -->
+<section>
+	<h2>${8 + report.frameworks.length}. Gap Analysis</h2>
+	<p class="section-desc">${report.gaps.length} control(s) require attention — missing evidence or configuration needed.</p>
+	<table>
+		<thead><tr><th>Framework</th><th>Control</th><th>Issue</th><th>Remediation</th><th>Effort</th></tr></thead>
+		<tbody>
+		${report.gaps.map(g => `<tr>
+			<td>${esc(g.frameworkId)}</td>
+			<td class="mono"><strong>${esc(g.controlId)}</strong> ${esc(g.controlName)}</td>
+			<td class="evidence">${esc(g.reason)}</td>
+			<td><code style="font-size:12px">${esc(g.remediation)}</code></td>
+			<td>${esc(g.effort)}</td>
+		</tr>`).join("")}
+		</tbody>
+	</table>
+</section>` : ""}
+
+${report.trends && report.trends.length > 0 ? `
+<!-- Compliance Trends -->
+<section>
+	<h2>${8 + report.frameworks.length + (report.gaps?.length ? 1 : 0)}. Compliance Posture Over Time</h2>
+	${report.trends.map(t => {
+		const labels = JSON.stringify(t.windows.map(w => w.start.slice(0, 10)));
+		const passData = JSON.stringify(t.windows.map(w => w.passRate));
+		const riskData = JSON.stringify(t.windows.map(w => w.highRiskCount));
+		const denialData = JSON.stringify(t.windows.map(w => w.denialCount));
+		const chartId = "trend_" + t.frameworkId.replace(/[^a-z0-9]/g, "_");
+		return `
+		<h3>${esc(t.frameworkId)} — ${t.period} trend</h3>
+		<div style="position:relative;height:280px">
+			<canvas id="${chartId}"></canvas>
+		</div>
+		<script>
+		new Chart(document.getElementById('${chartId}'), {
+			type: 'line',
+			data: {
+				labels: ${labels},
+				datasets: [
+					{ label: 'Pass Rate %', data: ${passData}, borderColor: '#2da44e', backgroundColor: 'rgba(45,164,78,0.1)', fill: true, tension: 0.3, yAxisID: 'y' },
+					{ label: 'High Risk', data: ${riskData}, borderColor: '#bf8700', tension: 0.3, yAxisID: 'y1' },
+					{ label: 'Denials', data: ${denialData}, borderColor: '#cf222e', tension: 0.3, yAxisID: 'y1' },
+				]
+			},
+			options: {
+				responsive: true, maintainAspectRatio: false,
+				plugins: { legend: { position: 'bottom', labels: { color: '#656d76' } } },
+				scales: {
+					x: { grid: { color: '#d0d7de' }, ticks: { color: '#656d76' } },
+					y: { position: 'left', grid: { color: '#d0d7de' }, ticks: { color: '#656d76' }, min: 0, max: 100, title: { display: true, text: 'Pass %' } },
+					y1: { position: 'right', grid: { display: false }, ticks: { color: '#656d76' }, min: 0, title: { display: true, text: 'Count' } }
+				}
+			}
+		});
+		</script>`;
+	}).join("")}
+</section>` : ""}
 
 <!-- Footer -->
 <section class="report-footer">

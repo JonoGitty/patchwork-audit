@@ -205,10 +205,14 @@ export function complianceRoutes(store: Store) {
 
 		<div class="filter-bar mb-24">
 			<select onchange="window.location='/compliance?framework='+this.value">
-				<option value="all"${frameworkId === "all" ? " selected" : ""}>All Frameworks</option>
+				<option value="all"${frameworkId === "all" ? " selected" : ""}>All Frameworks (7)</option>
 				<option value="soc2"${frameworkId === "soc2" ? " selected" : ""}>SOC 2 Type II</option>
 				<option value="iso27001"${frameworkId === "iso27001" ? " selected" : ""}>ISO 27001:2022</option>
 				<option value="eu-ai-act"${frameworkId === "eu-ai-act" ? " selected" : ""}>EU AI Act</option>
+				<option value="gdpr"${frameworkId === "gdpr" ? " selected" : ""}>GDPR</option>
+				<option value="nist-ai-rmf"${frameworkId === "nist-ai-rmf" ? " selected" : ""}>NIST AI RMF</option>
+				<option value="hipaa"${frameworkId === "hipaa" ? " selected" : ""}>HIPAA</option>
+				<option value="pci-dss"${frameworkId === "pci-dss" ? " selected" : ""}>PCI DSS</option>
 			</select>
 		</div>
 
@@ -240,9 +244,30 @@ export function complianceRoutes(store: Store) {
 			</div>`;
 		}).join("")}
 
+		${(() => {
+			// Gap analysis
+			const gaps = allResults.filter(r => r.result.status === "fail" || r.result.status === "na");
+			if (gaps.length === 0) return "";
+			return `
+			<div class="card mb-24">
+				<h2>Gap Analysis</h2>
+				<p class="subtitle">${gaps.length} control(s) need attention</p>
+				<table>
+					<thead><tr><th>Control</th><th>Name</th><th>Issue</th></tr></thead>
+					<tbody>
+					${gaps.map(g => `<tr>
+						<td class="mono"><strong>${esc(g.control.id)}</strong></td>
+						<td>${esc(g.control.name)}</td>
+						<td style="font-size:13px;color:var(--text-dim)">${esc(g.result.evidence)}</td>
+					</tr>`).join("")}
+					</tbody>
+				</table>
+			</div>`;
+		})()}
+
 		<div style="text-align:center;margin-top:24px">
 			<p style="color:var(--text-muted);font-size:12px">
-				For a full printable report with all sections: <code>patchwork report --framework ${frameworkId} -o report.html</code>
+				For a full report with gaps + trends: <code>patchwork report --framework ${frameworkId} --include-gaps --include-trends -o report.html</code>
 			</p>
 		</div>`;
 

@@ -5,7 +5,7 @@ import type { AuditEvent } from "@patchwork/core";
 import { loadActivePolicy, verifyChain, JsonlStore } from "@patchwork/core";
 import { getReadStore, EVENTS_PATH, SEALS_PATH, ATTESTATION_PATH } from "../store.js";
 import { computeStats, type StatsResult } from "./stats.js";
-import { FRAMEWORKS, FRAMEWORK_IDS, evaluateFramework } from "../compliance/frameworks.js";
+import { FRAMEWORKS, FRAMEWORK_IDS, evaluateFramework, generateGaps, generateTrends } from "../compliance/frameworks.js";
 import { renderHtmlReport } from "../compliance/html-renderer.js";
 import type { ReportData, ComplianceReport, FrameworkReport, ControlStatus } from "../compliance/types.js";
 
@@ -17,6 +17,9 @@ export const reportCommand = new Command("report")
 	.option("--since <time>", "Report period start (ISO date or relative)")
 	.option("--session <id>", "Report on a specific session")
 	.option("--format <format>", "Output format: html, json", "html")
+	.option("--include-gaps", "Include gap analysis with remediation steps")
+	.option("--include-trends", "Include compliance posture trend over time")
+	.option("--trend-period <period>", "Trend period: daily, weekly, monthly", "daily")
 	.option("-o, --output <file>", "Write to file instead of stdout")
 	.action((opts) => {
 		const store = getReadStore();
@@ -160,6 +163,14 @@ export const reportCommand = new Command("report")
 		const hasPasses = allResults.some(r => r.result.status === "pass");
 		const overallGrade: ControlStatus = hasFails ? "fail" : hasPartials ? "partial" : hasPasses ? "pass" : "na";
 
+		// Gap analysis
+		const gaps = opts.includeGaps ? generateGaps(frameworkReports) : undefined;
+
+		// Trends
+		const trends = opts.includeTrends
+			? generateTrends(reportData, frameworkReports, opts.trendPeriod || "daily")
+			: undefined;
+
 		const report: ComplianceReport = {
 			generatedAt: new Date().toISOString(),
 			toolVersion: "0.2.0",
@@ -168,6 +179,8 @@ export const reportCommand = new Command("report")
 			data: reportData,
 			frameworks: frameworkReports,
 			overallGrade,
+			gaps,
+			trends,
 		};
 
 		// Render

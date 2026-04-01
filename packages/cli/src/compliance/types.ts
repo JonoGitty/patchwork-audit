@@ -67,6 +67,8 @@ export interface ControlResult {
 	evidence: string;
 	details?: string;
 	eventCount?: number;
+	/** Event IDs that satisfy this control — for evidence drill-down */
+	linkedEvents?: string[];
 }
 
 export interface ComplianceControl {
@@ -99,6 +101,31 @@ export interface FrameworkReport {
 	};
 }
 
+export interface ComplianceGap {
+	frameworkId: string;
+	controlId: string;
+	controlName: string;
+	reason: string;
+	remediation: string;
+	effort: "minutes" | "hours" | "days";
+}
+
+export interface TrendWindow {
+	start: string;
+	end: string;
+	eventsInWindow: number;
+	passRate: number;
+	highRiskCount: number;
+	denialCount: number;
+	overallGrade: ControlStatus;
+}
+
+export interface ComplianceTrend {
+	frameworkId: string;
+	period: "daily" | "weekly" | "monthly";
+	windows: TrendWindow[];
+}
+
 export interface ComplianceReport {
 	generatedAt: string;
 	toolVersion: string;
@@ -107,4 +134,6 @@ export interface ComplianceReport {
 	data: ReportData;
 	frameworks: FrameworkReport[];
 	overallGrade: ControlStatus;
+	gaps?: ComplianceGap[];
+	trends?: ComplianceTrend[];
 }
