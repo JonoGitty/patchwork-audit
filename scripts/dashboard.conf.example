@@ -1,0 +1,11 @@
+# Patchwork Dashboard Configuration
+# Edit this file to change dashboard settings.
+# Changes take effect after restarting the dashboard:
+#   launchctl unload ~/Library/LaunchAgents/com.patchwork.dashboard.plist
+#   launchctl load ~/Library/LaunchAgents/com.patchwork.dashboard.plist
+
+# Port to listen on (default: 3000)
+PORT=3000
+
+# Set to "" to auto-open browser on start, or "--no-open" to suppress
+NO_OPEN="--no-open"
