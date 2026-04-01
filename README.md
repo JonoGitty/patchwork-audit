@@ -37,8 +37,8 @@ Every action is classified, logged, and -- if it violates policy -- blocked befo
 ## Quickstart
 
 ```bash
-git clone https://github.com/JonoGitty/codex-audit.git
-cd codex-audit
+git clone https://github.com/JonoGitty/patchwork.git
+cd patchwork
 pnpm install && pnpm build
 
 # Install CLI globally
@@ -294,12 +294,20 @@ patchwork replay <id> --html -o r.html  # Shareable HTML timeline
 patchwork export --format sarif       # SARIF for GitHub Code Scanning
 patchwork export --format csv         # CSV for spreadsheets
 
+# Analysis
+patchwork diff <session-id>           # File changes in a session
+patchwork show <event-or-session-id>  # Full event/session detail
+patchwork stats                       # Aggregate statistics
+patchwork search <query>              # Full-text search (SQLite FTS5)
+
 # Health
 patchwork doctor                      # Full system health check
 patchwork status                      # Quick status
 
-# Setup
+# Setup & sync
 patchwork init claude-code            # Install hooks
+patchwork sync codex                  # Import Codex CLI history
+patchwork witness publish             # Publish to remote witness
 ```
 
 ---
