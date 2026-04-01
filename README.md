@@ -400,8 +400,8 @@ Four packages in a TypeScript monorepo:
 - [x] **Multi-user system install** -- macOS tamper-proof enforcement
 
 **Planned:**
-- [ ] **Linux enforcement** -- systemd watchdog + guard, system-level install
-- [ ] **Windows enforcement** -- PowerShell guard, Task Scheduler watchdog, system-level install
+- [x] **Linux enforcement** -- systemd watchdog + guard, chattr +i, multi-user
+- [x] **Windows enforcement** -- PowerShell guard + watchdog, Task Scheduler, multi-user
 - [ ] **Diff-aware risk scoring** -- parse actual code changes, not just file paths
 - [ ] **Team mode** -- local-first with aggregated sealed bundles pushed to a team server
 - [ ] **KMS-backed sealing** -- macOS Keychain / cloud KMS for seal keys
@@ -419,10 +419,10 @@ Four packages in a TypeScript monorepo:
 | Compliance reports | Full | Full | Full |
 | Session replay | Full | Full | Full |
 | GitHub Action | Full | Full | Full |
-| File permissions (0600/0700) | Full | Full | Not enforced by OS |
-| Watchdog (auto-repair hooks) | LaunchAgent (5 min + file watch) | Planned (systemd) | Planned (Task Scheduler) |
-| System install (tamper-proof) | Full (chflags schg, multi-user) | Planned | Planned |
-| Guard script | bash | bash | Planned (PowerShell) |
+| File permissions (0600/0700) | Full | Full | attrib +R (read-only) |
+| Watchdog (auto-repair hooks) | LaunchAgent (5 min + file watch) | systemd timer (5 min) | Task Scheduler (5 min) |
+| System install (tamper-proof) | Full (chflags schg, multi-user) | Full (chattr +i, multi-user) | Full (attrib +R, multi-user) |
+| Guard script | bash | bash | PowerShell |
 
 ---
 

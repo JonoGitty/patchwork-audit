@@ -69,6 +69,8 @@ export function resolveFailClosed(options?: InstallOptions): { enabled: boolean;
 }
 
 function buildHooks(binPath?: string, options?: InstallOptions) {
+	const isWindows = process.platform === "win32";
+
 	// Use explicit "node patchwork" to bypass #!/usr/bin/env node shebang issues
 	// on mixed-architecture Macs (Intel machine with ARM homebrew node).
 	// process.execPath gives us the node binary that is CURRENTLY running — guaranteed correct arch.
@@ -78,12 +80,17 @@ function buildHooks(binPath?: string, options?: InstallOptions) {
 	if (!patchworkBin) {
 		// Resolve patchwork binary from the same directory as the running node
 		const nodeDir = dirname(nodeExec);
-		const candidate = join(nodeDir, "patchwork");
-		if (existsSync(candidate)) {
-			patchworkBin = candidate;
-		} else {
-			patchworkBin = "patchwork"; // fallback to PATH
+		// On Windows, check for .cmd wrapper first
+		const candidates = isWindows
+			? [join(nodeDir, "patchwork.cmd"), join(nodeDir, "patchwork")]
+			: [join(nodeDir, "patchwork")];
+		for (const candidate of candidates) {
+			if (existsSync(candidate)) {
+				patchworkBin = candidate;
+				break;
+			}
 		}
+		if (!patchworkBin) patchworkBin = "patchwork"; // fallback to PATH
 	}
 
 	const cmd = `${nodeExec} ${patchworkBin}`;

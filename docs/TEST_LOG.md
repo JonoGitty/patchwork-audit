@@ -4138,3 +4138,59 @@ Rolling record of test runs during development.
 
 
 ---
+
+## 2026-04-01T09:50:54.725Z
+
+- Overall status: PASS
+- Totals: 672/672 passed, 0 failed across 164 suites
+
+### @patchwork/core
+- Status: PASS
+- Totals: 285/285 passed, 0 failed, 0 skipped/todo across 75 suites
+- Coverage by test file:
+- `packages/core/tests/hash/attestation.test.ts` (14 tests): buildAttestationPayload, hashAttestationPayload, signAttestation + verifyAttestation. Example cases: produces deterministic output for identical input; excludes signature and payload_hash from payload; uses sorted keys for determinism.
+- `packages/core/tests/hash/chain.test.ts` (25 tests): canonicalize, computeEventHash, JsonlStore hash chain, verifyChain. Example cases: sorts object keys deterministically; handles nested objects with stable ordering; preserves array element order.
+- `packages/core/tests/hash/seal.test.ts` (35 tests): computeSealPayload, signSeal / verifySeal, ensureSealKey, readSealKey, deriveSealKeyId, ensureKeyring. Example cases: returns a deterministic versioned string; is deterministic across calls; changes when any input changes.
+- `packages/core/tests/hash/witness.test.ts` (22 tests): WitnessRecordSchema, buildWitnessPayload, validateWitnessResponse, hashWitnessPayload. Example cases: accepts a complete valid record; accepts a record with optional fields; rejects record with wrong schema_version.
+- `packages/core/tests/policy/engine.test.ts` (36 tests): risk threshold, file rules, command rules, network rules, MCP rules, non-matching actions. Example cases: allows actions within risk threshold; denies actions exceeding risk threshold; allows actions at exact threshold.
+- `packages/core/tests/policy/loader.test.ts` (11 tests): loadPolicyFromFile, loadActivePolicy, policyToYaml, built-in policies. Example cases: loads and parses a YAML policy file; applies defaults for missing fields; returns default policy when no files exist.
+- `packages/core/tests/risk/classifier.test.ts` (27 tests): session events, file operations, sensitive files, config files, commands, network. Example cases: session_start is none risk; session_end is none risk; prompt_submit is none risk.
+- `packages/core/tests/risk/sensitive.test.ts` (14 tests): matchesGlob, SENSITIVE_GLOBS. Example cases: matches .env at root; matches .env in subdirectory; matches .env.local.
+- `packages/core/tests/schema/event.test.ts` (14 tests): AuditEventSchema, schema_version contract. Example cases: validates a complete event; validates a minimal event; rejects invalid agent type.
+- `packages/core/tests/schema/hash.test.ts` (9 tests): hashContent, generateEventId, generateSessionId. Example cases: returns sha256: prefix; produces consistent hashes; produces different hashes for different content.
+- `packages/core/tests/store/jsonl.test.ts` (48 tests): JsonlStore, query, file permissions, schema validation, idempotency dedup, file locking. Example cases: starts empty; appends and reads a single event; appends multiple events in order.
+- `packages/core/tests/store/sqlite.test.ts` (30 tests): SqliteStore, query, search (FTS5), file permissions, schema validation, schema_version and idempotency_key. Example cases: creates DB file on disk; uses WAL mode; starts empty.
+
+
+### @patchwork/agents
+- Status: PASS
+- Totals: 98/98 passed, 0 failed, 0 skipped/todo across 21 suites
+- Coverage by test file:
+- `packages/agents/tests/claude-code/adapter.test.ts` (40 tests): handleClaudeCodeHook, schema_version and idempotency_key, directory permissions, privacy-safe defaults, divergence marker. Example cases: handles SessionStart; handles SessionEnd; handles PostToolUse for file Write.
+- `packages/agents/tests/claude-code/installer.test.ts` (26 tests): installClaudeCodeHooks, uninstallClaudeCodeHooks, installer PreToolUse options, upgrade-in-place hook reconfiguration, installer policyMode option, installer hook timeouts. Example cases: creates .claude directory and settings.json; installs hooks for expected events; hooks use patchwork hook commands.
+- `packages/agents/tests/claude-code/mapper.test.ts` (12 tests): mapClaudeCodeTool. Example cases: maps Write to file_create; maps Edit to file_edit; maps Read to file_read.
+- `packages/agents/tests/codex/history-parser.test.ts` (7 tests): syncCodexHistory. Example cases: returns zeros when no history exists; handles empty history file; ingests prompt_submit events with content hashes.
+- `packages/agents/tests/common/detector.test.ts` (7 tests): detectInstalledAgents. Example cases: detects claude-code when which claude succeeds; detects codex when which codex succeeds; reports installed: false when which throws.
+- `packages/agents/tests/integration/pipeline.test.ts` (6 tests): E2E: Claude Code session pipeline. Example cases: captures a complete session lifecycle; captures failed tool uses; captures subagent lifecycle.
+
+
+### patchwork-audit
+- Status: PASS
+- Totals: 289/289 passed, 0 failed, 0 skipped/todo across 68 suites
+- Coverage by test file:
+- `packages/cli/tests/analysis/diff.test.ts` (9 tests): computeFileDiff. Example cases: detects CREATED files; detects MODIFIED files; detects DELETED files.
+- `packages/cli/tests/analysis/stats.test.ts` (9 tests): computeStats. Example cases: counts events by action; counts events by agent; counts events by risk level.
+- `packages/cli/tests/commands/attest.test.ts` (29 tests): patchwork attest, attest tool_version, attest history mode, attest --profile, attest --max-history-files validation, attest config validation. Example cases: A: writes signed attestation artifact on successful verification; A2: signature verifies with keyring key; A3: tampered artifact fails signature verification.
+- `packages/cli/tests/commands/hook.test.ts` (25 tests): hook pre-tool fail-closed mode, hook PreToolUse latency warning, hook PreToolUse structured telemetry, hook PreToolUse telemetry file sink, hook PreToolUse telemetry file rotation, hook PreToolUse telemetry concurrency hardening. Example cases: A: PreToolUse + fail-closed + invalid JSON => deny JSON emitted; B: PreToolUse + fail-closed disabled + invalid JSON => no deny output; C: non-PreToolUse + fail-closed enabled + invalid JSON => no deny output.
+- `packages/cli/tests/commands/init.test.ts` (20 tests): init --pretool flags, init --strict-profile. Example cases: E: passes --pretool-fail-closed through to installer; E: passes --pretool-warn-ms through to installer; E: validates bad --pretool-warn-ms with clear error.
+- `packages/cli/tests/commands/seal.test.ts` (39 tests): seal command, seal append locking, verify with seal, verify --require-seal, verify --max-seal-age-seconds, seal file permission hardening. Example cases: creates seal key with secure permissions; generates a valid seal record; exits non-zero when no events exist.
+- `packages/cli/tests/commands/sync.test.ts` (15 tests): sync db-status, sync db clears marker, sync db partial rebuild failure. Example cases: reports no divergence when marker is absent; reports divergence when marker is present; JSON output includes diverged flag and marker details when present.
+- `packages/cli/tests/commands/verify.test.ts` (75 tests): verify command, verify --max-seal-age-seconds input validation, verify --require-witness, verify --max-witness-age-seconds, verify --strict-witness-file, verify witness JSON output. Example cases: passes for a valid chain; exits non-zero when JSON parse errors are present; exits non-zero when schema-invalid events are present.
+- `packages/cli/tests/commands/witness.test.ts` (14 tests): witness publish, witness lock concurrency, witness verify. Example cases: A: writes one witness record for single successful endpoint; B: quorum behavior — partial failures, passes when successes >= quorum; B2: quorum NOT met — fails when successes < quorum.
+- `packages/cli/tests/config.test.ts` (24 tests): loadConfig, resolveVerifyDefaults, config validation. Example cases: M1: returns empty config when no config files exist; M2: loads project-level .patchwork/config.yml; M3: project-level config takes precedence over user-level.
+- `packages/cli/tests/output/colors.test.ts` (12 tests): riskIcon, riskColor. Example cases: returns CRITICAL badge for critical; returns HIGH badge for high; returns a string for medium.
+- `packages/cli/tests/output/formatter.test.ts` (8 tests): formatEvent, formatEventCompact. Example cases: includes the action in output; includes the target path; includes the agent name.
+- `packages/cli/tests/remote-witness.test.ts` (10 tests): checkRemoteWitnesses, emptyRemoteWitnessResult. Example cases: returns verified when endpoint returns 200 with matching anchor_id; strips trailing slashes from witness_url when building proof URL; fails when quorum not met.
+
+
+---
