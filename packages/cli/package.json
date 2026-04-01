@@ -1,6 +1,6 @@
 {
   "name": "patchwork-audit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The audit trail for AI coding agents",
   "type": "module",
   "bin": {
@@ -12,7 +12,7 @@
   "license": "BUSL-1.1",
   "repository": {
     "type": "git",
-    "url": "https://github.com/JonoGitty/codex-audit.git",
+    "url": "https://github.com/JonoGitty/patchwork-audit.git",
     "directory": "packages/cli"
   },
   "publishConfig": {
@@ -26,15 +26,15 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@patchwork/agents": "workspace:*",
-    "@patchwork/core": "workspace:*",
-    "@patchwork/web": "workspace:*",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "yaml": "^2.6.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@patchwork/agents": "workspace:*",
+    "@patchwork/core": "workspace:*",
+    "@patchwork/web": "workspace:*",
     "tsup": "^8.3.0",
     "tsx": "^4.19.0",
     "vitest": "^2.1.0"

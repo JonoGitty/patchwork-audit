@@ -36,15 +36,6 @@ importers:
 
   packages/cli:
     dependencies:
-      '@patchwork/agents':
-        specifier: workspace:*
-        version: link:../agents
-      '@patchwork/core':
-        specifier: workspace:*
-        version: link:../core
-      '@patchwork/web':
-        specifier: workspace:*
-        version: link:../web
       chalk:
         specifier: ^5.3.0
         version: 5.6.2
@@ -58,6 +49,15 @@ importers:
         specifier: ^3.24.0
         version: 3.25.76
     devDependencies:
+      '@patchwork/agents':
+        specifier: workspace:*
+        version: link:../agents
+      '@patchwork/core':
+        specifier: workspace:*
+        version: link:../core
+      '@patchwork/web':
+        specifier: workspace:*
+        version: link:../web
       tsup:
         specifier: ^8.3.0
         version: 8.5.1(postcss@8.5.6)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.2)
