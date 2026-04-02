@@ -53,6 +53,14 @@ patchwork log            # CLI event stream
 patchwork summary        # today's activity
 ```
 
+### Claude Code skill (optional)
+
+Copy `skills/patchwork/` into your `~/.claude/skills/` directory to add a `/patchwork` slash command to Claude Code. It provides live status, diagnostics, and explains how the audit pipeline works — useful for onboarding and troubleshooting.
+
+```bash
+cp -r skills/patchwork ~/.claude/skills/
+```
+
 ### System-level install (tamper-proof)
 
 For managed machines where non-admin users should not be able to disable auditing:
