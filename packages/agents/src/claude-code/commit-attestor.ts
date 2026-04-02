@@ -45,7 +45,7 @@ export function generateCommitAttestation(params: CommitAttestationParams): Comm
 	// Query session events
 	let sessionEvents: AuditEvent[] = [];
 	try {
-		sessionEvents = store.query({ session_id: sessionId });
+		sessionEvents = store.query({ sessionId });
 	} catch {
 		// Store read failed — generate degraded attestation
 	}
