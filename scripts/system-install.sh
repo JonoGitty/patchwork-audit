@@ -99,13 +99,13 @@ echo "  System dir:  $SYSTEM_DIR"
 echo ""
 
 # --- Step 1: Create system directory ---
-echo "[1/5] Creating $SYSTEM_DIR..."
+echo "[1/6] Creating $SYSTEM_DIR..."
 mkdir -p "$SYSTEM_DIR"
 chown "root:$(root_group)" "$SYSTEM_DIR"
 chmod 755 "$SYSTEM_DIR"
 
 # --- Step 2: Install shared assets (policy, guard, hook-wrapper) ---
-echo "[2/5] Installing shared assets..."
+echo "[2/6] Installing shared assets..."
 
 # Policy
 POLICY_SRC=""
@@ -135,7 +135,7 @@ chmod 755 "$SYSTEM_DIR/hook-wrapper.sh"
 echo "  Hook wrapper: $SYSTEM_DIR/hook-wrapper.sh"
 
 # --- Step 3: Initialize user registry ---
-echo "[3/5] Setting up user registry..."
+echo "[3/6] Setting up user registry..."
 if [[ ! -f "$USERS_CONF" ]]; then
     echo "# Patchwork enrolled users — managed by system-install.sh" > "$USERS_CONF"
     echo "# One username per line. Do not edit manually." >> "$USERS_CONF"
@@ -144,7 +144,7 @@ if [[ ! -f "$USERS_CONF" ]]; then
 fi
 
 # --- Step 4: Install hooks for each user ---
-echo "[4/5] Enrolling users..."
+echo "[4/6] Enrolling users..."
 ENROLLED=0
 FAILED=0
 for user in "${USERS[@]}"; do
@@ -161,7 +161,7 @@ done
 
 # --- Step 5: Install system watchdog daemon ---
 echo ""
-echo "[5/5] Installing system watchdog daemon..."
+echo "[5/6] Installing system watchdog daemon..."
 
 # Write the multi-user watchdog script (cross-platform)
 cat > "$SYSTEM_DIR/system-watchdog.sh" <<WATCHDOG
@@ -296,7 +296,53 @@ chmod 755 "$SYSTEM_DIR/system-watchdog.sh"
 # Install the daemon (cross-platform: launchctl on macOS, systemd on Linux)
 install_system_daemon
 
-echo "  Daemon installed"
+echo "  Watchdog daemon installed"
+
+# --- Step 6: Install relay daemon (layer 2 tamper-proof audit) ---
+echo ""
+echo "[6/6] Installing relay daemon..."
+
+# Find node binary for the relay
+RELAY_NODE=""
+for user in "${USERS[@]}"; do
+    user=$(echo "$user" | xargs)
+    [[ -z "$user" ]] && continue
+    user_home=$(eval echo "~$user")
+    for candidate in "$user_home/local/nodejs/"node-*/bin/node /usr/local/bin/node /opt/homebrew/bin/node; do
+        if [[ -x "$candidate" ]]; then
+            RELAY_NODE="$candidate"
+            break 2
+        fi
+    done
+done
+
+if [[ -n "$RELAY_NODE" ]]; then
+    RELAY_PATCHWORK="$(dirname "$RELAY_NODE")/patchwork"
+    if [[ -x "$RELAY_PATCHWORK" ]] || [[ -f "$RELAY_PATCHWORK" ]]; then
+        # Install relay LaunchDaemon plist
+        RELAY_PLIST="/Library/LaunchDaemons/com.patchwork.relay.plist"
+        if [[ -f "$REPO_DIR/scripts/com.patchwork.relay.plist" ]]; then
+            sed -e "s|__NODE_PATH__|$RELAY_NODE|g" \
+                -e "s|__PATCHWORK_CLI__|$RELAY_PATCHWORK|g" \
+                "$REPO_DIR/scripts/com.patchwork.relay.plist" > "$RELAY_PLIST"
+            chown "root:$(root_group)" "$RELAY_PLIST"
+            chmod 644 "$RELAY_PLIST"
+
+            # Load the daemon
+            launchctl unload "$RELAY_PLIST" 2>/dev/null || true
+            launchctl load -w "$RELAY_PLIST"
+            echo "  Relay daemon installed and started"
+            echo "  Socket: /Library/Patchwork/relay.sock"
+            echo "  Log:    /Library/Patchwork/events.relay.jsonl"
+        else
+            echo "  WARNING: relay plist template not found — skipping relay daemon"
+        fi
+    else
+        echo "  WARNING: patchwork CLI not found — skipping relay daemon"
+    fi
+else
+    echo "  WARNING: Node.js not found — skipping relay daemon"
+fi
 
 # --- Summary ---
 echo ""
@@ -310,8 +356,9 @@ done < "$USERS_CONF"
 [[ $FAILED -gt 0 ]] && echo "  Failed: $FAILED"
 echo ""
 echo "  Protected:"
-echo "    ~/.claude/settings.json   (root:$(root_group), 644, immutable) per user"
-echo "    $SYSTEM_DIR/policy.yml    (root:$(root_group), 644)"
+echo "    ~/.claude/settings.json           (root:$(root_group), 644, immutable) per user"
+echo "    $SYSTEM_DIR/policy.yml            (root:$(root_group), 644)"
+echo "    $SYSTEM_DIR/events.relay.jsonl    (root:$(root_group), 644, append-only)"
 echo ""
 echo "  Manage users:"
 echo "    sudo bash $REPO_DIR/scripts/system-add-user.sh --user USERNAME"

@@ -1,6 +1,6 @@
 {
   "name": "@patchwork/agents",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Agent integration adapters for Patchwork",
   "type": "module",
   "main": "dist/index.js",
@@ -11,7 +11,9 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "license": "BUSL-1.1",
   "repository": {
     "type": "git",

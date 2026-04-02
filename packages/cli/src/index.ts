@@ -22,13 +22,14 @@ import { reportCommand } from "./commands/report.js";
 import { replayCommand } from "./commands/replay.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { commitAttestCommand } from "./commands/commit-attest.js";
+import { relayCommand } from "./commands/relay.js";
 
 const program = new Command();
 
 program
 	.name("patchwork")
 	.description("The audit trail for AI coding agents")
-	.version("0.1.0");
+	.version("0.5.0");
 
 program.addCommand(initCommand);
 program.addCommand(logCommand);
@@ -53,5 +54,6 @@ program.addCommand(reportCommand);
 program.addCommand(replayCommand);
 program.addCommand(doctorCommand);
 program.addCommand(commitAttestCommand);
+program.addCommand(relayCommand);
 
 program.parse();

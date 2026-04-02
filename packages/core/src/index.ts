@@ -77,6 +77,32 @@ export {
 export { generateEventId, generateSessionId } from "./id/ulid.js";
 export { getHomeDir, homePath } from "./path/home.js";
 
+// Relay
+export {
+	RelayDaemon,
+	runRelayDaemon,
+	type RelayDaemonOptions,
+	type RelayDaemonState,
+} from "./relay/daemon.js";
+export {
+	sendToRelay,
+	sendToRelaySync,
+	pingRelay,
+	readRelayDivergenceMarker,
+	type RelayDivergenceMarker,
+} from "./relay/client.js";
+export {
+	RELAY_SOCKET_PATH,
+	RELAY_LOG_PATH,
+	RELAY_DAEMON_LOG_PATH,
+	RELAY_PID_PATH,
+	HEARTBEAT_INTERVAL_MS,
+	RELAY_PROTOCOL_VERSION,
+	type RelayMessage,
+	type RelayResponse,
+	type HeartbeatRecord,
+} from "./relay/protocol.js";
+
 // Policy
 export {
 	evaluatePolicy,

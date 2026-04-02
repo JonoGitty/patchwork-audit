@@ -12,6 +12,7 @@ import {
 	SqliteStore,
 	loadActivePolicy,
 	getHomeDir,
+	sendToRelay,
 } from "@patchwork/core";
 import { isAbsolute, relative, dirname, join } from "node:path";
 import {
@@ -139,7 +140,7 @@ function recordDivergence(errorMessage: string, markerPath?: string): void {
 	}
 }
 
-/** Wraps a primary and optional secondary store for dual-write. */
+/** Wraps a primary and optional secondary store for triple-write (JSONL + SQLite + relay). */
 function createDualWriter(primary: Store, secondary: Store | null): Store {
 	let sqliteErrorCount = 0;
 
@@ -157,6 +158,16 @@ function createDualWriter(primary: Store, secondary: Store | null): Store {
 					);
 					recordDivergence(msg);
 				}
+			}
+
+			// Layer 2: fire-and-forget relay to root-owned audit log.
+			// The relay client is non-blocking and handles its own
+			// divergence tracking. If the relay daemon isn't running,
+			// this is a silent no-op.
+			try {
+				sendToRelay(event as unknown as Record<string, unknown>);
+			} catch {
+				// Relay must never block or break the hook pipeline
 			}
 		},
 		readAll: () => primary.readAll(),
