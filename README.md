@@ -487,15 +487,12 @@ Four packages in a TypeScript monorepo:
     index.jsonl         # Attestation index
     <sha>.json          # Full attestation for each commit
 
-/Library/Patchwork/     # System-level (root-owned, multi-user) [macOS]
+/Library/Patchwork/     # Root-owned (macOS) — system enforcement + relay
   policy.yml            # System policy (overrides user/project)
   users.conf            # Enrolled user registry
   guard.sh              # Session start guard
-  hook-wrapper.sh       # Shared hook shim (runtime Node discovery)
   system-watchdog.sh    # Multi-user watchdog
-
-/Library/Patchwork/     # Audit relay (root-owned, macOS) [v0.5.0+]
-  events.relay.jsonl    # Independent hash-chained event copy
+  events.relay.jsonl    # Independent hash-chained event copy (relay)
   relay.sock            # Unix socket for event ingestion
   relay.pid             # Daemon PID file
   relay.log             # Daemon log (rotated at 100KB)
@@ -522,13 +519,14 @@ Four packages in a TypeScript monorepo:
 - [x] **Commit attestations** -- signed compliance proof on every git commit, git notes (v0.6.1)
 - [x] **Relay forwarding fix** -- hooks now properly await relay socket write before exit (v0.6.1)
 - [x] **Hook format fix** -- correct nested matcher/hooks format for Claude Code settings.json (v0.6.1)
+- [x] **npm publish** -- `npm install -g patchwork-audit` (v0.6.1)
 
 **Planned:**
-- [ ] **npm publish** -- `npm install -g patchwork-audit` (needs interactive npm login)
 - [ ] **Witness endpoints** -- configure external anchoring for off-machine seal verification
 - [ ] **Diff-aware risk scoring** -- parse actual code changes, not just file paths
 - [ ] **Team mode** -- local-first with aggregated sealed bundles pushed to a team server
 - [ ] **Cursor adapter** -- pending Cursor hook API
+- [ ] **GitHub Action v2** -- attestation-aware CI gate using commit notes
 
 ---
 
