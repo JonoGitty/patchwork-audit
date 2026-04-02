@@ -1,0 +1,7 @@
+Patchwork-Approved: sha256:5c6c3059c349da812ce3dc390c9d1ef172a67fc00cf99e47c4437abe29ad3d22
+Status: FAIL
+Session: c68f85c5-24ca-402c-bf2c-5149847364e5
+Chain: INVALID (103 events, tip: sha256:79bed551e0812c6a68ca699b3e22144965c21e32b2d3cbf4ba913316762c6371)
+Risk: 0 critical, 2 high, 69 medium
+Policy: system:/Library/Patchwork/policy.yml
+Failures: chain_integrity_failure, policy_denials_present
