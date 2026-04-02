@@ -42,7 +42,7 @@ describe("init --pretool flags", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 	});
 
@@ -54,7 +54,7 @@ describe("init --pretool flags", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS=600");
 	});
 
@@ -106,7 +106,7 @@ describe("init --pretool flags", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 		expect(output.join("\n")).toContain("updated");
 	});
@@ -130,7 +130,7 @@ describe("init --pretool flags", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("patchwork hook pre-tool");
 	});
 
@@ -144,7 +144,7 @@ describe("init --pretool flags", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_DEST=both");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_FILE=/var/log/patchwork/pretool.jsonl");
@@ -175,7 +175,7 @@ describe("init --pretool flags", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES=1048576");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES=10");
 	});
@@ -211,7 +211,7 @@ describe("init --pretool flags", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_LOCK_MODE=rotate-only");
 		expect(cmd).toContain("patchwork hook pre-tool");
 	});
@@ -248,7 +248,7 @@ describe("init --strict-profile", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS=500");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
@@ -268,7 +268,7 @@ describe("init --strict-profile", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS=900");
 		expect(cmd).not.toContain("PATCHWORK_PRETOOL_WARN_MS=500");
 		// fail-closed and telemetry still present
@@ -285,7 +285,7 @@ describe("init --strict-profile", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		// audit mode: no fail-closed prefix
 		expect(cmd).not.toContain("PATCHWORK_PRETOOL_FAIL_CLOSED");
 		// telemetry and warn still present
@@ -300,7 +300,7 @@ describe("init --strict-profile", () => {
 		]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("patchwork hook pre-tool");
 	});
 
@@ -309,7 +309,7 @@ describe("init --strict-profile", () => {
 		await runInit(["claude-code", "--project", tmpDir]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		let settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		expect(settings.hooks.PreToolUse[0].command).toContain("patchwork hook pre-tool");
+		expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain("patchwork hook pre-tool");
 
 		// Re-run with strict
 		const { output } = await runInit([
@@ -319,7 +319,7 @@ describe("init --strict-profile", () => {
 		]);
 		settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		expect(settings.hooks.PreToolUse).toHaveLength(1);
-		expect(settings.hooks.PreToolUse[0].command).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
+		expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 		expect(output.join("\n")).toContain("updated");
 	});
 });
