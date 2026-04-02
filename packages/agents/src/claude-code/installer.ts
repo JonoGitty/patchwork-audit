@@ -131,56 +131,56 @@ function buildHooks(binPath?: string, options?: InstallOptions) {
 			{
 				type: "command",
 				command: preToolCmd,
-				timeout: 1500,
+				timeout: 2000,
 			},
 		],
 		PostToolUse: [
 			{
 				type: "command",
 				command: `${cmd} hook post-tool`,
-				timeout: 1000,
+				timeout: 2000,
 			},
 		],
 		PostToolUseFailure: [
 			{
 				type: "command",
 				command: `${cmd} hook post-tool-failure`,
-				timeout: 1000,
+				timeout: 2000,
 			},
 		],
 		SessionStart: [
 			{
 				type: "command",
 				command: `${cmd} hook session-start`,
-				timeout: 500,
+				timeout: 3000,
 			},
 		],
 		SessionEnd: [
 			{
 				type: "command",
 				command: `${cmd} hook session-end`,
-				timeout: 500,
+				timeout: 1500,
 			},
 		],
 		UserPromptSubmit: [
 			{
 				type: "command",
 				command: `${cmd} hook prompt-submit`,
-				timeout: 500,
+				timeout: 1500,
 			},
 		],
 		SubagentStart: [
 			{
 				type: "command",
 				command: `${cmd} hook subagent-start`,
-				timeout: 500,
+				timeout: 1500,
 			},
 		],
 		SubagentStop: [
 			{
 				type: "command",
 				command: `${cmd} hook subagent-stop`,
-				timeout: 500,
+				timeout: 1500,
 			},
 		],
 	};

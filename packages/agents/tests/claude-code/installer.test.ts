@@ -431,29 +431,29 @@ describe("installer hook timeouts", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("E: PreToolUse timeout is 1500ms, others unchanged", () => {
+	it("E: PreToolUse timeout is 2000ms, PostToolUse 2000ms, others 1500ms+", () => {
 		installClaudeCodeHooks(projectPath);
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 
-		// PreToolUse should be 1500ms
+		// PreToolUse should be 2000ms
 		const preToolHook = settings.hooks.PreToolUse[0];
-		expect(preToolHook.timeout).toBe(1500);
+		expect(preToolHook.timeout).toBe(2000);
 
-		// PostToolUse stays at 1000ms
+		// PostToolUse should be 2000ms
 		const postToolHook = settings.hooks.PostToolUse[0];
-		expect(postToolHook.timeout).toBe(1000);
+		expect(postToolHook.timeout).toBe(2000);
 
-		// SessionStart stays at 500ms
+		// SessionStart should be 3000ms
 		const sessionStartHook = settings.hooks.SessionStart[0];
-		expect(sessionStartHook.timeout).toBe(500);
+		expect(sessionStartHook.timeout).toBe(3000);
 
-		// SessionEnd stays at 500ms
+		// SessionEnd should be 1500ms
 		const sessionEndHook = settings.hooks.SessionEnd[0];
-		expect(sessionEndHook.timeout).toBe(500);
+		expect(sessionEndHook.timeout).toBe(1500);
 
-		// UserPromptSubmit stays at 500ms
+		// UserPromptSubmit should be 1500ms
 		const promptHook = settings.hooks.UserPromptSubmit[0];
-		expect(promptHook.timeout).toBe(500);
+		expect(promptHook.timeout).toBe(1500);
 	});
 });
