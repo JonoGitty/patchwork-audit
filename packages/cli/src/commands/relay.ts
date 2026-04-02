@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync, readFileSync } from "node:fs";
+import { connect } from "node:net";
 import {
 	RelayDaemon,
 	pingRelay,
@@ -8,6 +9,9 @@ import {
 	RELAY_SOCKET_PATH,
 	RELAY_LOG_PATH,
 	RELAY_PID_PATH,
+	RELAY_PROTOCOL_VERSION,
+	type ChainStateResponse,
+	type SealStatusResponse,
 } from "@patchwork/core";
 
 export const relayCommand = new Command("relay")
@@ -50,60 +54,60 @@ export const relayCommand = new Command("relay")
 				);
 
 				// Check PID file
-				let pid: string | null = null;
 				if (existsSync(RELAY_PID_PATH)) {
-					pid = readFileSync(RELAY_PID_PATH, "utf-8").trim();
+					const pid = readFileSync(RELAY_PID_PATH, "utf-8").trim();
 					console.log(`  PID:        ${chalk.dim(pid)}`);
 				}
 
-				// Ping the daemon
-				if (socketExists) {
-					const resp = await pingRelay();
-					if (resp?.ok) {
-						console.log(`  Status:     ${chalk.green("running")}`);
-						if (resp.relay_hash) {
-							console.log(`  Chain tip:  ${chalk.dim(resp.relay_hash.slice(0, 30) + "...")}`);
-						}
-					} else {
-						console.log(`  Status:     ${chalk.red("unreachable")}`);
-					}
-				} else {
+				if (!socketExists) {
 					console.log(`  Status:     ${chalk.yellow("not installed")}`);
+					return;
 				}
 
-				// Check relay log
-				if (existsSync(RELAY_LOG_PATH)) {
-					const content = readFileSync(RELAY_LOG_PATH, "utf-8");
-					const lines = content.split("\n").filter((l) => l.trim());
-					let eventCount = 0;
-					let heartbeatCount = 0;
-					let lastHeartbeat: string | null = null;
+				// Query daemon state via socket (avoids reading entire log)
+				const chainState = await queryRelay<ChainStateResponse>("get_chain_state");
+				const sealStatus = await queryRelay<SealStatusResponse>("seal_status");
 
-					for (const line of lines) {
-						try {
-							const parsed = JSON.parse(line);
-							if (parsed.type === "heartbeat") {
-								heartbeatCount++;
-								lastHeartbeat = parsed.timestamp;
-							} else {
-								eventCount++;
-							}
-						} catch {
-							// Skip corrupt lines
-						}
-					}
+				if (!chainState?.ok) {
+					console.log(`  Status:     ${chalk.red("unreachable")}`);
+					return;
+				}
 
-					console.log(`\n  Relay log:  ${chalk.dim(RELAY_LOG_PATH)}`);
-					console.log(`  Events:     ${chalk.bold(String(eventCount))}`);
-					console.log(`  Heartbeats: ${chalk.dim(String(heartbeatCount))}`);
-					if (lastHeartbeat) {
-						const age = Date.now() - new Date(lastHeartbeat).getTime();
-						const ageStr = age < 60_000
-							? `${Math.round(age / 1000)}s ago`
-							: `${Math.round(age / 60_000)}m ago`;
-						const ageColor = age < 60_000 ? chalk.green : age < 120_000 ? chalk.yellow : chalk.red;
-						console.log(`  Last beat:  ${ageColor(ageStr)}`);
+				console.log(`  Status:     ${chalk.green("running")}`);
+				if (chainState.chain_tip) {
+					console.log(`  Chain tip:  ${chalk.dim(chainState.chain_tip.slice(0, 30) + "...")}`);
+				}
+
+				console.log(`\n  Relay log:  ${chalk.dim(RELAY_LOG_PATH)}`);
+				console.log(`  Events:     ${chalk.bold(String(chainState.event_count))}`);
+
+				// Heartbeat freshness
+				if (chainState.last_heartbeat) {
+					const age = Date.now() - chainState.last_heartbeat;
+					const ageStr = age < 60_000
+						? `${Math.round(age / 1000)}s ago`
+						: `${Math.round(age / 60_000)}m ago`;
+					const ageColor = age < 60_000 ? chalk.green : age < 120_000 ? chalk.yellow : chalk.red;
+					console.log(`  Last beat:  ${ageColor(ageStr)}`);
+				}
+
+				// Uptime
+				const uptimeMs = chainState.uptime_ms;
+				const uptimeH = Math.floor(uptimeMs / 3_600_000);
+				const uptimeM = Math.floor((uptimeMs % 3_600_000) / 60_000);
+				console.log(`  Uptime:     ${chalk.dim(`${uptimeH}h ${uptimeM}m`)}`);
+
+				// Seal info
+				if (sealStatus?.ok) {
+					console.log(`\n  Seals:      ${chalk.bold(String(sealStatus.seals_total))}`);
+					if (sealStatus.last_seal_at) {
+						const sealAge = Date.now() - new Date(sealStatus.last_seal_at).getTime();
+						const sealAgeStr = sealAge < 60_000
+							? `${Math.round(sealAge / 1000)}s ago`
+							: `${Math.round(sealAge / 60_000)}m ago`;
+						console.log(`  Last seal:  ${chalk.dim(sealAgeStr)} (${sealStatus.last_seal_events} events)`);
 					}
+					console.log(`  Auto-seal:  ${sealStatus.auto_seal_enabled ? chalk.green("on") : chalk.yellow("off")} (every ${chainState.auto_seal_interval_minutes}m)`);
 				}
 
 				// Check divergence
@@ -152,3 +156,41 @@ export const relayCommand = new Command("relay")
 				);
 			}),
 	);
+
+/** Query the relay daemon via socket. Returns null if unreachable. */
+function queryRelay<T>(type: string): Promise<T | null> {
+	return new Promise((resolve) => {
+		if (!existsSync(RELAY_SOCKET_PATH)) {
+			resolve(null);
+			return;
+		}
+
+		const timer = setTimeout(() => {
+			resolve(null);
+		}, 2_000);
+
+		const socket = connect(RELAY_SOCKET_PATH, () => {
+			const msg = JSON.stringify({
+				protocol_version: RELAY_PROTOCOL_VERSION,
+				type,
+				timestamp: new Date().toISOString(),
+			}) + "\n";
+			socket.write(msg);
+		});
+
+		socket.on("data", (chunk) => {
+			clearTimeout(timer);
+			try {
+				resolve(JSON.parse(chunk.toString().trim()));
+			} catch {
+				resolve(null);
+			}
+			socket.destroy();
+		});
+
+		socket.on("error", () => {
+			clearTimeout(timer);
+			resolve(null);
+		});
+	});
+}

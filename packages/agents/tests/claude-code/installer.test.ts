@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { installClaudeCodeHooks, uninstallClaudeCodeHooks } from "../../src/claude-code/installer.js";
 
+/** Helper: extract the command string from a hook matcher group. */
+function getCmd(matcherGroup: any): string {
+	return matcherGroup.hooks[0].command;
+}
+
 describe("installClaudeCodeHooks", () => {
 	let tmpDir: string;
 	let projectPath: string;
@@ -37,16 +42,19 @@ describe("installClaudeCodeHooks", () => {
 		expect(result.hooksInstalled).toContain("UserPromptSubmit");
 	});
 
-	it("hooks use patchwork hook commands", () => {
+	it("hooks use correct nested matcher format", () => {
 		installClaudeCodeHooks(projectPath);
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 
 		for (const hookList of Object.values(settings.hooks) as any[]) {
-			for (const hook of hookList) {
-				expect(hook.command).toContain("patchwork hook ");
-				expect(hook.type).toBe("command");
-				expect(hook.timeout).toBeGreaterThan(0);
+			for (const matcherGroup of hookList) {
+				expect(matcherGroup.matcher).toBe("");
+				expect(Array.isArray(matcherGroup.hooks)).toBe(true);
+				expect(matcherGroup.hooks.length).toBe(1);
+				expect(matcherGroup.hooks[0].command).toContain("patchwork hook ");
+				expect(matcherGroup.hooks[0].type).toBe("command");
+				expect(matcherGroup.hooks[0].timeout).toBeGreaterThan(0);
 			}
 		}
 	});
@@ -72,7 +80,7 @@ describe("installClaudeCodeHooks", () => {
 			join(claudeDir, "settings.json"),
 			JSON.stringify({
 				hooks: {
-					PostToolUse: [{ type: "command", command: "other-tool log", timeout: 500 }],
+					PostToolUse: [{ matcher: "", hooks: [{ type: "command", command: "other-tool log", timeout: 500 }] }],
 				},
 			}),
 		);
@@ -82,8 +90,8 @@ describe("installClaudeCodeHooks", () => {
 
 		// Should have both the existing hook and our new hook
 		expect(settings.hooks.PostToolUse).toHaveLength(2);
-		expect(settings.hooks.PostToolUse[0].command).toBe("other-tool log");
-		expect(settings.hooks.PostToolUse[1].command).toContain("patchwork hook");
+		expect(getCmd(settings.hooks.PostToolUse[0])).toBe("other-tool log");
+		expect(getCmd(settings.hooks.PostToolUse[1])).toContain("patchwork hook");
 	});
 
 	it("does not duplicate hooks on repeated install", () => {
@@ -97,10 +105,35 @@ describe("installClaudeCodeHooks", () => {
 		// Each event should have exactly 1 patchwork hook
 		for (const hookList of Object.values(settings.hooks) as any[]) {
 			const patchworkHooks = hookList.filter(
-				(h: any) => typeof h.command === "string" && h.command.includes("patchwork hook"),
+				(mg: any) => Array.isArray(mg.hooks) && mg.hooks.some(
+					(h: any) => typeof h.command === "string" && h.command.includes("patchwork hook"),
+				),
 			);
 			expect(patchworkHooks).toHaveLength(1);
 		}
+	});
+
+	it("upgrades legacy flat format to nested format", () => {
+		const claudeDir = join(projectPath, ".claude");
+		mkdirSync(claudeDir, { recursive: true });
+		// Legacy flat format (the old broken format)
+		writeFileSync(
+			join(claudeDir, "settings.json"),
+			JSON.stringify({
+				hooks: {
+					PostToolUse: [{ type: "command", command: "patchwork hook post-tool", timeout: 2000 }],
+				},
+			}),
+		);
+
+		const result = installClaudeCodeHooks(projectPath);
+		expect(result.hooksUpdated).toContain("PostToolUse");
+
+		const settings = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf-8"));
+		// Should be upgraded to nested format
+		expect(settings.hooks.PostToolUse).toHaveLength(1);
+		expect(settings.hooks.PostToolUse[0].matcher).toBe("");
+		expect(Array.isArray(settings.hooks.PostToolUse[0].hooks)).toBe(true);
 	});
 });
 
@@ -129,13 +162,36 @@ describe("uninstallClaudeCodeHooks", () => {
 		// All hook arrays should be empty or removed
 		for (const hookList of Object.values(settings.hooks) as any[]) {
 			const patchworkHooks = hookList.filter(
-				(h: any) => typeof h.command === "string" && h.command.includes("patchwork hook"),
+				(mg: any) => Array.isArray(mg.hooks) && mg.hooks.some(
+					(h: any) => typeof h.command === "string" && h.command.includes("patchwork hook"),
+				),
 			);
 			expect(patchworkHooks).toHaveLength(0);
 		}
 	});
 
 	it("preserves other tools' hooks", () => {
+		const claudeDir = join(projectPath, ".claude");
+		mkdirSync(claudeDir, { recursive: true });
+		writeFileSync(
+			join(claudeDir, "settings.json"),
+			JSON.stringify({
+				hooks: {
+					PostToolUse: [
+						{ matcher: "", hooks: [{ type: "command", command: "other-tool log", timeout: 500 }] },
+						{ matcher: "", hooks: [{ type: "command", command: "patchwork hook post-tool", timeout: 1000 }] },
+					],
+				},
+			}),
+		);
+
+		uninstallClaudeCodeHooks(projectPath);
+		const settings = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf-8"));
+		expect(settings.hooks.PostToolUse).toHaveLength(1);
+		expect(getCmd(settings.hooks.PostToolUse[0])).toBe("other-tool log");
+	});
+
+	it("removes legacy flat-format patchwork hooks", () => {
 		const claudeDir = join(projectPath, ".claude");
 		mkdirSync(claudeDir, { recursive: true });
 		writeFileSync(
@@ -150,7 +206,8 @@ describe("uninstallClaudeCodeHooks", () => {
 			}),
 		);
 
-		uninstallClaudeCodeHooks(projectPath);
+		const result = uninstallClaudeCodeHooks(projectPath);
+		expect(result.success).toBe(true);
 		const settings = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf-8"));
 		expect(settings.hooks.PostToolUse).toHaveLength(1);
 		expect(settings.hooks.PostToolUse[0].command).toBe("other-tool log");
@@ -182,13 +239,13 @@ describe("installer PreToolUse options", () => {
 		});
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = getCmd(settings.hooks.PreToolUse[0]);
 		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS=500");
 		expect(cmd).toContain("patchwork hook pre-tool");
 
 		// Other hooks should not have env prefixes
-		const postCmd = settings.hooks.PostToolUse[0].command;
+		const postCmd = getCmd(settings.hooks.PostToolUse[0]);
 		expect(postCmd).toContain("patchwork hook post-tool");
 	});
 
@@ -196,7 +253,7 @@ describe("installer PreToolUse options", () => {
 		installClaudeCodeHooks(projectPath);
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = getCmd(settings.hooks.PreToolUse[0]);
 		expect(cmd).toContain("patchwork hook pre-tool");
 		expect(cmd).not.toContain("PATCHWORK_PRETOOL");
 	});
@@ -205,15 +262,13 @@ describe("installer PreToolUse options", () => {
 		installClaudeCodeHooks(projectPath, undefined, { pretoolFailClosed: true });
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = getCmd(settings.hooks.PreToolUse[0]);
 		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 		expect(cmd).toContain("patchwork hook pre-tool");
 	});
 
 	it("C: re-running install with prefixed command does not duplicate", () => {
-		// First install with options
 		installClaudeCodeHooks(projectPath, undefined, { pretoolFailClosed: true });
-		// Second install without options — should detect existing prefixed hook
 		const result2 = installClaudeCodeHooks(projectPath);
 		expect(result2.hooksInstalled).not.toContain("PreToolUse");
 
@@ -233,7 +288,6 @@ describe("installer PreToolUse options", () => {
 
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		// PreToolUse should be removed entirely (no hooks left)
 		expect(settings.hooks.PreToolUse).toBeUndefined();
 	});
 });
@@ -252,21 +306,19 @@ describe("upgrade-in-place hook reconfiguration", () => {
 	});
 
 	it("A: existing unprefixed PreToolUse updates to fail-closed on reinstall", () => {
-		// Install without options
 		installClaudeCodeHooks(projectPath);
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		let settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		expect(settings.hooks.PreToolUse[0].command).toContain("patchwork hook pre-tool");
+		expect(getCmd(settings.hooks.PreToolUse[0])).toContain("patchwork hook pre-tool");
 
-		// Reinstall with fail-closed
 		const result = installClaudeCodeHooks(projectPath, undefined, { pretoolFailClosed: true });
 		expect(result.hooksInstalled).not.toContain("PreToolUse");
 		expect(result.hooksUpdated).toContain("PreToolUse");
 
 		settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		expect(settings.hooks.PreToolUse).toHaveLength(1);
-		expect(settings.hooks.PreToolUse[0].command).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
-		expect(settings.hooks.PreToolUse[0].command).toContain("patchwork hook pre-tool");
+		expect(getCmd(settings.hooks.PreToolUse[0])).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
+		expect(getCmd(settings.hooks.PreToolUse[0])).toContain("patchwork hook pre-tool");
 	});
 
 	it("B: existing prefixed PreToolUse updates when warn-ms changes", () => {
@@ -276,7 +328,6 @@ describe("upgrade-in-place hook reconfiguration", () => {
 		});
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 
-		// Change warn-ms
 		const result = installClaudeCodeHooks(projectPath, undefined, {
 			pretoolFailClosed: true,
 			pretoolWarnMs: 200,
@@ -286,8 +337,8 @@ describe("upgrade-in-place hook reconfiguration", () => {
 
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		expect(settings.hooks.PreToolUse).toHaveLength(1);
-		expect(settings.hooks.PreToolUse[0].command).toContain("PATCHWORK_PRETOOL_WARN_MS=200");
-		expect(settings.hooks.PreToolUse[0].command).not.toContain("500");
+		expect(getCmd(settings.hooks.PreToolUse[0])).toContain("PATCHWORK_PRETOOL_WARN_MS=200");
+		expect(getCmd(settings.hooks.PreToolUse[0])).not.toContain("500");
 	});
 
 	it("C: reinstall with identical options does not modify or duplicate", () => {
@@ -306,16 +357,15 @@ describe("upgrade-in-place hook reconfiguration", () => {
 		installClaudeCodeHooks(projectPath);
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const before = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const postCmdBefore = before.hooks.PostToolUse[0].command;
-		const sessionCmdBefore = before.hooks.SessionStart[0].command;
+		const postCmdBefore = getCmd(before.hooks.PostToolUse[0]);
+		const sessionCmdBefore = getCmd(before.hooks.SessionStart[0]);
 
-		// Update PreToolUse only
 		const result = installClaudeCodeHooks(projectPath, undefined, { pretoolFailClosed: true });
 		expect(result.hooksUpdated).toEqual(["PreToolUse"]);
 
 		const after = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		expect(after.hooks.PostToolUse[0].command).toBe(postCmdBefore);
-		expect(after.hooks.SessionStart[0].command).toBe(sessionCmdBefore);
+		expect(getCmd(after.hooks.PostToolUse[0])).toBe(postCmdBefore);
+		expect(getCmd(after.hooks.SessionStart[0])).toBe(sessionCmdBefore);
 	});
 
 	it("downgrade: removing options reverts to plain command", () => {
@@ -329,7 +379,7 @@ describe("upgrade-in-place hook reconfiguration", () => {
 
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = getCmd(settings.hooks.PreToolUse[0]);
 		expect(cmd).toContain("patchwork hook pre-tool");
 		expect(cmd).not.toContain("PATCHWORK_PRETOOL");
 	});
@@ -342,8 +392,8 @@ describe("upgrade-in-place hook reconfiguration", () => {
 			JSON.stringify({
 				hooks: {
 					PreToolUse: [
-						{ type: "command", command: "other-tool check", timeout: 500 },
-						{ type: "command", command: "patchwork hook pre-tool", timeout: 1500 },
+						{ matcher: "", hooks: [{ type: "command", command: "other-tool check", timeout: 500 }] },
+						{ matcher: "", hooks: [{ type: "command", command: "patchwork hook pre-tool", timeout: 1500 }] },
 					],
 				},
 			}),
@@ -354,8 +404,8 @@ describe("upgrade-in-place hook reconfiguration", () => {
 
 		const settings = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf-8"));
 		expect(settings.hooks.PreToolUse).toHaveLength(2);
-		expect(settings.hooks.PreToolUse[0].command).toBe("other-tool check");
-		expect(settings.hooks.PreToolUse[1].command).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
+		expect(getCmd(settings.hooks.PreToolUse[0])).toBe("other-tool check");
+		expect(getCmd(settings.hooks.PreToolUse[1])).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 	});
 });
 
@@ -376,7 +426,7 @@ describe("installer policyMode option", () => {
 		installClaudeCodeHooks(projectPath, undefined, { policyMode: "fail-closed" });
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = getCmd(settings.hooks.PreToolUse[0]);
 		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 		expect(cmd).toContain("patchwork hook pre-tool");
 	});
@@ -385,7 +435,7 @@ describe("installer policyMode option", () => {
 		installClaudeCodeHooks(projectPath, undefined, { policyMode: "audit" });
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = getCmd(settings.hooks.PreToolUse[0]);
 		expect(cmd).toContain("patchwork hook pre-tool");
 	});
 
@@ -406,14 +456,14 @@ describe("installer policyMode option", () => {
 		expect(result.success).toBe(true);
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		expect(settings.hooks.PreToolUse[0].command).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
+		expect(getCmd(settings.hooks.PreToolUse[0])).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 	});
 
 	it("pretoolTelemetryJson adds PATCHWORK_PRETOOL_TELEMETRY_JSON=1 prefix", () => {
 		installClaudeCodeHooks(projectPath, undefined, { pretoolTelemetryJson: true });
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const cmd = settings.hooks.PreToolUse[0].command;
+		const cmd = getCmd(settings.hooks.PreToolUse[0]);
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
 	});
 });
@@ -436,24 +486,10 @@ describe("installer hook timeouts", () => {
 		const settingsPath = join(projectPath, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 
-		// PreToolUse should be 2000ms
-		const preToolHook = settings.hooks.PreToolUse[0];
-		expect(preToolHook.timeout).toBe(2000);
-
-		// PostToolUse should be 2000ms
-		const postToolHook = settings.hooks.PostToolUse[0];
-		expect(postToolHook.timeout).toBe(2000);
-
-		// SessionStart should be 3000ms
-		const sessionStartHook = settings.hooks.SessionStart[0];
-		expect(sessionStartHook.timeout).toBe(3000);
-
-		// SessionEnd should be 1500ms
-		const sessionEndHook = settings.hooks.SessionEnd[0];
-		expect(sessionEndHook.timeout).toBe(1500);
-
-		// UserPromptSubmit should be 1500ms
-		const promptHook = settings.hooks.UserPromptSubmit[0];
-		expect(promptHook.timeout).toBe(1500);
+		expect(settings.hooks.PreToolUse[0].hooks[0].timeout).toBe(2000);
+		expect(settings.hooks.PostToolUse[0].hooks[0].timeout).toBe(2000);
+		expect(settings.hooks.SessionStart[0].hooks[0].timeout).toBe(3000);
+		expect(settings.hooks.SessionEnd[0].hooks[0].timeout).toBe(1500);
+		expect(settings.hooks.UserPromptSubmit[0].hooks[0].timeout).toBe(1500);
 	});
 });

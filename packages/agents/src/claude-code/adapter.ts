@@ -12,7 +12,7 @@ import {
 	SqliteStore,
 	loadActivePolicy,
 	getHomeDir,
-	sendToRelay,
+	sendToRelayAsync,
 } from "@patchwork/core";
 import { isAbsolute, relative, dirname, join } from "node:path";
 import {
@@ -140,9 +140,16 @@ function recordDivergence(errorMessage: string, markerPath?: string): void {
 	}
 }
 
+/** Store extended with a flush method for awaiting pending relay sends. */
+interface FlushableStore extends Store {
+	/** Await any pending relay send. Call before process exit in hooks. */
+	flushRelay(): Promise<void>;
+}
+
 /** Wraps a primary and optional secondary store for triple-write (JSONL + SQLite + relay). */
-function createDualWriter(primary: Store, secondary: Store | null): Store {
+function createDualWriter(primary: Store, secondary: Store | null): FlushableStore {
 	let sqliteErrorCount = 0;
+	let pendingRelay: Promise<void> = Promise.resolve();
 
 	return {
 		append(event: AuditEvent) {
@@ -160,14 +167,21 @@ function createDualWriter(primary: Store, secondary: Store | null): Store {
 				}
 			}
 
-			// Layer 2: fire-and-forget relay to root-owned audit log.
-			// The relay client is non-blocking and handles its own
-			// divergence tracking. If the relay daemon isn't running,
-			// this is a silent no-op.
+			// Layer 2: relay to root-owned audit log.
+			// Uses sendToRelayAsync so hook processes stay alive long
+			// enough for the socket write to complete. Flush via
+			// flushRelay() before process exit.
 			try {
-				sendToRelay(event as unknown as Record<string, unknown>);
+				pendingRelay = sendToRelayAsync(event as unknown as Record<string, unknown>);
 			} catch {
 				// Relay must never block or break the hook pipeline
+			}
+		},
+		async flushRelay() {
+			try {
+				await pendingRelay;
+			} catch {
+				// Best effort — relay flush failure must not break hooks
 			}
 		},
 		readAll: () => primary.readAll(),
@@ -195,35 +209,48 @@ export async function handleClaudeCodeHook(input: ClaudeCodeHookInput): Promise<
 	const store = createDualWriter(jsonlStore, sqliteStore);
 	const hookEvent = input.hook_event_name;
 
+	let result: ClaudeCodeHookOutput | null;
 	switch (hookEvent) {
 		case "SessionStart":
-			return handleSessionStart(store, input);
+			result = handleSessionStart(store, input);
+			break;
 
 		case "SessionEnd":
-			return handleSessionEnd(store, input);
+			result = handleSessionEnd(store, input);
+			break;
 
 		case "UserPromptSubmit":
-			return handlePromptSubmit(store, input);
+			result = handlePromptSubmit(store, input);
+			break;
 
 		case "PreToolUse":
-			return handlePreToolUse(store, input);
+			result = handlePreToolUse(store, input);
+			break;
 
 		case "PostToolUse":
-			return handlePostToolUse(store, input);
+			result = await handlePostToolUse(store, input);
+			break;
 
 		case "PostToolUseFailure":
-			return handlePostToolUse(store, input, "failed");
+			result = await handlePostToolUse(store, input, "failed");
+			break;
 
 		case "SubagentStart":
-			return handleSubagentStart(store, input);
+			result = handleSubagentStart(store, input);
+			break;
 
 		case "SubagentStop":
-			return handleSubagentStop(store, input);
+			result = handleSubagentStop(store, input);
+			break;
 
 		default:
 			// Log but don't process unknown events
 			return null;
 	}
+
+	// Ensure relay send completes before the hook process exits.
+	await store.flushRelay();
+	return result;
 }
 
 function handleSessionStart(store: Store, input: ClaudeCodeHookInput): null {

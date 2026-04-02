@@ -86,6 +86,7 @@ export {
 } from "./relay/daemon.js";
 export {
 	sendToRelay,
+	sendToRelayAsync,
 	sendToRelaySync,
 	pingRelay,
 	readRelayDivergenceMarker,

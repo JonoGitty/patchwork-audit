@@ -12,13 +12,38 @@ PLIST_SRC="/tmp/com.patchwork.relay.plist"
 PLIST_DST="/Library/LaunchDaemons/com.patchwork.relay.plist"
 NODE="/Users/jonogompels/local/nodejs/node-v22.16.0-darwin-x64/bin/node"
 CLI="/Users/jonogompels/AI/codex-audit/packages/cli/dist/index.js"
+CONFIG="/Library/Patchwork/relay-config.json"
 
-# Generate plist if not already in /tmp
-if [[ ! -f "$PLIST_SRC" ]]; then
-    sed -e "s|__NODE_PATH__|$NODE|g" \
-        -e "s|__PATCHWORK_CLI__|$CLI|g" \
-        "$(dirname "$0")/com.patchwork.relay.plist" > "$PLIST_SRC"
+# Ensure data directory
+mkdir -p /Library/Patchwork
+chown root:wheel /Library/Patchwork
+chmod 755 /Library/Patchwork
+
+# Write default config if missing
+if [[ ! -f "$CONFIG" ]]; then
+    cat > "$CONFIG" <<'EOF'
+{
+  "auto_seal": {
+    "enabled": true,
+    "interval_minutes": 15,
+    "min_events_between_seals": 1
+  },
+  "witness": {
+    "enabled": false,
+    "endpoints": [],
+    "quorum": 1
+  }
+}
+EOF
+    chown root:wheel "$CONFIG"
+    chmod 644 "$CONFIG"
+    echo "Wrote default config → $CONFIG"
 fi
+
+# Generate plist
+sed -e "s|__NODE_PATH__|$NODE|g" \
+    -e "s|__PATCHWORK_CLI__|$CLI|g" \
+    "$(dirname "$0")/com.patchwork.relay.plist" > "$PLIST_SRC"
 
 # Unload if already loaded
 launchctl unload "$PLIST_DST" 2>/dev/null || true

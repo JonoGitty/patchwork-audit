@@ -35,6 +35,8 @@ export interface CommitAttestationParams {
 	projectRoot: string;
 	store: Store;
 	toolVersion: string;
+	/** Override relay socket path (for testing). */
+	relaySocketPath?: string;
 }
 
 /**
@@ -42,7 +44,7 @@ export interface CommitAttestationParams {
  * Tries the relay signing proxy first (layer 5), falls back to local keyring.
  */
 export async function generateCommitAttestation(params: CommitAttestationParams): Promise<CommitAttestation> {
-	const { commitSha, branch, sessionId, projectRoot, store, toolVersion } = params;
+	const { commitSha, branch, sessionId, projectRoot, store, toolVersion, relaySocketPath } = params;
 
 	// Query session events
 	let sessionEvents: AuditEvent[] = [];
@@ -107,6 +109,7 @@ export async function generateCommitAttestation(params: CommitAttestationParams)
 	try {
 		const signResult = await requestSignature(payloadStr, {
 			localKeyringPath: keyringDir(),
+			...(relaySocketPath !== undefined ? { socketPath: relaySocketPath } : {}),
 		});
 		artifact.signature = signResult.signature;
 		artifact.key_id = signResult.key_id;

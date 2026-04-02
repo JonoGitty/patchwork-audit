@@ -128,6 +128,8 @@ describe("generateCommitAttestation", () => {
 			projectRoot: "/tmp/project",
 			store,
 			toolVersion: "0.5.0-test",
+			// Skip relay so it uses the local test keyring
+			relaySocketPath: "/tmp/nonexistent-relay.sock",
 		});
 
 		expect(attestation.signature).toMatch(/^hmac-sha256:/);

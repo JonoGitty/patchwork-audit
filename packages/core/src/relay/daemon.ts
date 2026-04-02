@@ -21,6 +21,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	renameSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
@@ -48,6 +49,7 @@ import { loadRelayConfig, type RelayConfig } from "./config.js";
 import {
 	performAutoSealCycle,
 	readLastSeal,
+	RELAY_SEALS_PATH,
 	ROOT_KEYRING_PATH,
 	type SealState,
 } from "./auto-seal.js";
@@ -151,6 +153,19 @@ export class RelayDaemon {
 				this.log(`Recovered chain state: ${count} events, tip=${tip?.slice(0, 20) ?? "null"}`);
 			} catch {
 				this.log("WARNING: Could not read existing relay log — starting fresh");
+			}
+		}
+
+		// Recover seal count from seals log
+		const sealsPath = this.sealsPath ?? RELAY_SEALS_PATH;
+		if (existsSync(sealsPath)) {
+			try {
+				const content = readFileSync(sealsPath, "utf-8");
+				const lines = content.split("\n").filter((l) => l.trim().length > 0);
+				this.state.totalSeals = lines.length;
+				this.log(`Recovered ${lines.length} seals`);
+			} catch {
+				// Non-fatal
 			}
 		}
 	}
@@ -540,7 +555,12 @@ export class RelayDaemon {
 		}
 	}
 
-	/** Log to the daemon log file. */
+	/** Maximum daemon log size before rotation (100 KB). */
+	private static readonly LOG_MAX_BYTES = 100 * 1024;
+	/** Number of rotated daemon logs to keep. */
+	private static readonly LOG_MAX_FILES = 3;
+
+	/** Log to the daemon log file with rotation. */
 	private log(message: string): void {
 		const ts = new Date().toISOString();
 		const line = `${ts} [relay] ${message}\n`;
@@ -549,11 +569,46 @@ export class RelayDaemon {
 			if (!existsSync(logDir)) {
 				mkdirSync(logDir, { recursive: true, mode: 0o755 });
 			}
+
+			// Rotate if over size limit
+			if (existsSync(this.daemonLogPath)) {
+				try {
+					const { size } = statSync(this.daemonLogPath);
+					if (size > RelayDaemon.LOG_MAX_BYTES) {
+						this.rotateDaemonLog();
+					}
+				} catch { /* stat failed — write anyway */ }
+			}
+
 			appendFileSync(this.daemonLogPath, line, "utf-8");
 		} catch {
 			// Fall back to stderr if we can't write the log
 			process.stderr.write(line);
 		}
+	}
+
+	/** Rotate daemon log: active -> .1, .1 -> .2, etc. */
+	private rotateDaemonLog(): void {
+		const max = RelayDaemon.LOG_MAX_FILES;
+		const base = this.daemonLogPath;
+
+		// Delete oldest
+		const oldest = `${base}.${max}`;
+		if (existsSync(oldest)) {
+			try { unlinkSync(oldest); } catch { /* */ }
+		}
+
+		// Shift N-1 -> N, ..., 1 -> 2
+		for (let i = max - 1; i >= 1; i--) {
+			const src = `${base}.${i}`;
+			const dst = `${base}.${i + 1}`;
+			if (existsSync(src)) {
+				try { renameSync(src, dst); } catch { /* */ }
+			}
+		}
+
+		// Active -> .1
+		try { renameSync(base, `${base}.1`); } catch { /* */ }
 	}
 }
 

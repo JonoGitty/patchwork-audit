@@ -278,6 +278,79 @@ export function sendToRelaySync(
 }
 
 /**
+ * Send an audit event to the relay daemon and wait for completion.
+ *
+ * Unlike sendToRelay(), this returns a Promise that resolves when the
+ * write completes (or the timeout fires). Designed for short-lived
+ * processes (like hooks) where the process would otherwise exit before
+ * the async socket operations complete.
+ *
+ * @param event - The raw audit event (already serialized with hash chain)
+ * @param socketPath - Override the default socket path (for testing)
+ */
+export function sendToRelayAsync(
+	event: Record<string, unknown>,
+	socketPath?: string,
+): Promise<void> {
+	const sockPath = socketPath ?? RELAY_SOCKET_PATH;
+
+	if (!existsSync(sockPath)) {
+		return Promise.resolve();
+	}
+
+	const msg: RelayMessage = {
+		protocol_version: RELAY_PROTOCOL_VERSION,
+		type: "event",
+		timestamp: new Date().toISOString(),
+		payload: event,
+	};
+
+	const data = JSON.stringify(msg) + "\n";
+
+	return new Promise<void>((resolve) => {
+		const timer = setTimeout(() => {
+			recordRelayDivergence("Relay connection timed out");
+			try { socket.destroy(); } catch { /* */ }
+			resolve();
+		}, RELAY_TIMEOUT_MS);
+
+		const socket = connect(sockPath, () => {
+			socket.write(data, () => {
+				clearTimeout(timer);
+
+				// Read response (best effort) before resolving
+				socket.once("data", (chunk) => {
+					try {
+						const resp: RelayResponse = JSON.parse(chunk.toString().trim());
+						if (!resp.ok) {
+							recordRelayDivergence(`Relay rejected: ${resp.error}`);
+						}
+					} catch {
+						// Response parse failure — non-fatal
+					}
+					try { socket.destroy(); } catch { /* */ }
+					resolve();
+				});
+
+				// Resolve after short grace period if no response
+				const readTimer = setTimeout(() => {
+					try { socket.destroy(); } catch { /* */ }
+					resolve();
+				}, 100);
+				// Don't let the read timer block exit if we already resolved
+				if (readTimer.unref) readTimer.unref();
+			});
+		});
+
+		socket.on("error", (err) => {
+			clearTimeout(timer);
+			recordRelayDivergence(`Socket error: ${err.message}`);
+			resolve();
+		});
+	});
+}
+
+/**
  * Ping the relay daemon to check if it's running.
  * Returns the relay's current chain tip hash, or null if unreachable.
  */

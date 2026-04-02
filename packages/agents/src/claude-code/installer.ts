@@ -11,6 +11,19 @@ const CLAUDE_SETTINGS_PATH = join(CLAUDE_SETTINGS_DIR, "settings.json");
  */
 const PATCHWORK_HOOK_RE = /\bpatchwork hook\b/;
 
+/** A single hook handler within a matcher group. */
+interface HookHandler {
+	type: string;
+	command: string;
+	timeout: number;
+}
+
+/** A Claude Code hook matcher group — the format Claude Code actually expects. */
+interface HookMatcherGroup {
+	matcher: string;
+	hooks: HookHandler[];
+}
+
 /** Valid policy modes for PreToolUse enforcement. */
 export type PolicyMode = "audit" | "fail-closed";
 
@@ -126,63 +139,21 @@ function buildHooks(binPath?: string, options?: InstallOptions) {
 		? `${envParts.join(" ")} ${cmd} hook pre-tool`
 		: `${cmd} hook pre-tool`;
 
+	// Claude Code expects: event -> [{ matcher, hooks: [{ type, command, timeout }] }]
+	// matcher: "" matches all tools/events.
+	const wrap = (handler: HookHandler): HookMatcherGroup[] => [
+		{ matcher: "", hooks: [handler] },
+	];
+
 	return {
-		PreToolUse: [
-			{
-				type: "command",
-				command: preToolCmd,
-				timeout: 2000,
-			},
-		],
-		PostToolUse: [
-			{
-				type: "command",
-				command: `${cmd} hook post-tool`,
-				timeout: 2000,
-			},
-		],
-		PostToolUseFailure: [
-			{
-				type: "command",
-				command: `${cmd} hook post-tool-failure`,
-				timeout: 2000,
-			},
-		],
-		SessionStart: [
-			{
-				type: "command",
-				command: `${cmd} hook session-start`,
-				timeout: 3000,
-			},
-		],
-		SessionEnd: [
-			{
-				type: "command",
-				command: `${cmd} hook session-end`,
-				timeout: 1500,
-			},
-		],
-		UserPromptSubmit: [
-			{
-				type: "command",
-				command: `${cmd} hook prompt-submit`,
-				timeout: 1500,
-			},
-		],
-		SubagentStart: [
-			{
-				type: "command",
-				command: `${cmd} hook subagent-start`,
-				timeout: 1500,
-			},
-		],
-		SubagentStop: [
-			{
-				type: "command",
-				command: `${cmd} hook subagent-stop`,
-				timeout: 1500,
-			},
-		],
+		PreToolUse: wrap({ type: "command", command: preToolCmd, timeout: 2000 }),
+		PostToolUse: wrap({ type: "command", command: `${cmd} hook post-tool`, timeout: 2000 }),
+		PostToolUseFailure: wrap({ type: "command", command: `${cmd} hook post-tool-failure`, timeout: 2000 }),
+		SessionStart: wrap({ type: "command", command: `${cmd} hook session-start`, timeout: 3000 }),
+		SessionEnd: wrap({ type: "command", command: `${cmd} hook session-end`, timeout: 1500 }),
+		UserPromptSubmit: wrap({ type: "command", command: `${cmd} hook prompt-submit`, timeout: 1500 }),
+		SubagentStart: wrap({ type: "command", command: `${cmd} hook subagent-start`, timeout: 1500 }),
+		SubagentStop: wrap({ type: "command", command: `${cmd} hook subagent-stop`, timeout: 1500 }),
 	};
 }
 
@@ -244,22 +215,34 @@ export function installClaudeCodeHooks(
 
 		for (const [eventName, hookDefs] of Object.entries(PATCHWORK_HOOKS)) {
 			const existing = existingHooks[eventName] || [];
-			const desiredCmd = hookDefs[0].command;
+			const desiredCmd = hookDefs[0].hooks[0].command;
 
-			// Find existing patchwork hook entry (handles env-prefixed commands)
-			const patchworkIdx = existing.findIndex(
-				(h: any) => typeof h.command === "string" && PATCHWORK_HOOK_RE.test(h.command),
-			);
+			// Find existing patchwork matcher group (check nested hooks[].command)
+			const patchworkIdx = existing.findIndex((entry: any) => {
+				// Handle both new nested format and legacy flat format
+				if (Array.isArray(entry.hooks)) {
+					return entry.hooks.some(
+						(h: any) => typeof h.command === "string" && PATCHWORK_HOOK_RE.test(h.command),
+					);
+				}
+				// Legacy flat format: { type, command, timeout }
+				return typeof entry.command === "string" && PATCHWORK_HOOK_RE.test(entry.command);
+			});
 
 			if (patchworkIdx === -1) {
 				// No patchwork hook yet — append
 				existingHooks[eventName] = [...existing, ...hookDefs];
 				hooksInstalled.push(eventName);
 			} else {
-				// Patchwork hook exists — check if command needs updating
+				// Patchwork hook exists — replace with correct nested format
 				const current = existing[patchworkIdx] as any;
-				if (current.command !== desiredCmd) {
-					current.command = desiredCmd;
+				const currentCmd = Array.isArray(current.hooks)
+					? current.hooks[0]?.command
+					: current.command;
+
+				// Always replace to ensure correct nested structure
+				if (currentCmd !== desiredCmd || !Array.isArray(current.hooks)) {
+					existing[patchworkIdx] = hookDefs[0];
 					hooksUpdated.push(eventName);
 				}
 			}
@@ -306,9 +289,16 @@ export function uninstallClaudeCodeHooks(projectPath?: string): InstallResult {
 		const removed: string[] = [];
 
 		for (const [eventName, hookList] of Object.entries(hooks)) {
-			const filtered = hookList.filter(
-				(h: any) => !(typeof h.command === "string" && PATCHWORK_HOOK_RE.test(h.command)),
-			);
+			const filtered = hookList.filter((entry: any) => {
+				// Handle nested format: { matcher, hooks: [{ command }] }
+				if (Array.isArray(entry.hooks)) {
+					return !entry.hooks.some(
+						(h: any) => typeof h.command === "string" && PATCHWORK_HOOK_RE.test(h.command),
+					);
+				}
+				// Handle legacy flat format: { type, command }
+				return !(typeof entry.command === "string" && PATCHWORK_HOOK_RE.test(entry.command));
+			});
 			if (filtered.length !== hookList.length) {
 				removed.push(eventName);
 			}
