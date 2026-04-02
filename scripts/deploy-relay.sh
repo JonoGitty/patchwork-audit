@@ -10,9 +10,46 @@ fi
 
 PLIST_SRC="/tmp/com.patchwork.relay.plist"
 PLIST_DST="/Library/LaunchDaemons/com.patchwork.relay.plist"
-NODE="/Users/jonogompels/local/nodejs/node-v22.16.0-darwin-x64/bin/node"
-CLI="/Users/jonogompels/AI/codex-audit/packages/cli/dist/index.js"
 CONFIG="/Library/Patchwork/relay-config.json"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Dynamic node discovery — check cached path, then common locations
+NODE=""
+for candidate in \
+    "$(cat "$HOME/.patchwork/state/node-path" 2>/dev/null)" \
+    "$HOME/local/nodejs/"node-*/bin/node \
+    /usr/local/bin/node \
+    /opt/homebrew/bin/node; do
+    if [[ -n "$candidate" ]] && [[ -x "$candidate" ]] && "$candidate" --version &>/dev/null; then
+        NODE="$candidate"
+        break
+    fi
+done
+
+if [[ -z "$NODE" ]]; then
+    echo "Error: cannot find a working node binary"
+    exit 1
+fi
+
+# Dynamic CLI discovery — check cached path, then repo dist, then npm global
+CLI=""
+for candidate in \
+    "$(cat "$HOME/.patchwork/state/patchwork-path" 2>/dev/null)" \
+    "$SCRIPT_DIR/../packages/cli/dist/index.js" \
+    "$(dirname "$NODE")/patchwork"; do
+    if [[ -n "$candidate" ]] && [[ -f "$candidate" ]]; then
+        CLI="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+        break
+    fi
+done
+
+if [[ -z "$CLI" ]]; then
+    echo "Error: cannot find patchwork CLI"
+    exit 1
+fi
+
+echo "Node: $NODE"
+echo "CLI:  $CLI"
 
 # Ensure data directory
 mkdir -p /Library/Patchwork
@@ -36,7 +73,7 @@ if [[ ! -f "$CONFIG" ]]; then
 }
 EOF
     chown root:wheel "$CONFIG"
-    chmod 644 "$CONFIG"
+    chmod 640 "$CONFIG"
     echo "Wrote default config → $CONFIG"
 fi
 

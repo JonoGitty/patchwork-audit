@@ -25,6 +25,18 @@ fi
 USERS_CONF="$SYSTEM_DIR/users.conf"
 
 # ---------------------------------------------------------------------------
+# Safe home directory resolution (no eval)
+# ---------------------------------------------------------------------------
+get_user_home() {
+    local user="$1"
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        dscl . read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}'
+    else
+        getent passwd "$user" 2>/dev/null | cut -d: -f6
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Cross-platform helpers
 # ---------------------------------------------------------------------------
 
@@ -111,7 +123,7 @@ find_node_bin() {
     local user="${1:-}"
     local home
     if [[ -n "$user" ]]; then
-        home=$(eval echo "~$user")
+        home=$(get_user_home "$user")
     else
         home="$HOME"
     fi
@@ -146,7 +158,7 @@ list_human_users() {
             [[ "$shell" = "/usr/bin/false" ]] && continue
             [[ "$shell" = "/sbin/nologin" ]] && continue
             local home
-            home=$(eval echo "~$user" 2>/dev/null)
+            home=$(get_user_home "$user")
             [[ -d "$home" ]] || continue
             echo "$user"
         done
@@ -156,7 +168,7 @@ list_human_users() {
             if ($3 >= 1000 && $3 != 65534 && $7 !~ /nologin|false/) print $1
         }' | while read -r user; do
             local home
-            home=$(eval echo "~$user" 2>/dev/null)
+            home=$(get_user_home "$user")
             [[ -d "$home" ]] || continue
             echo "$user"
         done
@@ -203,7 +215,7 @@ list_enrolled_users() {
 install_user_hooks() {
     local user="$1"
     local home
-    home=$(eval echo "~$user")
+    home=$(get_user_home "$user")
 
     local claude_dir="$home/.claude"
     local settings="$claude_dir/settings.json"
@@ -286,7 +298,7 @@ PYEOF
 lock_user_settings() {
     local user="$1"
     local home
-    home=$(eval echo "~$user")
+    home=$(get_user_home "$user")
     local settings="$home/.claude/settings.json"
 
     if [[ -f "$settings" ]]; then
@@ -300,7 +312,7 @@ lock_user_settings() {
 unlock_user_settings() {
     local user="$1"
     local home
-    home=$(eval echo "~$user")
+    home=$(get_user_home "$user")
     local settings="$home/.claude/settings.json"
 
     if [[ -f "$settings" ]]; then
@@ -402,7 +414,7 @@ uninstall_system_daemon() {
 setup_user() {
     local user="$1"
     local home
-    home=$(eval echo "~$user")
+    home=$(get_user_home "$user")
 
     if [[ ! -d "$home" ]]; then
         echo "  [$user] SKIP — home directory not found: $home"
@@ -423,7 +435,7 @@ teardown_user() {
     # Remove user-level daemon/agent
     if [[ "$PLATFORM" == "Darwin" ]]; then
         local user_agent
-        user_agent=$(eval echo "~$user")/Library/LaunchAgents/com.patchwork.watchdog.plist
+        user_agent=$(get_user_home "$user")/Library/LaunchAgents/com.patchwork.watchdog.plist
         if [[ -f "$user_agent" ]]; then
             sudo -u "$user" launchctl unload "$user_agent" 2>/dev/null || true
             rm -f "$user_agent"
@@ -431,7 +443,7 @@ teardown_user() {
         fi
     elif [[ "$PLATFORM" == "Linux" ]]; then
         local user_home
-        user_home=$(eval echo "~$user")
+        user_home=$(get_user_home "$user")
         local user_timer="$user_home/.config/systemd/user/patchwork-watchdog.timer"
         if [[ -f "$user_timer" ]]; then
             sudo -u "$user" systemctl --user disable --now patchwork-watchdog.timer 2>/dev/null || true

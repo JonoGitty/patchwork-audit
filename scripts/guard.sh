@@ -52,10 +52,12 @@ if [ -z "$_NODE" ]; then
     fi
 fi
 
-# Store paths for hook-wrapper
+# Store paths for hook-wrapper (0600 — no reason for other users to read these)
 mkdir -p "$PATCHWORK_DIR/state" 2>/dev/null
+chmod 700 "$PATCHWORK_DIR/state" 2>/dev/null
 echo "$_NODE" > "$PATCHWORK_DIR/state/node-path"
 echo "$_PW" > "$PATCHWORK_DIR/state/patchwork-path"
+chmod 600 "$PATCHWORK_DIR/state/node-path" "$PATCHWORK_DIR/state/patchwork-path" 2>/dev/null
 
 # 2. Check audit store directory exists and is writable
 if [ ! -d "$PATCHWORK_DIR" ]; then
@@ -96,6 +98,7 @@ fi
 
 # 6. All checks passed — record guard success and forward to patchwork
 echo '{"status":"ok","ts":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$GUARD_STATUS_FILE"
+chmod 600 "$GUARD_STATUS_FILE" 2>/dev/null
 
 # Forward stdin to patchwork hook session-start
 # Strategy 1: tsx from repo source (most reliable)
