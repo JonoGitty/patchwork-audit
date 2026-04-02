@@ -28,6 +28,7 @@ import {
 import { dirname } from "node:path";
 import { AuditEventSchema } from "../schema/event.js";
 import { computeEventHash } from "../hash/chain.js";
+import { ensureKeyring, loadKeyById, signSeal } from "../hash/seal.js";
 import {
 	RELAY_SOCKET_PATH,
 	RELAY_LOG_PATH,
@@ -39,7 +40,17 @@ import {
 	type RelayMessage,
 	type RelayResponse,
 	type HeartbeatRecord,
+	type SealStatusResponse,
+	type ChainStateResponse,
+	type SignResponse,
 } from "./protocol.js";
+import { loadRelayConfig, type RelayConfig } from "./config.js";
+import {
+	performAutoSealCycle,
+	readLastSeal,
+	ROOT_KEYRING_PATH,
+	type SealState,
+} from "./auto-seal.js";
 
 /** Relay daemon configuration. */
 export interface RelayDaemonOptions {
@@ -48,6 +59,10 @@ export interface RelayDaemonOptions {
 	daemonLogPath?: string;
 	pidPath?: string;
 	heartbeatIntervalMs?: number;
+	configPath?: string;
+	keyringPath?: string;
+	sealsPath?: string;
+	witnessesPath?: string;
 }
 
 /** Relay daemon state — exposed for testing. */
@@ -56,6 +71,9 @@ export interface RelayDaemonState {
 	chainTip: string | null;
 	startedAt: number;
 	lastHeartbeat: number | null;
+	lastSealEventCount: number;
+	lastSealAt: number | null;
+	totalSeals: number;
 }
 
 /**
@@ -64,11 +82,17 @@ export interface RelayDaemonState {
 export class RelayDaemon {
 	private server: Server | null = null;
 	private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+	private autoSealTimer: ReturnType<typeof setInterval> | null = null;
 	private readonly socketPath: string;
 	private readonly logPath: string;
 	private readonly daemonLogPath: string;
 	private readonly pidPath: string;
 	private readonly heartbeatIntervalMs: number;
+	private readonly configPath: string | undefined;
+	private readonly keyringPath: string;
+	private readonly sealsPath: string | undefined;
+	private readonly witnessesPath: string | undefined;
+	private relayConfig: RelayConfig | null = null;
 
 	/** Daemon state — public for testing. */
 	readonly state: RelayDaemonState = {
@@ -76,6 +100,9 @@ export class RelayDaemon {
 		chainTip: null,
 		startedAt: Date.now(),
 		lastHeartbeat: null,
+		lastSealEventCount: 0,
+		lastSealAt: null,
+		totalSeals: 0,
 	};
 
 	constructor(options: RelayDaemonOptions = {}) {
@@ -84,6 +111,10 @@ export class RelayDaemon {
 		this.daemonLogPath = options.daemonLogPath ?? RELAY_DAEMON_LOG_PATH;
 		this.pidPath = options.pidPath ?? RELAY_PID_PATH;
 		this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
+		this.configPath = options.configPath;
+		this.keyringPath = options.keyringPath ?? ROOT_KEYRING_PATH;
+		this.sealsPath = options.sealsPath;
+		this.witnessesPath = options.witnessesPath;
 	}
 
 	/** Initialize the relay: recover chain state from existing log. */
@@ -162,8 +193,24 @@ export class RelayDaemon {
 
 				this.log(`Relay daemon listening on ${this.socketPath} (pid=${process.pid})`);
 
+				// Load config
+				const { config, source } = loadRelayConfig(this.configPath);
+				this.relayConfig = config;
+				this.log(`Config loaded from ${source}`);
+
+				// Recover seal state
+				const lastSeal = readLastSeal(this.sealsPath);
+				if (lastSeal) {
+					this.state.lastSealEventCount = lastSeal.chained_events;
+					this.state.lastSealAt = new Date(lastSeal.sealed_at).getTime();
+					this.log(`Recovered last seal: ${lastSeal.chained_events} events at ${lastSeal.sealed_at}`);
+				}
+
 				// Start heartbeat
 				this.startHeartbeat();
+
+				// Start auto-seal timer
+				this.startAutoSeal();
 
 				resolve();
 			});
@@ -176,6 +223,10 @@ export class RelayDaemon {
 			if (this.heartbeatTimer) {
 				clearInterval(this.heartbeatTimer);
 				this.heartbeatTimer = null;
+			}
+			if (this.autoSealTimer) {
+				clearInterval(this.autoSealTimer);
+				this.autoSealTimer = null;
 			}
 
 			// Write final heartbeat
@@ -247,6 +298,15 @@ export class RelayDaemon {
 
 			case "event":
 				return this.processEvent(msg);
+
+			case "seal_status":
+				return this.getSealStatus();
+
+			case "get_chain_state":
+				return this.getChainState();
+
+			case "sign":
+				return this.handleSign(msg);
 
 			default:
 				return { ok: false, error: `Unknown message type: ${msg.type}` };
@@ -344,6 +404,139 @@ export class RelayDaemon {
 			this.state.lastHeartbeat = Date.now();
 		} catch {
 			// Best effort — heartbeat write failure is non-fatal
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Layer 4: Auto-seal
+	// ---------------------------------------------------------------------------
+
+	/** Start the periodic auto-seal timer. */
+	private startAutoSeal(): void {
+		if (!this.relayConfig?.auto_seal.enabled) return;
+
+		const intervalMs = this.relayConfig.auto_seal.interval_minutes * 60_000;
+		this.autoSealTimer = setInterval(() => {
+			this.runAutoSealCycle().catch((err) => {
+				this.log(`AUTO-SEAL ERROR: ${err instanceof Error ? err.message : String(err)}`);
+			});
+		}, intervalMs);
+
+		if (this.autoSealTimer.unref) {
+			this.autoSealTimer.unref();
+		}
+
+		this.log(`Auto-seal enabled: every ${this.relayConfig.auto_seal.interval_minutes}m, min ${this.relayConfig.auto_seal.min_events_between_seals} events`);
+	}
+
+	/** Run a single auto-seal cycle. */
+	private async runAutoSealCycle(): Promise<void> {
+		if (!this.relayConfig) return;
+
+		const sealState: SealState = {
+			chainTip: this.state.chainTip,
+			eventCount: this.state.eventCount,
+			lastSealEventCount: this.state.lastSealEventCount,
+			lastSealAt: this.state.lastSealAt,
+		};
+
+		const result = await performAutoSealCycle(
+			sealState,
+			this.relayConfig.auto_seal,
+			this.relayConfig.witness,
+			this.keyringPath,
+			this.sealsPath,
+			this.witnessesPath,
+		);
+
+		if (result.sealed && result.seal) {
+			this.state.lastSealEventCount = this.state.eventCount;
+			this.state.lastSealAt = Date.now();
+			this.state.totalSeals++;
+			this.log(`AUTO-SEAL: ${result.seal.tip_hash.slice(0, 30)}... (${result.seal.chained_events} events, key=${result.seal.key_id})`);
+
+			if (result.witness) {
+				this.log(`WITNESS: ${result.witness.succeeded}/${result.witness.attempted} endpoints, quorum=${result.witness.quorum_met ? "MET" : "FAILED"}`);
+			}
+		} else {
+			this.log(`AUTO-SEAL: skipped — ${result.reason}`);
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Layer 4: Seal status / chain state queries
+	// ---------------------------------------------------------------------------
+
+	/** Return current seal status. */
+	private getSealStatus(): SealStatusResponse {
+		const lastSeal = readLastSeal(this.sealsPath);
+		return {
+			ok: true,
+			last_seal_at: lastSeal?.sealed_at ?? null,
+			last_seal_tip: lastSeal?.tip_hash ?? null,
+			last_seal_events: lastSeal?.chained_events ?? null,
+			seals_total: this.state.totalSeals,
+			auto_seal_enabled: this.relayConfig?.auto_seal.enabled ?? false,
+			witness_enabled: this.relayConfig?.witness.enabled ?? false,
+			witness_quorum_met: null, // TODO: track from last witness result
+		};
+	}
+
+	/** Return current chain state. */
+	private getChainState(): ChainStateResponse {
+		return {
+			ok: true,
+			chain_tip: this.state.chainTip,
+			event_count: this.state.eventCount,
+			last_seal_event_count: this.state.lastSealEventCount,
+			last_heartbeat: this.state.lastHeartbeat,
+			uptime_ms: Date.now() - this.state.startedAt,
+			auto_seal_interval_minutes: this.relayConfig?.auto_seal.interval_minutes ?? 0,
+		};
+	}
+
+	// ---------------------------------------------------------------------------
+	// Layer 5: Signing proxy
+	// ---------------------------------------------------------------------------
+
+	/** Handle a sign request — signs data with the root-owned keyring. */
+	private handleSign(msg: RelayMessage): SignResponse {
+		const payload = msg.payload as { data?: string; key_id?: string } | undefined;
+
+		if (!payload?.data) {
+			return { ok: false, error: "Missing sign payload.data" };
+		}
+
+		try {
+			let key: Buffer;
+			let keyId: string;
+
+			if (payload.key_id) {
+				// Sign with specific key
+				key = loadKeyById(this.keyringPath, payload.key_id);
+				keyId = payload.key_id;
+			} else {
+				// Sign with active key
+				const keyring = ensureKeyring(this.keyringPath);
+				key = keyring.key;
+				keyId = keyring.keyId;
+			}
+
+			const signature = signSeal(payload.data, key);
+			const signedAt = new Date().toISOString();
+
+			this.log(`SIGN: key=${keyId}, data=${payload.data.slice(0, 40)}...`);
+
+			return {
+				ok: true,
+				signature,
+				key_id: keyId,
+				signed_at: signedAt,
+			};
+		} catch (err: unknown) {
+			const errMsg = err instanceof Error ? err.message : String(err);
+			this.log(`SIGN ERROR: ${errMsg}`);
+			return { ok: false, error: `Sign failed: ${errMsg}` };
 		}
 	}
 

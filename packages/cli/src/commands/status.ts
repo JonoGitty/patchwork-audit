@@ -1,8 +1,9 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { detectInstalledAgents } from "@patchwork/agents";
 import { getReadStore, DATA_DIR, EVENTS_PATH } from "../store.js";
+import { RELAY_SOCKET_PATH, RELAY_LOG_PATH, RELAY_PID_PATH, RELAY_SEALS_PATH } from "@patchwork/core";
 
 export const statusCommand = new Command("status")
 	.description("Show Patchwork configuration and stats")
@@ -54,6 +55,45 @@ export const statusCommand = new Command("status")
 			}
 		} else {
 			console.log(chalk.dim("\n  No events recorded yet."));
+		}
+
+		// Relay status
+		console.log(chalk.bold("\n  Relay (Layer 2):"));
+		if (existsSync(RELAY_SOCKET_PATH)) {
+			console.log(`    Socket:   ${chalk.green("connected")} ${chalk.dim(RELAY_SOCKET_PATH)}`);
+		} else {
+			console.log(`    Socket:   ${chalk.yellow("not running")}`);
+		}
+
+		if (existsSync(RELAY_PID_PATH)) {
+			const pid = readFileSync(RELAY_PID_PATH, "utf-8").trim();
+			let alive = false;
+			try { process.kill(Number(pid), 0); alive = true; } catch { /* dead */ }
+			console.log(`    Daemon:   ${alive ? chalk.green(`PID ${pid}`) : chalk.red(`PID ${pid} (stale)`)}`);
+		}
+
+		if (existsSync(RELAY_LOG_PATH)) {
+			try {
+				const content = readFileSync(RELAY_LOG_PATH, "utf-8");
+				const lines = content.split("\n").filter((l) => l.trim());
+				let relayEvents = 0;
+				let hbCount = 0;
+				for (const line of lines) {
+					try {
+						const p = JSON.parse(line);
+						if (p.type === "heartbeat") hbCount++;
+						else relayEvents++;
+					} catch { /* skip */ }
+				}
+				console.log(`    Events:   ${relayEvents} ${chalk.dim(`(${hbCount} heartbeats)`)}`);
+			} catch { /* unreadable */ }
+		}
+
+		if (existsSync(RELAY_SEALS_PATH)) {
+			try {
+				const seals = readFileSync(RELAY_SEALS_PATH, "utf-8").trim().split("\n").length;
+				console.log(`    Seals:    ${seals}`);
+			} catch { /* unreadable */ }
 		}
 
 		console.log();

@@ -11,7 +11,7 @@ import type { ClaudeCodeHookInput } from "../../src/claude-code/types.js";
  * Simulates a complete Claude Code session with multiple tool uses
  * and verifies the full audit pipeline.
  */
-describe("E2E: Claude Code session pipeline", () => {
+describe("E2E: Claude Code session pipeline", async () => {
 	let testDir: string;
 	let eventsPath: string;
 	let originalHome: string | undefined;
@@ -48,20 +48,20 @@ describe("E2E: Claude Code session pipeline", () => {
 		return store.readAll();
 	}
 
-	it("captures a complete session lifecycle", () => {
+	it("captures a complete session lifecycle", async () => {
 		// 1. Session starts
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "SessionStart",
 		}));
 
 		// 2. User submits a prompt
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "UserPromptSubmit",
 			prompt: "Please fix the bug in auth.ts",
 		}));
 
 		// 3. Agent reads a file
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "PostToolUse",
 			tool_name: "Read",
 			tool_input: { file_path: "/home/user/project/src/auth.ts" },
@@ -69,7 +69,7 @@ describe("E2E: Claude Code session pipeline", () => {
 		}));
 
 		// 4. Agent searches for related code
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "PostToolUse",
 			tool_name: "Grep",
 			tool_input: { pattern: "authenticate", path: "/home/user/project/src" },
@@ -77,7 +77,7 @@ describe("E2E: Claude Code session pipeline", () => {
 		}));
 
 		// 5. Agent edits the file
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "PostToolUse",
 			tool_name: "Edit",
 			tool_input: {
@@ -89,7 +89,7 @@ describe("E2E: Claude Code session pipeline", () => {
 		}));
 
 		// 6. Agent runs tests
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "PostToolUse",
 			tool_name: "Bash",
 			tool_input: { command: "npm test" },
@@ -97,7 +97,7 @@ describe("E2E: Claude Code session pipeline", () => {
 		}));
 
 		// 7. Session ends
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "SessionEnd",
 		}));
 
@@ -146,8 +146,8 @@ describe("E2E: Claude Code session pipeline", () => {
 		}
 	});
 
-	it("captures failed tool uses", () => {
-		handleClaudeCodeHook(makeInput({
+	it("captures failed tool uses", async () => {
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "PostToolUseFailure",
 			tool_name: "Bash",
 			tool_input: { command: "npm test" },
@@ -160,13 +160,13 @@ describe("E2E: Claude Code session pipeline", () => {
 		expect(events[0].action).toBe("command_execute");
 	});
 
-	it("captures subagent lifecycle", () => {
-		handleClaudeCodeHook(makeInput({
+	it("captures subagent lifecycle", async () => {
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "SubagentStart",
 			subagent_type: "Explore",
 		}));
 
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "SubagentStop",
 			subagent_type: "Explore",
 		}));
@@ -178,8 +178,8 @@ describe("E2E: Claude Code session pipeline", () => {
 		expect(events[1].action).toBe("subagent_stop");
 	});
 
-	it("PreToolUse returns allow in default mode", () => {
-		const result = handleClaudeCodeHook(makeInput({
+	it("PreToolUse returns allow in default mode", async () => {
+		const result = await handleClaudeCodeHook(makeInput({
 			hook_event_name: "PreToolUse",
 			tool_name: "Bash",
 			tool_input: { command: "npm test" },
@@ -188,9 +188,9 @@ describe("E2E: Claude Code session pipeline", () => {
 		expect(result).toEqual({ allow: true });
 	});
 
-	it("classifies risk correctly through the pipeline", () => {
+	it("classifies risk correctly through the pipeline", async () => {
 		// Write to .env (critical risk)
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "PostToolUse",
 			tool_name: "Write",
 			tool_input: { file_path: "/home/user/project/.env", content: "SECRET=abc" },
@@ -198,7 +198,7 @@ describe("E2E: Claude Code session pipeline", () => {
 		}));
 
 		// Normal file write (medium risk)
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "PostToolUse",
 			tool_name: "Write",
 			tool_input: { file_path: "/home/user/project/src/app.ts", content: "export const app = {};" },
@@ -206,7 +206,7 @@ describe("E2E: Claude Code session pipeline", () => {
 		}));
 
 		// Dangerous command (critical risk)
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "PostToolUse",
 			tool_name: "Bash",
 			tool_input: { command: "rm -rf /tmp/test" },
@@ -225,12 +225,12 @@ describe("E2E: Claude Code session pipeline", () => {
 		expect(events[2].risk.flags).toContain("dangerous_command");
 	});
 
-	it("stores events persistently and can query them", () => {
+	it("stores events persistently and can query them", async () => {
 		// Create some events
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "SessionStart",
 		}));
-		handleClaudeCodeHook(makeInput({
+		await handleClaudeCodeHook(makeInput({
 			hook_event_name: "PostToolUse",
 			tool_name: "Write",
 			tool_input: { file_path: "/project/src/index.ts", content: "..." },

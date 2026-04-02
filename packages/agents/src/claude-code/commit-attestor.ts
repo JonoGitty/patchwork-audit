@@ -17,6 +17,7 @@ import {
 	signAttestation,
 	loadActivePolicy,
 	getHomeDir,
+	requestSignature,
 } from "@patchwork/core";
 import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
@@ -38,8 +39,9 @@ export interface CommitAttestationParams {
 
 /**
  * Generate a signed commit attestation from the current session state.
+ * Tries the relay signing proxy first (layer 5), falls back to local keyring.
  */
-export function generateCommitAttestation(params: CommitAttestationParams): CommitAttestation {
+export async function generateCommitAttestation(params: CommitAttestationParams): Promise<CommitAttestation> {
 	const { commitSha, branch, sessionId, projectRoot, store, toolVersion } = params;
 
 	// Query session events
@@ -98,29 +100,26 @@ export function generateCommitAttestation(params: CommitAttestationParams): Comm
 		failure_reasons: failureReasons,
 	};
 
-	// Sign
-	let key: Buffer | null = null;
-	let keyId: string | undefined;
-	try {
-		const kr = ensureKeyring(keyringDir());
-		key = kr.key;
-		keyId = kr.keyId;
-	} catch {
-		try {
-			key = readSealKey(legacyKeyPath());
-		} catch {
-			// No key — unsigned attestation
-		}
-	}
-
+	// Sign via relay proxy (layer 5) with local fallback
 	const payloadStr = buildAttestationPayload(artifact);
 	artifact.payload_hash = hashAttestationPayload(payloadStr);
 
-	if (key) {
-		artifact.signature = signAttestation(payloadStr, key);
-		if (keyId !== undefined) artifact.key_id = keyId;
-	} else {
-		artifact.signature = "unsigned";
+	try {
+		const signResult = await requestSignature(payloadStr, {
+			localKeyringPath: keyringDir(),
+		});
+		artifact.signature = signResult.signature;
+		artifact.key_id = signResult.key_id;
+		artifact.signature_source = signResult.source; // "relay" or "local"
+	} catch {
+		// All signing failed — try legacy single key as last resort
+		try {
+			const key = readSealKey(legacyKeyPath());
+			artifact.signature = signAttestation(payloadStr, key);
+			artifact.signature_source = "legacy";
+		} catch {
+			artifact.signature = "unsigned";
+		}
 	}
 
 	return artifact as unknown as CommitAttestation;

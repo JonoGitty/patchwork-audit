@@ -183,7 +183,7 @@ function createDualWriter(primary: Store, secondary: Store | null): Store {
  *
  * Returns an optional hook output (for PreToolUse allow/deny).
  */
-export function handleClaudeCodeHook(input: ClaudeCodeHookInput): ClaudeCodeHookOutput | null {
+export async function handleClaudeCodeHook(input: ClaudeCodeHookInput): Promise<ClaudeCodeHookOutput | null> {
 	const jsonlStore = new JsonlStore(getEventsPath());
 	let sqliteStore: SqliteStore | null = null;
 	try {
@@ -306,11 +306,11 @@ function handlePreToolUse(store: Store, input: ClaudeCodeHookInput): ClaudeCodeH
 	return { allow: true };
 }
 
-function handlePostToolUse(
+async function handlePostToolUse(
 	store: Store,
 	input: ClaudeCodeHookInput,
 	overrideStatus?: "failed",
-): ClaudeCodeHookOutput | null {
+): Promise<ClaudeCodeHookOutput | null> {
 	const toolName = input.tool_name || "unknown";
 	const toolInput = input.tool_input || {};
 
@@ -369,7 +369,7 @@ function handlePostToolUse(
 			const commitInfo = extractCommitInfo(stdout);
 			if (commitInfo) {
 				try {
-					const attestation = generateCommitAttestation({
+					const attestation = await generateCommitAttestation({
 						commitSha: commitInfo.sha,
 						branch: commitInfo.branch,
 						sessionId: input.session_id,

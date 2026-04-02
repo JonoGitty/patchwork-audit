@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { handleClaudeCodeHook, readDivergenceMarker } from "../../src/claude-code/adapter.js";
 import type { ClaudeCodeHookInput } from "../../src/claude-code/types.js";
 
-describe("handleClaudeCodeHook", () => {
+describe("handleClaudeCodeHook", async () => {
 	let originalHome: string | undefined;
 	let tmpDir: string;
 	let stderrWrite: typeof process.stderr.write;
@@ -41,8 +41,8 @@ describe("handleClaudeCodeHook", () => {
 		};
 	}
 
-	it("handles SessionStart", () => {
-		const result = handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
+	it("handles SessionStart", async () => {
+		const result = await handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
 		expect(result).toBeNull();
 
 		const eventsPath = join(tmpDir, ".patchwork", "events.jsonl");
@@ -53,14 +53,14 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[0].agent).toBe("claude-code");
 	});
 
-	it("handles SessionEnd", () => {
-		handleClaudeCodeHook(makeInput({ hook_event_name: "SessionEnd" }));
+	it("handles SessionEnd", async () => {
+		await handleClaudeCodeHook(makeInput({ hook_event_name: "SessionEnd" }));
 		const events = readEvents(tmpDir);
 		expect(events[0].action).toBe("session_end");
 	});
 
-	it("handles PostToolUse for file Write", () => {
-		handleClaudeCodeHook(
+	it("handles PostToolUse for file Write", async () => {
+		await handleClaudeCodeHook(
 			makeInput({
 				hook_event_name: "PostToolUse",
 				tool_name: "Write",
@@ -76,8 +76,8 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[0].content.hash).toMatch(/^sha256:/);
 	});
 
-	it("handles PostToolUse for Bash command", () => {
-		handleClaudeCodeHook(
+	it("handles PostToolUse for Bash command", async () => {
+		await handleClaudeCodeHook(
 			makeInput({
 				hook_event_name: "PostToolUse",
 				tool_name: "Bash",
@@ -91,8 +91,8 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[0].target.command).toBe("npm test");
 	});
 
-	it("handles PostToolUse for Read", () => {
-		handleClaudeCodeHook(
+	it("handles PostToolUse for Read", async () => {
+		await handleClaudeCodeHook(
 			makeInput({
 				hook_event_name: "PostToolUse",
 				tool_name: "Read",
@@ -106,8 +106,8 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[0].risk.level).toBe("low");
 	});
 
-	it("handles PostToolUse for WebFetch", () => {
-		handleClaudeCodeHook(
+	it("handles PostToolUse for WebFetch", async () => {
+		await handleClaudeCodeHook(
 			makeInput({
 				hook_event_name: "PostToolUse",
 				tool_name: "WebFetch",
@@ -121,13 +121,13 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[0].risk.flags).toContain("network_access");
 	});
 
-	it("handles PreToolUse by returning allow", () => {
-		const result = handleClaudeCodeHook(makeInput({ hook_event_name: "PreToolUse" }));
+	it("handles PreToolUse by returning allow", async () => {
+		const result = await handleClaudeCodeHook(makeInput({ hook_event_name: "PreToolUse" }));
 		expect(result).toEqual({ allow: true });
 	});
 
-	it("handles PostToolUseFailure with failed status", () => {
-		handleClaudeCodeHook(
+	it("handles PostToolUseFailure with failed status", async () => {
+		await handleClaudeCodeHook(
 			makeInput({
 				hook_event_name: "PostToolUseFailure",
 				tool_name: "Bash",
@@ -139,8 +139,8 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[0].status).toBe("failed");
 	});
 
-	it("handles UserPromptSubmit", () => {
-		handleClaudeCodeHook(
+	it("handles UserPromptSubmit", async () => {
+		await handleClaudeCodeHook(
 			makeInput({
 				hook_event_name: "UserPromptSubmit",
 				prompt: "Fix the login bug",
@@ -153,8 +153,8 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[0].content.redacted).toBe(true);
 	});
 
-	it("handles SubagentStart", () => {
-		handleClaudeCodeHook(
+	it("handles SubagentStart", async () => {
+		await handleClaudeCodeHook(
 			makeInput({
 				hook_event_name: "SubagentStart",
 				subagent_type: "Explore",
@@ -165,8 +165,8 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[0].action).toBe("subagent_start");
 	});
 
-	it("classifies sensitive file writes as critical risk", () => {
-		handleClaudeCodeHook(
+	it("classifies sensitive file writes as critical risk", async () => {
+		await handleClaudeCodeHook(
 			makeInput({
 				hook_event_name: "PostToolUse",
 				tool_name: "Write",
@@ -180,24 +180,24 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[0].risk.flags).toContain("sensitive_path");
 	});
 
-	it("sets project context from cwd", () => {
-		handleClaudeCodeHook(makeInput({ cwd: "/Users/test/my-awesome-project" }));
+	it("sets project context from cwd", async () => {
+		await handleClaudeCodeHook(makeInput({ cwd: "/Users/test/my-awesome-project" }));
 		const events = readEvents(tmpDir);
 		expect(events[0].project.root).toBe("/Users/test/my-awesome-project");
 		expect(events[0].project.name).toBe("my-awesome-project");
 	});
 
-	it("generates unique event IDs", () => {
-		handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
-		handleClaudeCodeHook(makeInput({ hook_event_name: "SessionEnd" }));
+	it("generates unique event IDs", async () => {
+		await handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
+		await handleClaudeCodeHook(makeInput({ hook_event_name: "SessionEnd" }));
 		const events = readEvents(tmpDir);
 		expect(events[0].id).not.toBe(events[1].id);
 		expect(events[0].id).toMatch(/^evt_/);
 	});
 
-	it("preserves session_id across events", () => {
-		handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart", session_id: "ses_abc" }));
-		handleClaudeCodeHook(
+	it("preserves session_id across events", async () => {
+		await handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart", session_id: "ses_abc" }));
+		await handleClaudeCodeHook(
 			makeInput({
 				hook_event_name: "PostToolUse",
 				session_id: "ses_abc",
@@ -210,15 +210,15 @@ describe("handleClaudeCodeHook", () => {
 		expect(events[1].session_id).toBe("ses_abc");
 	});
 
-	describe("schema_version and idempotency_key", () => {
-		it("sets schema_version on generated events", () => {
-			handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
+	describe("schema_version and idempotency_key", async () => {
+		it("sets schema_version on generated events", async () => {
+			await handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
 			const events = readEvents(tmpDir);
 			expect(events[0].schema_version).toBe(1);
 		});
 
-		it("generates idempotency_key for tool events with tool_use_id", () => {
-			handleClaudeCodeHook(
+		it("generates idempotency_key for tool events with tool_use_id", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					session_id: "ses_xyz",
@@ -231,8 +231,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].idempotency_key).toBe("ses_xyz:PostToolUse:file_read:tu_abc");
 		});
 
-		it("generates idempotency_key for SessionStart (unique per session)", () => {
-			handleClaudeCodeHook(
+		it("generates idempotency_key for SessionStart (unique per session)", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "SessionStart",
 					session_id: "ses_xyz",
@@ -242,8 +242,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].idempotency_key).toBe("ses_xyz:SessionStart:session_start");
 		});
 
-		it("omits idempotency_key for UserPromptSubmit (not unique per session)", () => {
-			handleClaudeCodeHook(
+		it("omits idempotency_key for UserPromptSubmit (not unique per session)", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "UserPromptSubmit",
 					session_id: "ses_xyz",
@@ -254,8 +254,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].idempotency_key).toBeUndefined();
 		});
 
-		it("omits idempotency_key for SubagentStart (not unique per session)", () => {
-			handleClaudeCodeHook(
+		it("omits idempotency_key for SubagentStart (not unique per session)", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "SubagentStart",
 					session_id: "ses_xyz",
@@ -266,22 +266,22 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].idempotency_key).toBeUndefined();
 		});
 
-		it("retains multiple UserPromptSubmit events in the same session", () => {
-			handleClaudeCodeHook(
+		it("retains multiple UserPromptSubmit events in the same session", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "UserPromptSubmit",
 					session_id: "ses_multi",
 					prompt: "First prompt",
 				}),
 			);
-			handleClaudeCodeHook(
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "UserPromptSubmit",
 					session_id: "ses_multi",
 					prompt: "Second prompt",
 				}),
 			);
-			handleClaudeCodeHook(
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "UserPromptSubmit",
 					session_id: "ses_multi",
@@ -295,15 +295,15 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[2].action).toBe("prompt_submit");
 		});
 
-		it("retains multiple SubagentStart events in the same session", () => {
-			handleClaudeCodeHook(
+		it("retains multiple SubagentStart events in the same session", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "SubagentStart",
 					session_id: "ses_subagents",
 					subagent_type: "Explore",
 				}),
 			);
-			handleClaudeCodeHook(
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "SubagentStart",
 					session_id: "ses_subagents",
@@ -314,7 +314,7 @@ describe("handleClaudeCodeHook", () => {
 			expect(events).toHaveLength(2);
 		});
 
-		it("deduplicates on retry with same idempotency_key", () => {
+		it("deduplicates on retry with same idempotency_key", async () => {
 			const input = makeInput({
 				hook_event_name: "PostToolUse",
 				session_id: "ses_retry",
@@ -323,8 +323,8 @@ describe("handleClaudeCodeHook", () => {
 				tool_use_id: "tu_retry1",
 				tool_response: { output: "ok" },
 			});
-			handleClaudeCodeHook(input);
-			handleClaudeCodeHook(input);
+			await handleClaudeCodeHook(input);
+			await handleClaudeCodeHook(input);
 
 			const events = readEvents(tmpDir);
 			expect(events).toHaveLength(1);
@@ -332,16 +332,16 @@ describe("handleClaudeCodeHook", () => {
 	});
 
 	// Windows does not enforce POSIX file permissions
-	describe.skipIf(process.platform === "win32")("directory permissions", () => {
-		it("creates .patchwork directory with 0700", () => {
-			handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
+	describe.skipIf(process.platform === "win32")("directory permissions", async () => {
+		it("creates .patchwork directory with 0700", async () => {
+			await handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
 			const { statSync } = require("node:fs");
 			const stat = statSync(join(tmpDir, ".patchwork"));
 			expect(stat.mode & 0o777).toBe(0o700);
 		});
 	});
 
-	describe("privacy-safe defaults", () => {
+	describe("privacy-safe defaults", async () => {
 		let savedAbsPath: string | undefined;
 		let savedPromptSize: string | undefined;
 
@@ -359,8 +359,8 @@ describe("handleClaudeCodeHook", () => {
 			else delete process.env.PATCHWORK_CAPTURE_PROMPT_SIZE;
 		});
 
-		it("stores file paths relative to cwd by default", () => {
-			handleClaudeCodeHook(
+		it("stores file paths relative to cwd by default", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					cwd: "/Users/test/my-project",
@@ -373,8 +373,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].target.path).toBe(join("src", "index.ts"));
 		});
 
-		it("keeps absolute path when file is outside cwd", () => {
-			handleClaudeCodeHook(
+		it("keeps absolute path when file is outside cwd", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					cwd: "/Users/test/my-project",
@@ -387,8 +387,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].target.path).toBe("/etc/hosts");
 		});
 
-		it("omits abs_path by default", () => {
-			handleClaudeCodeHook(
+		it("omits abs_path by default", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					cwd: "/Users/test/my-project",
@@ -401,9 +401,9 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].target.abs_path).toBeUndefined();
 		});
 
-		it("includes abs_path when PATCHWORK_CAPTURE_ABS_PATH=1", () => {
+		it("includes abs_path when PATCHWORK_CAPTURE_ABS_PATH=1", async () => {
 			process.env.PATCHWORK_CAPTURE_ABS_PATH = "1";
-			handleClaudeCodeHook(
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					cwd: "/Users/test/my-project",
@@ -416,8 +416,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].target.abs_path).toBe("/Users/test/my-project/file.ts");
 		});
 
-		it("redacts --password values in commands", () => {
-			handleClaudeCodeHook(
+		it("redacts --password values in commands", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					tool_name: "Bash",
@@ -429,8 +429,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].target.command).toBe("mysql --password=[REDACTED] -u root");
 		});
 
-		it("redacts --token values in commands", () => {
-			handleClaudeCodeHook(
+		it("redacts --token values in commands", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					tool_name: "Bash",
@@ -442,8 +442,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].target.command).toBe("gh auth login --token [REDACTED]");
 		});
 
-		it("redacts --api-key and --secret values in commands", () => {
-			handleClaudeCodeHook(
+		it("redacts --api-key and --secret values in commands", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					tool_name: "Bash",
@@ -455,8 +455,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].target.command).toBe("cli --api-key [REDACTED] --secret [REDACTED]");
 		});
 
-		it("redacts Authorization Bearer tokens in commands", () => {
-			handleClaudeCodeHook(
+		it("redacts Authorization Bearer tokens in commands", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					tool_name: "Bash",
@@ -469,8 +469,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].target.command).not.toContain("mytoken123");
 		});
 
-		it("redacts inline API key shapes (sk-...) in commands", () => {
-			handleClaudeCodeHook(
+		it("redacts inline API key shapes (sk-...) in commands", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					tool_name: "Bash",
@@ -483,8 +483,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].target.command).toContain("[REDACTED]");
 		});
 
-		it("preserves non-secret commands unchanged", () => {
-			handleClaudeCodeHook(
+		it("preserves non-secret commands unchanged", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "PostToolUse",
 					tool_name: "Bash",
@@ -496,8 +496,8 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].target.command).toBe("npm test && echo done");
 		});
 
-		it("omits prompt size_bytes by default", () => {
-			handleClaudeCodeHook(
+		it("omits prompt size_bytes by default", async () => {
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "UserPromptSubmit",
 					prompt: "Fix the bug",
@@ -508,9 +508,9 @@ describe("handleClaudeCodeHook", () => {
 			expect(events[0].content.size_bytes).toBeUndefined();
 		});
 
-		it("includes prompt size_bytes when PATCHWORK_CAPTURE_PROMPT_SIZE=1", () => {
+		it("includes prompt size_bytes when PATCHWORK_CAPTURE_PROMPT_SIZE=1", async () => {
 			process.env.PATCHWORK_CAPTURE_PROMPT_SIZE = "1";
-			handleClaudeCodeHook(
+			await handleClaudeCodeHook(
 				makeInput({
 					hook_event_name: "UserPromptSubmit",
 					prompt: "Fix the bug",
@@ -522,7 +522,7 @@ describe("handleClaudeCodeHook", () => {
 	});
 });
 
-describe("divergence marker", () => {
+describe("divergence marker", async () => {
 	let tmpDir: string;
 	let originalHome: string | undefined;
 	let stderrWrite: typeof process.stderr.write;
@@ -556,7 +556,7 @@ describe("divergence marker", () => {
 		};
 	}
 
-	it("creates divergence marker when SQLite write fails and increments on repeated failures", () => {
+	it("creates divergence marker when SQLite write fails and increments on repeated failures", async () => {
 		// Create a broken SQLite DB path that will cause SqliteStore to fail on append
 		// We trigger this by making the db directory a file (not a directory)
 		const dbDir = join(tmpDir, ".patchwork", "db");
@@ -565,7 +565,7 @@ describe("divergence marker", () => {
 		writeFileSync(join(tmpDir, ".patchwork", "db"), "not-a-db", { mode: 0o644 });
 
 		// First failure
-		handleClaudeCodeHook(
+		await handleClaudeCodeHook(
 			makeInput({
 				hook_event_name: "SessionStart",
 			}),
@@ -591,8 +591,8 @@ describe("divergence marker", () => {
 		// Let's verify the marker path
 		const markerPath = join(tmpDir, ".patchwork", "state", "sqlite-divergence.json");
 
-		handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
-		handleClaudeCodeHook(makeInput({ hook_event_name: "SessionEnd" }));
+		await handleClaudeCodeHook(makeInput({ hook_event_name: "SessionStart" }));
+		await handleClaudeCodeHook(makeInput({ hook_event_name: "SessionEnd" }));
 
 		// If SqliteStore constructor fails, no divergence marker (different error path).
 		// If it succeeds but append fails, marker should exist.
@@ -601,7 +601,7 @@ describe("divergence marker", () => {
 		expect(events.length).toBeGreaterThanOrEqual(1); // JSONL always works
 	});
 
-	it("creates and increments marker on forced SQLite append failures", () => {
+	it("creates and increments marker on forced SQLite append failures", async () => {
 		const markerPath = join(tmpDir, ".patchwork", "state", "sqlite-divergence.json");
 
 		// We'll test the marker directly since the adapter's dual-write requires
@@ -643,7 +643,7 @@ describe("divergence marker", () => {
 		expect(read2!.last_error).toBe("test error 2");
 	});
 
-	it("returns null for corrupt marker file", () => {
+	it("returns null for corrupt marker file", async () => {
 		const stateDir = join(tmpDir, ".patchwork", "state");
 		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 		const markerPath = join(stateDir, "sqlite-divergence.json");
@@ -670,11 +670,11 @@ describe("divergence marker", () => {
 		expect(readDivergenceMarker(markerPath)).toBeNull();
 	});
 
-	it("returns null for nonexistent marker path", () => {
+	it("returns null for nonexistent marker path", async () => {
 		expect(readDivergenceMarker(join(tmpDir, "nonexistent", "marker.json"))).toBeNull();
 	});
 
-	it("marker state dir has 0700 and file has 0600 permissions", () => {
+	it("marker state dir has 0700 and file has 0600 permissions", async () => {
 		const stateDir = join(tmpDir, ".patchwork", "state");
 		mkdirSync(stateDir, { recursive: true, mode: 0o755 });
 		const markerPath = join(stateDir, "sqlite-divergence.json");

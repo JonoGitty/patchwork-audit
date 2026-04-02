@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
-const EXCLUDED_FIELDS = new Set(["signature", "payload_hash", "key_id"]);
+const EXCLUDED_FIELDS = new Set(["signature", "payload_hash", "key_id", "signature_source"]);
 
 /**
  * Recursively sort object keys for deterministic JSON serialization.

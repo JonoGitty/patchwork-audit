@@ -47,7 +47,7 @@ export const hookCommand = new Command("hook")
 			const parsed = JSON.parse(input) as ClaudeCodeHookInput;
 			parsed.hook_event_name = mappedEvent;
 
-			const output = handleClaudeCodeHook(parsed);
+			const output = await handleClaudeCodeHook(parsed);
 
 			// Write output for hooks that expect a response (PreToolUse)
 			if (output) {

@@ -101,7 +101,37 @@ export {
 	type RelayMessage,
 	type RelayResponse,
 	type HeartbeatRecord,
+	type SealStatusResponse,
+	type ChainStateResponse,
+	type SignRequest,
+	type SignResponse,
 } from "./relay/protocol.js";
+export {
+	loadRelayConfig,
+	RELAY_CONFIG_PATH,
+	DEFAULT_RELAY_CONFIG,
+	type RelayConfig,
+	type AutoSealConfig,
+	type WitnessConfig,
+	type WitnessEndpointConfig,
+} from "./relay/config.js";
+export {
+	performAutoSealCycle,
+	performSeal,
+	shouldAutoSeal,
+	publishToWitnesses,
+	readLastSeal,
+	RELAY_SEALS_PATH,
+	RELAY_WITNESSES_PATH,
+	ROOT_KEYRING_PATH,
+	type AutoSealResult,
+	type WitnessResult,
+	type SealState,
+} from "./relay/auto-seal.js";
+export {
+	requestSignature,
+	type SignatureResult,
+} from "./relay/signing-proxy.js";
 
 // Policy
 export {

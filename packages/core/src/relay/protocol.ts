@@ -34,7 +34,7 @@ export const RELAY_PROTOCOL_VERSION = 1;
  */
 export interface RelayMessage {
 	protocol_version: number;
-	type: "event" | "heartbeat" | "ping";
+	type: "event" | "heartbeat" | "ping" | "seal_status" | "get_chain_state" | "sign";
 	timestamp: string;
 	/** The serialized audit event (for type=event). */
 	payload?: Record<string, unknown>;
@@ -49,6 +49,42 @@ export interface RelayResponse {
 	error?: string;
 	/** The relay's chain tip hash after processing. */
 	relay_hash?: string;
+}
+
+/** Seal status response (layer 4). */
+export interface SealStatusResponse extends RelayResponse {
+	last_seal_at: string | null;
+	last_seal_tip: string | null;
+	last_seal_events: number | null;
+	seals_total: number;
+	auto_seal_enabled: boolean;
+	witness_enabled: boolean;
+	witness_quorum_met: boolean | null;
+}
+
+/** Chain state response. */
+export interface ChainStateResponse extends RelayResponse {
+	chain_tip: string | null;
+	event_count: number;
+	last_seal_event_count: number;
+	last_heartbeat: number | null;
+	uptime_ms: number;
+	auto_seal_interval_minutes: number;
+}
+
+/** Sign request payload (layer 5). */
+export interface SignRequest {
+	/** The data to sign (seal payload string). */
+	data: string;
+	/** Optional specific key ID. Uses active key if omitted. */
+	key_id?: string;
+}
+
+/** Sign response (layer 5). */
+export interface SignResponse extends RelayResponse {
+	signature?: string;
+	key_id?: string;
+	signed_at?: string;
 }
 
 /** Heartbeat record written to the relay log. */

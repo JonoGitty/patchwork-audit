@@ -54,11 +54,11 @@ describe("generateCommitAttestation", () => {
 		store.append(event);
 	}
 
-	it("generates a valid attestation", () => {
+	it("generates a valid attestation", async () => {
 		appendTestEvent();
 		appendTestEvent({ action: "command_execute", risk: { level: "medium", flags: [] } });
 
-		const attestation = generateCommitAttestation({
+		const attestation = await generateCommitAttestation({
 			commitSha: "abc1234",
 			branch: "main",
 			sessionId,
@@ -81,8 +81,8 @@ describe("generateCommitAttestation", () => {
 		expect(attestation.signature).toMatch(/^hmac-sha256:|^unsigned$/);
 	});
 
-	it("reports pass:false when no events exist", () => {
-		const attestation = generateCommitAttestation({
+	it("reports pass:false when no events exist", async () => {
+		const attestation = await generateCommitAttestation({
 			commitSha: "def5678",
 			branch: "main",
 			sessionId: "ses_nonexistent",
@@ -95,11 +95,11 @@ describe("generateCommitAttestation", () => {
 		expect(attestation.failure_reasons).toContain("no_session_events");
 	});
 
-	it("counts denials in risk summary", () => {
+	it("counts denials in risk summary", async () => {
 		appendTestEvent({ status: "denied", risk: { level: "high", flags: ["sensitive_file"] } });
 		appendTestEvent();
 
-		const attestation = generateCommitAttestation({
+		const attestation = await generateCommitAttestation({
 			commitSha: "ghi9012",
 			branch: "main",
 			sessionId,
@@ -114,14 +114,14 @@ describe("generateCommitAttestation", () => {
 		expect(attestation.failure_reasons).toContain("policy_denials_present");
 	});
 
-	it("signs attestation when keyring exists", () => {
+	it("signs attestation when keyring exists", async () => {
 		appendTestEvent();
 
 		// Ensure keyring exists
 		const keyringDir = join(tmpDir, ".patchwork", "keys", "seal");
 		const kr = ensureKeyring(keyringDir);
 
-		const attestation = generateCommitAttestation({
+		const attestation = await generateCommitAttestation({
 			commitSha: "jkl3456",
 			branch: "main",
 			sessionId,

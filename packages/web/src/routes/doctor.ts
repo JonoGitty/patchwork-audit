@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Store } from "@patchwork/core";
-import { verifyChain, loadActivePolicy } from "@patchwork/core";
+import { verifyChain, loadActivePolicy, RELAY_SOCKET_PATH, RELAY_LOG_PATH, RELAY_PID_PATH, RELAY_SEALS_PATH, readRelayDivergenceMarker } from "@patchwork/core";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
@@ -133,6 +133,66 @@ export function doctorRoutes(store: Store, dataDir: string) {
 					}
 				}
 			} catch { /* skip */ }
+		}
+
+		// 10. Relay daemon (layer 2)
+		if (existsSync(RELAY_SOCKET_PATH)) {
+			checks.push({ label: "Relay socket", status: "pass", message: RELAY_SOCKET_PATH });
+		} else {
+			checks.push({ label: "Relay socket", status: "warn", message: "Not running — deploy with: sudo bash scripts/deploy-relay.sh" });
+		}
+
+		if (existsSync(RELAY_PID_PATH)) {
+			const pid = readFileSync(RELAY_PID_PATH, "utf-8").trim();
+			try {
+				process.kill(Number(pid), 0);
+				checks.push({ label: "Relay daemon", status: "pass", message: `PID ${pid} running` });
+			} catch {
+				checks.push({ label: "Relay daemon", status: "warn", message: `PID ${pid} not running (stale)` });
+			}
+		}
+
+		if (existsSync(RELAY_LOG_PATH)) {
+			try {
+				const content = readFileSync(RELAY_LOG_PATH, "utf-8");
+				const lines = content.split("\n").filter((l: string) => l.trim());
+				let eventCount = 0;
+				let heartbeatCount = 0;
+				let lastHeartbeat = "";
+				for (const line of lines) {
+					try {
+						const p = JSON.parse(line);
+						if (p.type === "heartbeat") { heartbeatCount++; lastHeartbeat = p.timestamp; }
+						else eventCount++;
+					} catch { /* skip */ }
+				}
+				checks.push({ label: "Relay log", status: "pass", message: `${eventCount} events, ${heartbeatCount} heartbeats` });
+				if (lastHeartbeat) {
+					const age = Date.now() - new Date(lastHeartbeat).getTime();
+					const ageStr = age < 60_000 ? `${Math.round(age / 1000)}s ago` : `${Math.round(age / 60_000)}m ago`;
+					const status = age < 60_000 ? "pass" : age < 120_000 ? "warn" : "fail";
+					checks.push({ label: "Last heartbeat", status, message: ageStr });
+				}
+			} catch {
+				checks.push({ label: "Relay log", status: "warn", message: "Unreadable" });
+			}
+		}
+
+		// 11. Relay seals (layer 4)
+		if (existsSync(RELAY_SEALS_PATH)) {
+			try {
+				const content = readFileSync(RELAY_SEALS_PATH, "utf-8");
+				const seals = content.split("\n").filter((l: string) => l.trim()).length;
+				checks.push({ label: "Auto-seals", status: "pass", message: `${seals} seal(s)` });
+			} catch {
+				checks.push({ label: "Auto-seals", status: "warn", message: "Unreadable" });
+			}
+		}
+
+		// 12. Relay divergence
+		const divergence = readRelayDivergenceMarker();
+		if (divergence && divergence.failure_count > 0) {
+			checks.push({ label: "Relay divergence", status: "warn", message: `${divergence.failure_count} failures since ${divergence.first_failure_at}` });
 		}
 
 		const passCount = checks.filter(c => c.status === "pass").length;
