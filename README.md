@@ -37,8 +37,8 @@ Every action is classified, logged, and -- if it violates policy -- blocked befo
 ## Quickstart
 
 ```bash
-git clone https://github.com/JonoGitty/patchwork.git
-cd patchwork
+git clone https://github.com/JonoGitty/patchwork-audit.git
+cd patchwork-audit
 pnpm install && pnpm build
 
 # Install CLI globally
@@ -70,21 +70,39 @@ sudo bash scripts/system-install.sh --users alice,bob,charlie
 
 This locks `settings.json` as root-owned with the system immutable flag, installs a LaunchDaemon watchdog, and makes it impossible for the AI agent or non-admin users to disable monitoring.
 
-### Audit relay daemon (v0.5.0)
+### Audit relay daemon (v0.5.0+)
 
 For defence-in-depth, deploy the root-owned audit relay. The relay is a separate daemon that receives copies of every audit event via Unix socket and writes them to its own append-only log. Even if an attacker compromises the user-space audit store, the relay's copy is intact.
 
 ```bash
-# Deploy the relay (installs LaunchDaemon / systemd unit, creates /var/patchwork/)
+# Deploy the relay (installs LaunchDaemon, creates /Library/Patchwork/)
 sudo bash scripts/deploy-relay.sh
 
 # Manage the relay
-patchwork relay start          # Start the daemon
-patchwork relay status         # Check health + heartbeat
+patchwork relay status         # Check health + heartbeat (queries daemon via socket)
 patchwork relay verify         # Verify relay-side hash chain
 ```
 
-The relay runs a 30-second heartbeat and maintains its own independent SHA-256 hash chain.
+The relay runs a 30-second heartbeat, maintains its own independent SHA-256 hash chain, auto-seals every 15 minutes with HMAC-SHA256, and acts as a signing proxy for commit attestations.
+
+### Commit attestations (v0.6.1)
+
+Every `git commit` made by the AI agent automatically generates a signed compliance proof:
+
+```bash
+# View the attestation on any commit
+git notes --ref=patchwork show HEAD
+
+# Output:
+# Patchwork-Approved: sha256:fa02b189...
+# Status: PASS
+# Session: c68f85c5-24ca-402c-bf2c-...
+# Chain: valid (52 events, tip: sha256:689c54f3...)
+# Risk: 0 critical, 0 high, 35 medium
+# Policy: system:/Library/Patchwork/policy.yml
+```
+
+Attestations include session event count, risk summary, chain integrity status, and an HMAC signature from the relay daemon's root-owned keyring. Full attestation JSON is stored at `~/.patchwork/commit-attestations/<sha>.json`.
 
 ---
 
@@ -102,7 +120,7 @@ Claude Code                    Patchwork                        Audit Store
     |                              |-- record event                |
     |                              |-- compute hash chain -------> events.jsonl
     |                              |-- index -------- -----------> audit.db (SQLite)
-    |                              |-- relay event via socket ---> /var/patchwork/relay.jsonl
+    |                              |-- relay event via socket ---> /Library/Patchwork/events.relay.jsonl
     |                              |-- webhook alert (if high risk)|
 ```
 
@@ -201,9 +219,9 @@ Sensitive file detection covers: `.env`, private keys, cloud credentials, API to
 |-------|-----------|--------|
 | 1 | **Hash-chained audit log** -- SHA-256 chain in events.jsonl, any edit breaks the chain | Done |
 | 2 | **Root-owned audit relay** -- separate daemon receives events via Unix socket, independent hash chain, 30s heartbeat | Done (v0.5.0) |
-| 3 | **HMAC sealing + remote witness** -- cryptographic seal + off-machine witness anchor | Done |
-| 4 | **KMS-backed sealing** -- macOS Keychain / cloud KMS for seal keys | Planned |
-| 5 | **Blockchain anchoring** -- periodic Merkle root published to an immutable public ledger | Planned |
+| 3 | **Heartbeat protocol** -- 30s heartbeat, silent disablement detection | Done (v0.5.0) |
+| 4 | **Auto-seal + witness** -- periodic HMAC-SHA256 seals every 15m, witness endpoint publishing | Done (v0.6.0) |
+| 5 | **Key hardening + signing proxy** -- root-owned keyring, signing proxy via relay socket, commit attestations | Done (v0.6.1) |
 
 ### Tamper-evident hash chain
 
@@ -391,7 +409,7 @@ flowchart TB
 
     subgraph "Audit Relay (root-owned)"
         RD["Relay Daemon\n(Unix socket, 30s heartbeat)"]
-        RL["relay.jsonl\n(/var/patchwork/)"]
+        RL["events.relay.jsonl\n(/Library/Patchwork/)"]
         RD --> RL
     end
 
@@ -461,10 +479,13 @@ Four packages in a TypeScript monorepo:
   events.jsonl          # Append-only audit trail (hash-chained)
   db/audit.db           # SQLite indexed mirror (FTS5 full-text search)
   policy.yml            # Security policy
-  keys/seal/            # HMAC seal keyring
+  keys/seal/            # HMAC seal keyring (user-owned, fallback)
   seals.jsonl           # Seal records
   witnesses.jsonl       # Remote witness anchors
   attestations/         # CI attestation artifacts
+  commit-attestations/  # Per-commit signed compliance proofs
+    index.jsonl         # Attestation index
+    <sha>.json          # Full attestation for each commit
 
 /Library/Patchwork/     # System-level (root-owned, multi-user) [macOS]
   policy.yml            # System policy (overrides user/project)
@@ -473,10 +494,14 @@ Four packages in a TypeScript monorepo:
   hook-wrapper.sh       # Shared hook shim (runtime Node discovery)
   system-watchdog.sh    # Multi-user watchdog
 
-/var/patchwork/         # Audit relay (root-owned) [v0.5.0]
-  relay.jsonl           # Independent hash-chained event copy
+/Library/Patchwork/     # Audit relay (root-owned, macOS) [v0.5.0+]
+  events.relay.jsonl    # Independent hash-chained event copy
   relay.sock            # Unix socket for event ingestion
   relay.pid             # Daemon PID file
+  relay.log             # Daemon log (rotated at 100KB)
+  relay-config.json     # Relay config (auto-seal, witness endpoints)
+  seals.relay.jsonl     # HMAC seal records
+  keys/seal/            # Root-owned signing keyring
 ```
 
 ---
@@ -486,22 +511,23 @@ Four packages in a TypeScript monorepo:
 **Shipped:**
 - [x] **Compliance reports** -- 7 frameworks (SOC 2, ISO 27001, EU AI Act, GDPR, NIST AI RMF, HIPAA, PCI DSS), 31 controls, evidence linking, gap analysis, trends
 - [x] **Session replay** -- `patchwork replay <session-id>` (CLI + HTML + git diffs)
-- [x] **npm publish** -- `npm install -g patchwork-audit`
 - [x] **GitHub Action** -- `JonoGitty/patchwork@v1` for CI integration
 - [x] **Web dashboard** -- 8 pages including replay, compliance, doctor, export
 - [x] **Webhook alerts** -- Slack / Discord on high-risk events
 - [x] **Health check** -- `patchwork doctor` + dashboard health indicator
 - [x] **Persistent dashboard** -- always-on at localhost:3000 via LaunchAgent
 - [x] **Multi-user system install** -- macOS + Linux + Windows enforcement
-- [x] **Root-owned audit relay** -- layer 2 of the 5-layer tamper-proof architecture (v0.5.0)
+- [x] **Root-owned audit relay** -- layer 2, launchd daemon with auto-restart (v0.5.0)
+- [x] **Auto-seal + signing proxy** -- layers 4-5, HMAC seals every 15m, root-owned keyring (v0.6.0)
+- [x] **Commit attestations** -- signed compliance proof on every git commit, git notes (v0.6.1)
+- [x] **Relay forwarding fix** -- hooks now properly await relay socket write before exit (v0.6.1)
+- [x] **Hook format fix** -- correct nested matcher/hooks format for Claude Code settings.json (v0.6.1)
 
 **Planned:**
-- [x] **Linux enforcement** -- systemd watchdog + guard, chattr +i, multi-user
-- [x] **Windows enforcement** -- PowerShell guard + watchdog, Task Scheduler, multi-user
+- [ ] **npm publish** -- `npm install -g patchwork-audit` (needs interactive npm login)
+- [ ] **Witness endpoints** -- configure external anchoring for off-machine seal verification
 - [ ] **Diff-aware risk scoring** -- parse actual code changes, not just file paths
 - [ ] **Team mode** -- local-first with aggregated sealed bundles pushed to a team server
-- [ ] **KMS-backed sealing** -- layer 4: macOS Keychain / cloud KMS for seal keys
-- [ ] **Blockchain anchoring** -- layer 5: Merkle root published to immutable public ledger
 - [ ] **Cursor adapter** -- pending Cursor hook API
 
 ---
@@ -528,7 +554,7 @@ Four packages in a TypeScript monorepo:
 ```bash
 pnpm install
 pnpm build
-pnpm test          # 742 tests across 32 files
+pnpm test          # 769 tests across 4 packages
 pnpm lint
 ```
 
