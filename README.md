@@ -138,7 +138,9 @@ Patchwork hooks into Claude Code's native hook system. Every tool call passes th
 
 ## Web Dashboard
 
-`patchwork dashboard` launches a local web UI with six pages:
+`patchwork dashboard` launches a local web UI at `localhost:3000`:
+
+![Dashboard Overview](docs/screenshots/overview.png)
 
 | Page | What you see |
 |------|-------------|
@@ -147,7 +149,28 @@ Patchwork hooks into Claude Code's native hook system. Every tool call passes th
 | **Sessions** | Session list with drill-down timeline -- every action the AI took |
 | **Risk** | Risk-over-time chart, flags breakdown, denials table |
 | **Search** | Full-text search across all events (powered by SQLite FTS5) |
-| **Settings** | System status, installed agents, policy rules display |
+| **Doctor** | System health -- hooks, relay, chain integrity, policy status |
+
+<details>
+<summary>More screenshots</summary>
+
+**Event log** -- every action with risk classification and status:
+
+![Events](docs/screenshots/events.png)
+
+**Sessions** -- drill down into what the AI did in each work session:
+
+![Sessions](docs/screenshots/sessions.png)
+
+**Risk analysis** -- trends, flags breakdown, denial tracking:
+
+![Risk](docs/screenshots/risk.png)
+
+**System health** -- verify hooks, relay, and chain integrity:
+
+![Doctor](docs/screenshots/doctor.png)
+
+</details>
 
 Plus a JSON API at `/api/stats`, `/api/events`, `/api/sessions`, `/api/risk-timeline`.
 
