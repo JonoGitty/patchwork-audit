@@ -13,7 +13,7 @@ Patchwork solves this. It hooks into AI coding agents and records everything the
 
 **Local-first.** Your data never leaves your machine. No cloud. No telemetry. Everything works offline.
 
-**Tamper-resistant.** The AI agent cannot disable its own monitoring, corrupt the audit log, or weaken the security policy. System-level install makes it impossible for non-admin users to remove.
+**Tamper-resistant.** The AI agent cannot disable its own monitoring, corrupt the audit log, or weaken the security policy. A 5-layer tamper-proof architecture -- from hash chains to a root-owned relay daemon -- makes it impossible for non-admin users to remove.
 
 **Policy enforcement.** Define what the AI can and cannot do. Patchwork blocks dangerous actions in real-time -- before they execute.
 
@@ -70,6 +70,22 @@ sudo bash scripts/system-install.sh --users alice,bob,charlie
 
 This locks `settings.json` as root-owned with the system immutable flag, installs a LaunchDaemon watchdog, and makes it impossible for the AI agent or non-admin users to disable monitoring.
 
+### Audit relay daemon (v0.5.0)
+
+For defence-in-depth, deploy the root-owned audit relay. The relay is a separate daemon that receives copies of every audit event via Unix socket and writes them to its own append-only log. Even if an attacker compromises the user-space audit store, the relay's copy is intact.
+
+```bash
+# Deploy the relay (installs LaunchDaemon / systemd unit, creates /var/patchwork/)
+sudo bash scripts/deploy-relay.sh
+
+# Manage the relay
+patchwork relay start          # Start the daemon
+patchwork relay status         # Check health + heartbeat
+patchwork relay verify         # Verify relay-side hash chain
+```
+
+The relay runs a 30-second heartbeat and maintains its own independent SHA-256 hash chain.
+
 ---
 
 ## How it works
@@ -86,10 +102,11 @@ Claude Code                    Patchwork                        Audit Store
     |                              |-- record event                |
     |                              |-- compute hash chain -------> events.jsonl
     |                              |-- index -------- -----------> audit.db (SQLite)
+    |                              |-- relay event via socket ---> /var/patchwork/relay.jsonl
     |                              |-- webhook alert (if high risk)|
 ```
 
-Patchwork hooks into Claude Code's native hook system. Every tool call passes through the policy engine before execution. Denied actions are blocked and logged. Completed actions are recorded with tamper-evident hash chaining.
+Patchwork hooks into Claude Code's native hook system. Every tool call passes through the policy engine before execution. Denied actions are blocked and logged. Completed actions are recorded with tamper-evident hash chaining and forwarded to the root-owned audit relay.
 
 ---
 
@@ -148,10 +165,11 @@ The AI agent cannot disable its own monitoring:
 | Attack vector | Defence |
 |---|---|
 | Editing settings.json to remove hooks | Policy deny rule + file locked as root:wheel + schg flag |
-| Truncating/deleting the audit log | Policy deny rule + command regex blocks redirects |
+| Truncating/deleting the audit log | Policy deny rule + command regex blocks redirects + relay has independent copy |
 | Weakening the security policy | Policy deny rule blocks writes to policy.yml |
 | Timeout-based bypass | Fail-closed mode denies on hook timeout |
 | Shell metacharacter evasion | Regex command rules catch pipes/redirects |
+| Compromising user-space audit store | Root-owned relay daemon maintains independent hash-chained copy |
 
 ### Fail-closed mode
 
@@ -176,6 +194,16 @@ Sensitive file detection covers: `.env`, private keys, cloud credentials, API to
 ---
 
 ## Integrity & Compliance
+
+### 5-layer tamper-proof architecture
+
+| Layer | Component | Status |
+|-------|-----------|--------|
+| 1 | **Hash-chained audit log** -- SHA-256 chain in events.jsonl, any edit breaks the chain | Done |
+| 2 | **Root-owned audit relay** -- separate daemon receives events via Unix socket, independent hash chain, 30s heartbeat | Done (v0.5.0) |
+| 3 | **HMAC sealing + remote witness** -- cryptographic seal + off-machine witness anchor | Done |
+| 4 | **KMS-backed sealing** -- macOS Keychain / cloud KMS for seal keys | Planned |
+| 5 | **Blockchain anchoring** -- periodic Merkle root published to an immutable public ledger | Planned |
 
 ### Tamper-evident hash chain
 
@@ -281,6 +309,11 @@ patchwork verify                      # Hash chain verification
 patchwork seal                        # HMAC signing
 patchwork attest --profile strict     # CI attestation
 
+# Relay (root-owned audit daemon)
+patchwork relay start                 # Start the relay daemon
+patchwork relay status                # Health check + heartbeat
+patchwork relay verify                # Verify relay-side hash chain
+
 # Compliance
 patchwork report --framework all      # All 7 frameworks
 patchwork report --include-gaps       # Gap analysis + remediation
@@ -356,6 +389,12 @@ flowchart TB
         JSONL --- SQL
     end
 
+    subgraph "Audit Relay (root-owned)"
+        RD["Relay Daemon\n(Unix socket, 30s heartbeat)"]
+        RL["relay.jsonl\n(/var/patchwork/)"]
+        RD --> RL
+    end
+
     subgraph "Integrity Layer"
         HC[SHA-256 Hash Chain]
         SEAL[HMAC Seal]
@@ -378,6 +417,7 @@ flowchart TB
 
     PT --> RC
     POST --> JSONL
+    POST -->|Unix socket| RD
 
     JSONL --> HC
     HC --> SEAL
@@ -432,6 +472,11 @@ Four packages in a TypeScript monorepo:
   guard.sh              # Session start guard
   hook-wrapper.sh       # Shared hook shim (runtime Node discovery)
   system-watchdog.sh    # Multi-user watchdog
+
+/var/patchwork/         # Audit relay (root-owned) [v0.5.0]
+  relay.jsonl           # Independent hash-chained event copy
+  relay.sock            # Unix socket for event ingestion
+  relay.pid             # Daemon PID file
 ```
 
 ---
@@ -448,13 +493,15 @@ Four packages in a TypeScript monorepo:
 - [x] **Health check** -- `patchwork doctor` + dashboard health indicator
 - [x] **Persistent dashboard** -- always-on at localhost:3000 via LaunchAgent
 - [x] **Multi-user system install** -- macOS + Linux + Windows enforcement
+- [x] **Root-owned audit relay** -- layer 2 of the 5-layer tamper-proof architecture (v0.5.0)
 
 **Planned:**
 - [x] **Linux enforcement** -- systemd watchdog + guard, chattr +i, multi-user
 - [x] **Windows enforcement** -- PowerShell guard + watchdog, Task Scheduler, multi-user
 - [ ] **Diff-aware risk scoring** -- parse actual code changes, not just file paths
 - [ ] **Team mode** -- local-first with aggregated sealed bundles pushed to a team server
-- [ ] **KMS-backed sealing** -- macOS Keychain / cloud KMS for seal keys
+- [ ] **KMS-backed sealing** -- layer 4: macOS Keychain / cloud KMS for seal keys
+- [ ] **Blockchain anchoring** -- layer 5: Merkle root published to immutable public ledger
 - [ ] **Cursor adapter** -- pending Cursor hook API
 
 ---
@@ -481,7 +528,7 @@ Four packages in a TypeScript monorepo:
 ```bash
 pnpm install
 pnpm build
-pnpm test          # 684 tests across 32 files
+pnpm test          # 742 tests across 32 files
 pnpm lint
 ```
 
