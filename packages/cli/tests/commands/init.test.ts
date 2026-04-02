@@ -131,7 +131,7 @@ describe("init --pretool flags", () => {
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
-		expect(cmd).toContain("patchwork hook pre-tool");
+		expect(cmd).toMatch(/patchwork.*hook pre-tool/);
 	});
 
 	it("E: --pretool-telemetry-dest and --pretool-telemetry-file pass through to hook command", async () => {
@@ -148,7 +148,7 @@ describe("init --pretool flags", () => {
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_DEST=both");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_FILE=/var/log/patchwork/pretool.jsonl");
-		expect(cmd).toContain("patchwork hook pre-tool");
+		expect(cmd).toMatch(/patchwork.*hook pre-tool/);
 	});
 
 	it("F: invalid --pretool-telemetry-dest fails with clear error", async () => {
@@ -213,7 +213,7 @@ describe("init --pretool flags", () => {
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_LOCK_MODE=rotate-only");
-		expect(cmd).toContain("patchwork hook pre-tool");
+		expect(cmd).toMatch(/patchwork.*hook pre-tool/);
 	});
 
 	it("G-invalid: invalid --pretool-telemetry-lock-mode fails with clear error", async () => {
@@ -252,7 +252,7 @@ describe("init --strict-profile", () => {
 		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS=500");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
-		expect(cmd).toContain("patchwork hook pre-tool");
+		expect(cmd).toMatch(/patchwork.*hook pre-tool/);
 		// Summary line printed
 		const joined = output.join("\n");
 		expect(joined).toContain("Strict profile");
@@ -301,7 +301,7 @@ describe("init --strict-profile", () => {
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
-		expect(cmd).toContain("patchwork hook pre-tool");
+		expect(cmd).toMatch(/patchwork.*hook pre-tool/);
 	});
 
 	it("E: re-run with strict profile updates existing hook (no duplication)", async () => {
@@ -309,7 +309,7 @@ describe("init --strict-profile", () => {
 		await runInit(["claude-code", "--project", tmpDir]);
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		let settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain("patchwork hook pre-tool");
+		expect(settings.hooks.PreToolUse[0].hooks[0].command).toMatch(/patchwork.*hook pre-tool/);
 
 		// Re-run with strict
 		const { output } = await runInit([

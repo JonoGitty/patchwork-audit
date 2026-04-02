@@ -6,10 +6,12 @@ const CLAUDE_SETTINGS_DIR = join(getHomeDir(), ".claude");
 const CLAUDE_SETTINGS_PATH = join(CLAUDE_SETTINGS_DIR, "settings.json");
 
 /**
- * Matches any command that contains "patchwork hook" — with or without
- * leading env-var prefixes like `PATCHWORK_PRETOOL_FAIL_CLOSED=1`.
+ * Matches any command that references patchwork followed by "hook" — handles:
+ *   - bare binary:  `patchwork hook pre-tool`
+ *   - full JS path: `"C:/.../patchwork-audit/dist/index.js" hook pre-tool`
+ *   - with env-var prefixes: `PATCHWORK_PRETOOL_FAIL_CLOSED=1 ... hook pre-tool`
  */
-const PATCHWORK_HOOK_RE = /\bpatchwork hook\b/;
+const PATCHWORK_HOOK_RE = /patchwork(?:[^"]*"?\s+|\s+)hook\b/;
 
 /** A single hook handler within a matcher group. */
 interface HookHandler {
@@ -93,20 +95,53 @@ function buildHooks(binPath?: string, options?: InstallOptions) {
 	if (!patchworkBin) {
 		// Resolve patchwork binary from the same directory as the running node
 		const nodeDir = dirname(nodeExec);
-		// On Windows, check for .cmd wrapper first
-		const candidates = isWindows
-			? [join(nodeDir, "patchwork.cmd"), join(nodeDir, "patchwork")]
-			: [join(nodeDir, "patchwork")];
-		for (const candidate of candidates) {
+
+		if (isWindows) {
+			// On Windows, node.exe can't execute .cmd wrappers or bare CLI names.
+			// We need the actual JS entry point. Try to resolve it via:
+			// 1. The npm global node_modules (where `npm i -g` installs)
+			// 2. The node sibling directory (for bundled installs)
+			// 3. require.resolve as a last resort
+			const npmGlobalJs = join(nodeDir, "node_modules", "patchwork-audit", "dist", "index.js");
+			const appDataNpmJs = join(
+				process.env.APPDATA || "",
+				"npm",
+				"node_modules",
+				"patchwork-audit",
+				"dist",
+				"index.js",
+			);
+			const candidates = [npmGlobalJs, appDataNpmJs];
+			for (const candidate of candidates) {
+				if (existsSync(candidate)) {
+					patchworkBin = candidate;
+					break;
+				}
+			}
+			if (!patchworkBin) {
+				// Try require.resolve to find wherever the package actually lives
+				try {
+					patchworkBin = require.resolve("patchwork-audit/dist/index.js");
+				} catch {
+					patchworkBin = "patchwork"; // final fallback
+				}
+			}
+		} else {
+			// On Unix, a sibling `patchwork` binary works fine with node
+			const candidate = join(nodeDir, "patchwork");
 			if (existsSync(candidate)) {
 				patchworkBin = candidate;
-				break;
+			} else {
+				patchworkBin = "patchwork"; // fallback to PATH
 			}
 		}
-		if (!patchworkBin) patchworkBin = "patchwork"; // fallback to PATH
 	}
 
-	const cmd = `${nodeExec} ${patchworkBin}`;
+	// Claude Code runs hook commands through /usr/bin/bash (even on Windows via Git Bash).
+	// Backslash paths break (bash interprets \P as escape), and paths with spaces need quoting.
+	// Use forward slashes and quote both paths for cross-platform safety.
+	const quote = (p: string) => `"${p.replace(/\\/g, "/")}"`;
+	const cmd = `${quote(nodeExec)} ${quote(patchworkBin)}`;
 
 	// Build env prefix for PreToolUse command
 	const { enabled: failClosed } = resolveFailClosed(options);
