@@ -21,6 +21,7 @@ import { dashboardCommand } from "./commands/dashboard.js";
 import { reportCommand } from "./commands/report.js";
 import { replayCommand } from "./commands/replay.js";
 import { doctorCommand } from "./commands/doctor.js";
+import { commitAttestCommand } from "./commands/commit-attest.js";
 
 const program = new Command();
 
@@ -51,5 +52,6 @@ program.addCommand(dashboardCommand);
 program.addCommand(reportCommand);
 program.addCommand(replayCommand);
 program.addCommand(doctorCommand);
+program.addCommand(commitAttestCommand);
 
 program.parse();

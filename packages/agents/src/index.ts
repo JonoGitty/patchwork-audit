@@ -16,6 +16,16 @@ export type {
 	ClaudeCodeHookEvent,
 } from "./claude-code/types.js";
 
+// Commit attestation
+export { isGitCommitCommand, extractCommitInfo, usesNoVerify } from "./claude-code/git-commit-detector.js";
+export {
+	generateCommitAttestation,
+	writeCommitAttestation,
+	addGitNote,
+	readCommitAttestation,
+	type CommitAttestationParams,
+} from "./claude-code/commit-attestor.js";
+
 // Codex
 export { syncCodexHistory } from "./codex/history-parser.js";
 

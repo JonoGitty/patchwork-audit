@@ -25,6 +25,8 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { mapClaudeCodeTool } from "./mapper.js";
+import { isGitCommitCommand, extractCommitInfo, usesNoVerify } from "./git-commit-detector.js";
+import { generateCommitAttestation, writeCommitAttestation, addGitNote } from "./commit-attestor.js";
 import type { ClaudeCodeHookInput, ClaudeCodeHookOutput } from "./types.js";
 
 function getEventsPath(): string {
@@ -297,7 +299,7 @@ function handlePostToolUse(
 	store: Store,
 	input: ClaudeCodeHookInput,
 	overrideStatus?: "failed",
-): null {
+): ClaudeCodeHookOutput | null {
 	const toolName = input.tool_name || "unknown";
 	const toolInput = input.tool_input || {};
 
@@ -339,7 +341,64 @@ function handlePostToolUse(
 
 	store.append(event);
 	fireWebhookAlert(event);
+
+	// --- Commit attestation: detect git commit and generate inline compliance proof ---
+	if (
+		toolName === "Bash" &&
+		overrideStatus !== "failed" &&
+		typeof toolInput.command === "string" &&
+		isGitCommitCommand(toolInput.command)
+	) {
+		const stdout =
+			input.tool_response?.stdout ||
+			input.tool_response?.output ||
+			input.tool_response?.content ||
+			"";
+		if (typeof stdout === "string") {
+			const commitInfo = extractCommitInfo(stdout);
+			if (commitInfo) {
+				try {
+					const attestation = generateCommitAttestation({
+						commitSha: commitInfo.sha,
+						branch: commitInfo.branch,
+						sessionId: input.session_id,
+						projectRoot: input.cwd,
+						store,
+						toolVersion: getAgentVersion(),
+					});
+					writeCommitAttestation(attestation);
+					try {
+						addGitNote(attestation, input.cwd);
+					} catch {
+						// git notes failure is non-fatal
+					}
+
+					const noVerify = usesNoVerify(toolInput.command);
+					const status = attestation.pass ? "PASS" : "FAIL";
+					const warn = noVerify ? " (--no-verify detected)" : "";
+					return {
+						feedback: `[Patchwork] Commit ${commitInfo.sha} attested: ${status}${warn} (${attestation.payload_hash})`,
+					};
+				} catch {
+					// Attestation generation must never block the hook pipeline
+				}
+			}
+		}
+	}
+
 	return null;
+}
+
+/** Resolve agent/tool version for attestation artifacts. */
+function getAgentVersion(): string {
+	try {
+		const { createRequire } = require("node:module") as typeof import("node:module");
+		const req = createRequire(import.meta.url);
+		const pkg = req("../../package.json") as { version: string };
+		return pkg.version;
+	} catch {
+		return "unknown";
+	}
 }
 
 function handleSubagentStart(store: Store, input: ClaudeCodeHookInput): null {

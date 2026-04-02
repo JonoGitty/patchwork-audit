@@ -8,14 +8,21 @@ import type { ClaudeCodeHookInput } from "../../src/claude-code/types.js";
 describe("handleClaudeCodeHook", () => {
 	let originalHome: string | undefined;
 	let tmpDir: string;
+	let stderrWrite: typeof process.stderr.write;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-adapter-test-"));
 		originalHome = process.env.HOME;
 		process.env.HOME = tmpDir;
+		// Pre-create db directory so SqliteStore constructor doesn't fail
+		mkdirSync(join(tmpDir, ".patchwork", "db"), { recursive: true, mode: 0o700 });
+		// Suppress expected stderr noise from SQLite fallback paths
+		stderrWrite = process.stderr.write;
+		process.stderr.write = (() => true) as typeof process.stderr.write;
 	});
 
 	afterEach(() => {
+		process.stderr.write = stderrWrite;
 		process.env.HOME = originalHome;
 		try {
 			rmSync(tmpDir, { recursive: true, force: true });
@@ -518,14 +525,19 @@ describe("handleClaudeCodeHook", () => {
 describe("divergence marker", () => {
 	let tmpDir: string;
 	let originalHome: string | undefined;
+	let stderrWrite: typeof process.stderr.write;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-divergence-test-"));
 		originalHome = process.env.HOME;
 		process.env.HOME = tmpDir;
+		// Suppress expected stderr from intentionally broken SQLite paths
+		stderrWrite = process.stderr.write;
+		process.stderr.write = (() => true) as typeof process.stderr.write;
 	});
 
 	afterEach(() => {
+		process.stderr.write = stderrWrite;
 		process.env.HOME = originalHome;
 		try {
 			rmSync(tmpDir, { recursive: true, force: true });

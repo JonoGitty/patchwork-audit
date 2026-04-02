@@ -23,6 +23,13 @@ export {
 
 export { SessionSchema, type Session } from "./schema/session.js";
 
+export {
+	CommitAttestationSchema,
+	RiskSummarySchema,
+	type CommitAttestation,
+	type RiskSummary,
+} from "./schema/commit-attestation.js";
+
 // Store
 export { JsonlStore, type JsonlRotationOptions } from "./store/jsonl.js";
 export { SqliteStore } from "./store/sqlite.js";
