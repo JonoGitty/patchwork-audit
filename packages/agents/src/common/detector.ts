@@ -75,6 +75,7 @@ function getVersion(binaryPath: string, flag: string): string | null {
 		const result = execSync(`"${binaryPath}" ${flag}`, {
 			encoding: "utf-8",
 			timeout: 5000,
+			stdio: ["pipe", "pipe", "pipe"],
 		}).trim();
 		// Extract version number from output
 		const match = result.match(/(\d+\.\d+\.?\d*)/);
