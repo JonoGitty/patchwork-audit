@@ -1,5 +1,8 @@
 # Patchwork
 
+[![npm version](https://img.shields.io/npm/v/patchwork-audit)](https://www.npmjs.com/package/patchwork-audit)
+[![GitHub release](https://img.shields.io/github/v/release/JonoGitty/patchwork-audit)](https://github.com/JonoGitty/patchwork-audit/releases)
+
 **The audit trail for AI coding agents.**
 
 AI agents are black boxes. They read your files, execute commands, make web requests, and modify your codebase -- and you have no record of what they did or why. As organisations adopt AI coding assistants, this becomes a compliance and security problem:
