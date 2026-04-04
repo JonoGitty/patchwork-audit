@@ -38,3 +38,8 @@ export {
 	hashApiKey,
 	deriveMachineId,
 } from "./crypto.js";
+
+// Server
+export { TeamDb } from "./server/db/schema.js";
+export { createTeamApp } from "./server/app.js";
+export { startTeamServer, type TeamServerOptions } from "./server/start.js";
