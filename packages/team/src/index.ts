@@ -43,3 +43,7 @@ export {
 export { TeamDb } from "./server/db/schema.js";
 export { createTeamApp } from "./server/app.js";
 export { startTeamServer, type TeamServerOptions } from "./server/start.js";
+
+// Enrollment & Identity
+export { enrollMachine, saveTeamConfig, loadTeamConfig, isEnrolled } from "./sync/enrollment.js";
+export { getMachineHardwareId, getMachineName, getMachineOS } from "./sync/identity.js";
