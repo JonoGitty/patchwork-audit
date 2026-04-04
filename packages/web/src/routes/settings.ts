@@ -1,16 +1,47 @@
 import { Hono } from "hono";
 import type { Store } from "@patchwork/core";
-import { loadActivePolicy, SYSTEM_POLICY_PATH } from "@patchwork/core";
+import {
+	loadActivePolicy,
+	SYSTEM_POLICY_PATH,
+	RELAY_SOCKET_PATH,
+	RELAY_PROTOCOL_VERSION,
+	RELAY_SEALS_PATH,
+	pingRelay,
+} from "@patchwork/core";
 import { detectInstalledAgents } from "@patchwork/agents";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { connect } from "node:net";
 import { join } from "node:path";
 import { layout } from "../templates/layout.js";
 import { riskBadge } from "../templates/components.js";
 
+/** Query relay daemon via socket. */
+function queryRelay<T>(type: string): Promise<T | null> {
+	return new Promise((resolve) => {
+		if (!existsSync(RELAY_SOCKET_PATH)) { resolve(null); return; }
+		const timer = setTimeout(() => resolve(null), 2_000);
+		const socket = connect(RELAY_SOCKET_PATH, () => {
+			socket.write(JSON.stringify({
+				protocol_version: RELAY_PROTOCOL_VERSION,
+				type,
+				timestamp: new Date().toISOString(),
+			}) + "\n");
+		});
+		socket.on("data", (chunk) => {
+			clearTimeout(timer);
+			try { resolve(JSON.parse(chunk.toString().trim())); }
+			catch { resolve(null); }
+			socket.destroy();
+		});
+		socket.on("error", () => { clearTimeout(timer); resolve(null); });
+	});
+}
+
 export function settingsRoutes(store: Store, dataDir: string) {
 	const app = new Hono();
 
-	app.get("/settings", (c) => {
+	app.get("/settings", async (c) => {
+		const home = process.env.HOME || "";
 		const events = store.readAll();
 		const sessionIds = new Set(events.map(e => e.session_id));
 		const lastEvent = events.length > 0 ? events[events.length - 1] : null;
@@ -37,6 +68,58 @@ export function settingsRoutes(store: Store, dataDir: string) {
 			];
 		}
 
+		// Hooks
+		let hookSummary = "Not configured";
+		let hookFormat = "";
+		const settingsPath = join(home, ".claude", "settings.json");
+		if (existsSync(settingsPath)) {
+			try {
+				const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+				const hooks = settings.hooks || {};
+				const count = Object.keys(hooks).length;
+				hookSummary = `${count} event types configured`;
+
+				// Check format
+				let allNested = true;
+				for (const entries of Object.values(hooks) as any[][]) {
+					for (const e of entries) {
+						if (typeof e.command === "string" && !e.hooks) {
+							allNested = false;
+							break;
+						}
+					}
+				}
+				hookFormat = allNested ? "Correct (nested matcher)" : "WRONG (flat — hooks won't fire)";
+			} catch {
+				hookSummary = "settings.json unreadable";
+			}
+		}
+
+		// Relay status via socket
+		const chainState = await queryRelay<any>("get_chain_state");
+		const sealStatus = await queryRelay<any>("seal_status");
+		const relayOnline = !!chainState?.ok;
+
+		// Commit attestations
+		const attestIndexPath = join(dataDir, "commit-attestations", "index.jsonl");
+		let attestCount = 0;
+		if (existsSync(attestIndexPath)) {
+			try {
+				const content = readFileSync(attestIndexPath, "utf-8").trim();
+				attestCount = content ? content.split("\n").length : 0;
+			} catch { /* */ }
+		}
+
+		// Team mode
+		let teamInfo = "Not enrolled";
+		const teamConfigPath = join("/Library/Patchwork/team", "config.json");
+		if (existsSync(teamConfigPath)) {
+			try {
+				const config = JSON.parse(readFileSync(teamConfigPath, "utf-8"));
+				teamInfo = `Enrolled in "${config.team_name}" (${config.server_url})`;
+			} catch { /* */ }
+		}
+
 		const content = `
 		<h1>Settings & Status</h1>
 
@@ -48,6 +131,35 @@ export function settingsRoutes(store: Store, dataDir: string) {
 			${settingsRow("Total Events", String(events.length))}
 			${settingsRow("Total Sessions", String(sessionIds.size))}
 			${settingsRow("Last Event", lastEvent ? new Date(lastEvent.timestamp).toLocaleString() : "—")}
+		</div>
+
+		<div class="settings-section card mb-24">
+			<h2>Hooks</h2>
+			${settingsRow("Status", hookSummary)}
+			${hookFormat ? settingsRow("Format", hookFormat.includes("WRONG")
+				? `<span style="color:var(--critical)">${escapeHtml(hookFormat)}</span>`
+				: `<span style="color:var(--green)">${escapeHtml(hookFormat)}</span>`) : ""}
+		</div>
+
+		<div class="settings-section card mb-24">
+			<h2>Relay Daemon (Layer 2)</h2>
+			${settingsRow("Status", relayOnline
+				? '<span style="color:var(--green)">Running</span>'
+				: '<span style="color:var(--text-muted)">Not running</span>')}
+			${chainState?.ok ? settingsRow("Events", String(chainState.event_count)) : ""}
+			${chainState?.ok ? settingsRow("Chain tip", `<code style="font-size:11px">${(chainState.chain_tip || "—").slice(0, 30)}...</code>`) : ""}
+			${sealStatus?.ok ? settingsRow("Seals", `${sealStatus.seals_total} (auto-seal ${sealStatus.auto_seal_enabled ? "on" : "off"})`) : ""}
+			${chainState?.ok ? settingsRow("Uptime", `${Math.floor(chainState.uptime_ms / 3_600_000)}h ${Math.floor((chainState.uptime_ms % 3_600_000) / 60_000)}m`) : ""}
+		</div>
+
+		<div class="settings-section card mb-24">
+			<h2>Commit Attestations</h2>
+			${settingsRow("Attestations", String(attestCount))}
+		</div>
+
+		<div class="settings-section card mb-24">
+			<h2>Team Mode</h2>
+			${settingsRow("Status", teamInfo)}
 		</div>
 
 		<div class="settings-section card mb-24">
@@ -73,11 +185,7 @@ export function settingsRoutes(store: Store, dataDir: string) {
 			${settingsRow("System Policy", isSystemPolicy ? '<span style="color:var(--green)">active</span>' : '<span style="color:var(--text-muted)">not installed</span>')}
 			${settingsRow("Max Risk", riskBadge(policy.max_risk))}
 			${settingsRow("File Deny Rules", String(policy.files.deny.length))}
-			${settingsRow("File Allow Rules", String(policy.files.allow.length))}
 			${settingsRow("Command Deny Rules", String(policy.commands.deny.length))}
-			${settingsRow("Command Allow Rules", String(policy.commands.allow.length))}
-			${settingsRow("Network Deny Rules", String(policy.network.deny.length))}
-			${settingsRow("MCP Deny Rules", String(policy.mcp.deny.length))}
 
 			${policy.files.deny.length > 0 ? `
 			<h3 style="margin-top:16px">File Deny Rules</h3>
@@ -105,14 +213,6 @@ export function settingsRoutes(store: Store, dataDir: string) {
 					}).join("")}
 				</tbody>
 			</table>` : ""}
-		</div>
-
-		<div class="settings-section card mb-24">
-			<h2>System Policy Path</h2>
-			${settingsRow("Expected at", SYSTEM_POLICY_PATH)}
-			${settingsRow("Exists", existsSync(SYSTEM_POLICY_PATH)
-				? '<span style="color:var(--green)">yes</span>'
-				: '<span style="color:var(--text-muted)">no</span>')}
 		</div>`;
 
 		return c.html(layout("Settings", "/settings", content));

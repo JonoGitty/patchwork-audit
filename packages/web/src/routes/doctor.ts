@@ -1,7 +1,17 @@
 import { Hono } from "hono";
 import type { Store } from "@patchwork/core";
-import { verifyChain, loadActivePolicy, RELAY_SOCKET_PATH, RELAY_LOG_PATH, RELAY_PID_PATH, RELAY_SEALS_PATH, readRelayDivergenceMarker } from "@patchwork/core";
+import {
+	verifyChain,
+	loadActivePolicy,
+	RELAY_SOCKET_PATH,
+	RELAY_PID_PATH,
+	RELAY_SEALS_PATH,
+	RELAY_PROTOCOL_VERSION,
+	pingRelay,
+	readRelayDivergenceMarker,
+} from "@patchwork/core";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { connect } from "node:net";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { layout } from "../templates/layout.js";
@@ -13,10 +23,48 @@ interface Check {
 	fix?: string;
 }
 
+/** Extract command string from a hook entry (handles both nested and flat formats). */
+function getHookCommand(entry: any): string {
+	if (Array.isArray(entry?.hooks) && entry.hooks[0]?.command) {
+		return entry.hooks[0].command; // Nested format (correct)
+	}
+	if (typeof entry?.command === "string") {
+		return entry.command; // Flat format (legacy/broken)
+	}
+	return "";
+}
+
+/** Check if a hook entry uses the correct nested format. */
+function isNestedFormat(entry: any): boolean {
+	return typeof entry?.matcher === "string" && Array.isArray(entry?.hooks);
+}
+
+/** Query relay daemon via socket. */
+function queryRelay<T>(type: string): Promise<T | null> {
+	return new Promise((resolve) => {
+		if (!existsSync(RELAY_SOCKET_PATH)) { resolve(null); return; }
+		const timer = setTimeout(() => resolve(null), 2_000);
+		const socket = connect(RELAY_SOCKET_PATH, () => {
+			socket.write(JSON.stringify({
+				protocol_version: RELAY_PROTOCOL_VERSION,
+				type,
+				timestamp: new Date().toISOString(),
+			}) + "\n");
+		});
+		socket.on("data", (chunk) => {
+			clearTimeout(timer);
+			try { resolve(JSON.parse(chunk.toString().trim())); }
+			catch { resolve(null); }
+			socket.destroy();
+		});
+		socket.on("error", () => { clearTimeout(timer); resolve(null); });
+	});
+}
+
 export function doctorRoutes(store: Store, dataDir: string) {
 	const app = new Hono();
 
-	app.get("/doctor", (c) => {
+	app.get("/doctor", async (c) => {
 		const home = process.env.HOME || "";
 		const settingsPath = join(home, ".claude", "settings.json");
 		const eventsPath = join(dataDir, "events.jsonl");
@@ -27,12 +75,13 @@ export function doctorRoutes(store: Store, dataDir: string) {
 		if (existsSync(settingsPath)) {
 			checks.push({ label: "settings.json", status: "pass", message: "Exists" });
 		} else {
-			checks.push({ label: "settings.json", status: "fail", message: "NOT FOUND", fix: "patchwork init claude-code --strict-profile --policy-mode fail-closed" });
+			checks.push({ label: "settings.json", status: "fail", message: "NOT FOUND", fix: "patchwork init claude-code" });
 		}
 
 		// 2. Hooks
 		let hooks: Record<string, any[]> = {};
 		let preToolCmd = "";
+		let hookFormatOk = true;
 		if (existsSync(settingsPath)) {
 			try {
 				const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
@@ -42,34 +91,85 @@ export function doctorRoutes(store: Store, dataDir: string) {
 				if (missing.length === 0) {
 					checks.push({ label: "Hooks installed", status: "pass", message: `${Object.keys(hooks).length} hook events configured` });
 				} else {
-					checks.push({ label: "Hooks installed", status: "fail", message: `Missing: ${missing.join(", ")}`, fix: "patchwork init claude-code --strict-profile --policy-mode fail-closed" });
+					checks.push({ label: "Hooks installed", status: "fail", message: `Missing: ${missing.join(", ")}`, fix: "patchwork init claude-code" });
 				}
-				preToolCmd = hooks.PreToolUse?.[0]?.command || "";
+
+				// Check hook format (nested vs flat)
+				for (const [event, entries] of Object.entries(hooks)) {
+					for (const entry of entries) {
+						if (!isNestedFormat(entry) && typeof entry.command === "string") {
+							hookFormatOk = false;
+							break;
+						}
+					}
+					if (!hookFormatOk) break;
+				}
+
+				if (!hookFormatOk) {
+					checks.push({
+						label: "Hook format",
+						status: "fail",
+						message: "Uses flat format — hooks will NOT fire",
+						fix: "patchwork init claude-code",
+					});
+				} else {
+					checks.push({ label: "Hook format", status: "pass", message: "Correct nested matcher format" });
+				}
+
+				// Check for duplicate hooks
+				let hasDuplicates = false;
+				for (const [event, entries] of Object.entries(hooks)) {
+					const patchworkEntries = entries.filter((e: any) => {
+						const cmd = getHookCommand(e);
+						return /patchwork.*hook\b/.test(cmd);
+					});
+					if (patchworkEntries.length > 1) {
+						hasDuplicates = true;
+						break;
+					}
+				}
+				if (hasDuplicates) {
+					checks.push({
+						label: "Duplicate hooks",
+						status: "warn",
+						message: "Multiple Patchwork hooks per event — events may be logged twice",
+						fix: "Edit settings.json to remove duplicates",
+					});
+				}
+
+				// Get PreToolUse command for further checks
+				if (hooks.PreToolUse?.length) {
+					preToolCmd = getHookCommand(hooks.PreToolUse[0]);
+				}
 			} catch {
 				checks.push({ label: "Hooks installed", status: "fail", message: "settings.json is invalid JSON" });
 			}
 		}
 
-		// 3. Explicit node path
-		if (preToolCmd.includes("/node ")) {
-			checks.push({ label: "Architecture-safe hooks", status: "pass", message: "Uses explicit node path" });
-		} else if (preToolCmd.includes("patchwork hook")) {
-			checks.push({ label: "Architecture-safe hooks", status: "warn", message: "Uses bare 'patchwork' — may fail on mixed-arch Macs", fix: "patchwork init claude-code --strict-profile --policy-mode fail-closed" });
-		}
-
-		// 4. Fail-closed
+		// 3. Fail-closed
 		if (preToolCmd.includes("PATCHWORK_PRETOOL_FAIL_CLOSED=1")) {
 			checks.push({ label: "Fail-closed mode", status: "pass", message: "Enabled" });
-		} else {
-			checks.push({ label: "Fail-closed mode", status: "warn", message: "NOT enabled — hooks fail-open on errors", fix: "patchwork init claude-code --strict-profile --policy-mode fail-closed" });
+		} else if (preToolCmd) {
+			checks.push({
+				label: "Fail-closed mode",
+				status: "warn",
+				message: "NOT enabled — hooks fail-open on errors",
+				fix: "patchwork init claude-code --strict-profile --policy-mode fail-closed",
+			});
 		}
 
-		// 5. Audit store
+		// 4. Audit store
 		if (existsSync(dataDir)) {
 			checks.push({ label: "Audit store", status: "pass", message: dataDir });
 			if (existsSync(eventsPath)) {
-				const lines = readFileSync(eventsPath, "utf-8").trim().split("\n").length;
-				checks.push({ label: "Events file", status: "pass", message: `${lines} events` });
+				try {
+					const size = statSync(eventsPath).size;
+					const events = store.readRecent(1);
+					const total = store.readAll().length;
+					checks.push({ label: "Events file", status: "pass", message: `${total} events` });
+				} catch {
+					checks.push({ label: "Events file", status: "warn", message: "Could not read" });
+				}
 			} else {
 				checks.push({ label: "Events file", status: "warn", message: "No events recorded yet" });
 			}
@@ -77,7 +177,7 @@ export function doctorRoutes(store: Store, dataDir: string) {
 			checks.push({ label: "Audit store", status: "fail", message: "Directory not found" });
 		}
 
-		// 6. Policy
+		// 5. Policy
 		try {
 			const { policy, source } = loadActivePolicy();
 			if (source !== "built-in") {
@@ -89,7 +189,7 @@ export function doctorRoutes(store: Store, dataDir: string) {
 			checks.push({ label: "Security policy", status: "warn", message: "Could not load policy" });
 		}
 
-		// 7. Guard status
+		// 6. Guard status
 		if (existsSync(guardStatusPath)) {
 			try {
 				const guard = JSON.parse(readFileSync(guardStatusPath, "utf-8"));
@@ -104,23 +204,21 @@ export function doctorRoutes(store: Store, dataDir: string) {
 			} catch {
 				checks.push({ label: "Session guard", status: "warn", message: "Status file unreadable" });
 			}
-		} else {
-			checks.push({ label: "Session guard", status: "warn", message: "Never run" });
 		}
 
-		// 8. Watchdog
+		// 7. Watchdog
 		try {
 			const launchctl = execSync("launchctl list 2>/dev/null", { stdio: "pipe", encoding: "utf-8", timeout: 3000 });
 			if (launchctl.includes("com.patchwork")) {
 				checks.push({ label: "Watchdog", status: "pass", message: "LaunchAgent running" });
 			} else {
-				checks.push({ label: "Watchdog", status: "warn", message: "Not running", fix: "launchctl load ~/Library/LaunchAgents/com.patchwork.watchdog.plist" });
+				checks.push({ label: "Watchdog", status: "warn", message: "Not running" });
 			}
 		} catch {
 			checks.push({ label: "Watchdog", status: "warn", message: "Could not check" });
 		}
 
-		// 9. Hash chain
+		// 8. Hash chain
 		if (existsSync(eventsPath)) {
 			try {
 				const events = store.readAll();
@@ -135,64 +233,64 @@ export function doctorRoutes(store: Store, dataDir: string) {
 			} catch { /* skip */ }
 		}
 
-		// 10. Relay daemon (layer 2)
-		if (existsSync(RELAY_SOCKET_PATH)) {
-			checks.push({ label: "Relay socket", status: "pass", message: RELAY_SOCKET_PATH });
+		// 9. Relay daemon — query via socket (not reading entire log)
+		const chainState = await queryRelay<any>("get_chain_state");
+		const sealStatus = await queryRelay<any>("seal_status");
+
+		if (chainState?.ok) {
+			checks.push({ label: "Relay daemon", status: "pass", message: `Running (${chainState.event_count} events)` });
+
+			if (chainState.last_heartbeat) {
+				const age = Date.now() - chainState.last_heartbeat;
+				const ageStr = age < 60_000 ? `${Math.round(age / 1000)}s ago` : `${Math.round(age / 60_000)}m ago`;
+				const status = age < 60_000 ? "pass" as const : age < 120_000 ? "warn" as const : "fail" as const;
+				checks.push({ label: "Last heartbeat", status, message: ageStr });
+			}
+
+			const uptimeH = Math.floor(chainState.uptime_ms / 3_600_000);
+			const uptimeM = Math.floor((chainState.uptime_ms % 3_600_000) / 60_000);
+			checks.push({ label: "Relay uptime", status: "pass", message: `${uptimeH}h ${uptimeM}m` });
+		} else if (existsSync(RELAY_SOCKET_PATH)) {
+			checks.push({ label: "Relay daemon", status: "warn", message: "Socket exists but daemon unreachable" });
 		} else {
-			checks.push({ label: "Relay socket", status: "warn", message: "Not running — deploy with: sudo bash scripts/deploy-relay.sh" });
+			checks.push({ label: "Relay daemon", status: "warn", message: "Not installed", fix: "sudo bash scripts/deploy-relay.sh" });
 		}
 
-		if (existsSync(RELAY_PID_PATH)) {
-			const pid = readFileSync(RELAY_PID_PATH, "utf-8").trim();
-			try {
-				process.kill(Number(pid), 0);
-				checks.push({ label: "Relay daemon", status: "pass", message: `PID ${pid} running` });
-			} catch {
-				checks.push({ label: "Relay daemon", status: "warn", message: `PID ${pid} not running (stale)` });
-			}
+		if (sealStatus?.ok) {
+			checks.push({ label: "Auto-seals", status: "pass", message: `${sealStatus.seals_total} seal(s), auto-seal ${sealStatus.auto_seal_enabled ? "on" : "off"}` });
 		}
 
-		if (existsSync(RELAY_LOG_PATH)) {
-			try {
-				const content = readFileSync(RELAY_LOG_PATH, "utf-8");
-				const lines = content.split("\n").filter((l: string) => l.trim());
-				let eventCount = 0;
-				let heartbeatCount = 0;
-				let lastHeartbeat = "";
-				for (const line of lines) {
-					try {
-						const p = JSON.parse(line);
-						if (p.type === "heartbeat") { heartbeatCount++; lastHeartbeat = p.timestamp; }
-						else eventCount++;
-					} catch { /* skip */ }
-				}
-				checks.push({ label: "Relay log", status: "pass", message: `${eventCount} events, ${heartbeatCount} heartbeats` });
-				if (lastHeartbeat) {
-					const age = Date.now() - new Date(lastHeartbeat).getTime();
-					const ageStr = age < 60_000 ? `${Math.round(age / 1000)}s ago` : `${Math.round(age / 60_000)}m ago`;
-					const status = age < 60_000 ? "pass" : age < 120_000 ? "warn" : "fail";
-					checks.push({ label: "Last heartbeat", status, message: ageStr });
-				}
-			} catch {
-				checks.push({ label: "Relay log", status: "warn", message: "Unreadable" });
-			}
-		}
-
-		// 11. Relay seals (layer 4)
-		if (existsSync(RELAY_SEALS_PATH)) {
-			try {
-				const content = readFileSync(RELAY_SEALS_PATH, "utf-8");
-				const seals = content.split("\n").filter((l: string) => l.trim()).length;
-				checks.push({ label: "Auto-seals", status: "pass", message: `${seals} seal(s)` });
-			} catch {
-				checks.push({ label: "Auto-seals", status: "warn", message: "Unreadable" });
-			}
-		}
-
-		// 12. Relay divergence
+		// 10. Relay divergence
 		const divergence = readRelayDivergenceMarker();
 		if (divergence && divergence.failure_count > 0) {
 			checks.push({ label: "Relay divergence", status: "warn", message: `${divergence.failure_count} failures since ${divergence.first_failure_at}` });
+		}
+
+		// 11. Commit attestations
+		const attestIndexPath = join(dataDir, "commit-attestations", "index.jsonl");
+		if (existsSync(attestIndexPath)) {
+			try {
+				const content = readFileSync(attestIndexPath, "utf-8").trim();
+				const count = content ? content.split("\n").length : 0;
+				checks.push({ label: "Commit attestations", status: "pass", message: `${count} attestation(s)` });
+			} catch {
+				checks.push({ label: "Commit attestations", status: "warn", message: "Index unreadable" });
+			}
+		} else {
+			checks.push({ label: "Commit attestations", status: "warn", message: "None yet — will generate on next git commit" });
+		}
+
+		// 12. Team mode
+		const teamConfigPath = join("/Library/Patchwork/team", "config.json");
+		if (existsSync(teamConfigPath)) {
+			try {
+				const config = JSON.parse(readFileSync(teamConfigPath, "utf-8"));
+				checks.push({ label: "Team mode", status: "pass", message: `Enrolled in "${config.team_name}"` });
+			} catch {
+				checks.push({ label: "Team mode", status: "warn", message: "Config exists but unreadable" });
+			}
+		} else {
+			checks.push({ label: "Team mode", status: "warn", message: "Not enrolled" });
 		}
 
 		const passCount = checks.filter(c => c.status === "pass").length;
