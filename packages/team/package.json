@@ -1,0 +1,41 @@
+{
+  "name": "@patchwork/team",
+  "version": "0.7.0-alpha.1",
+  "description": "Team mode for Patchwork — sync agent and team server",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "BUSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JonoGitty/patchwork-audit.git",
+    "directory": "packages/team"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@patchwork/core": "workspace:*",
+    "better-sqlite3": "^11.7.0",
+    "hono": "^4.7.0",
+    "@hono/node-server": "^1.14.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "tsup": "^8.3.0",
+    "vitest": "^2.1.0"
+  }
+}
