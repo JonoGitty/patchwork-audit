@@ -24,6 +24,7 @@ import { doctorCommand } from "./commands/doctor.js";
 import { commitAttestCommand } from "./commands/commit-attest.js";
 import { relayCommand } from "./commands/relay.js";
 import { setupCommand } from "./commands/setup.js";
+import { teamCommand } from "./commands/team.js";
 
 const program = new Command();
 
@@ -57,5 +58,6 @@ program.addCommand(doctorCommand);
 program.addCommand(commitAttestCommand);
 program.addCommand(relayCommand);
 program.addCommand(setupCommand);
+program.addCommand(teamCommand);
 
 program.parse();

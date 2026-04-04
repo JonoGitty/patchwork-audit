@@ -35,6 +35,7 @@
   "devDependencies": {
     "@patchwork/agents": "workspace:*",
     "@patchwork/core": "workspace:*",
+    "@patchwork/team": "workspace:*",
     "@patchwork/web": "workspace:*",
     "tsup": "^8.3.0",
     "tsx": "^4.19.0",

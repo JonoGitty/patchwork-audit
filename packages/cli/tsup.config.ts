@@ -4,7 +4,7 @@ export default defineConfig({
 	entry: ["src/index.ts"],
 	format: ["esm"],
 	dts: true,
-	noExternal: ["@patchwork/core", "@patchwork/agents", "@patchwork/web"],
+	noExternal: ["@patchwork/core", "@patchwork/agents", "@patchwork/web", "@patchwork/team"],
 	external: ["better-sqlite3"],
 	banner: {
 		js: "#!/usr/bin/env node",
