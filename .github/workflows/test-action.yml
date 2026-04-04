@@ -16,7 +16,7 @@ jobs:
     name: "Test: No audit data (should warn, not fail)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ./
         id: audit
         with:
@@ -34,7 +34,7 @@ jobs:
     name: "Test: Sample audit data"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create sample audit data
         run: |
@@ -71,7 +71,7 @@ jobs:
     name: "Test: Strict profile fails without seal"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create minimal audit data (no seal)
         run: |

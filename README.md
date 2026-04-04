@@ -586,7 +586,7 @@ Four packages in a TypeScript monorepo:
 ```bash
 pnpm install
 pnpm build
-pnpm test          # 769 tests across 4 packages
+pnpm test          # 868 tests across 5 packages
 pnpm lint
 ```
 
