@@ -47,3 +47,11 @@ export { startTeamServer, type TeamServerOptions } from "./server/start.js";
 // Enrollment & Identity
 export { enrollMachine, saveTeamConfig, loadTeamConfig, isEnrolled } from "./sync/enrollment.js";
 export { getMachineHardwareId, getMachineName, getMachineOS } from "./sync/identity.js";
+
+// Sync Agent
+export { SyncAgent, type SyncAgentOptions, type CycleResult } from "./sync/agent.js";
+export { readCursor, writeCursor } from "./sync/cursor.js";
+export { readNewEvents, type ReadResult } from "./sync/reader.js";
+export { readNewSeals } from "./sync/seal-reader.js";
+export { computeBackoffMs } from "./sync/backoff.js";
+export { pushBatch, sendHeartbeat } from "./sync/transport.js";
