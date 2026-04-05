@@ -9,3 +9,5 @@ dist/
 coverage/
 .DS_Store
 .claude/
+docs/.vitepress/dist/
+docs/.vitepress/cache/

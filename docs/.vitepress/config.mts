@@ -3,7 +3,8 @@ import { defineConfig } from "vitepress";
 export default defineConfig({
 	title: "Patchwork",
 	description: "The audit trail for AI coding agents",
-	head: [["link", { rel: "icon", href: "/favicon.ico" }]],
+	base: "/patchwork-audit/",
+	head: [["link", { rel: "icon", href: "/patchwork-audit/favicon.ico" }]],
 	ignoreDeadLinks: [/localhost/],
 
 	themeConfig: {

@@ -14,24 +14,30 @@ hero:
       link: https://github.com/JonoGitty/patchwork-audit
 
 features:
-  - icon: "\U0001F50D"
-    title: See Everything
+  - title: See Everything
     details: Every file edit, command, and web request logged with tamper-proof SHA-256 hash chains. Nothing gets past unrecorded.
-  - icon: "\U0001F6E1\uFE0F"
-    title: Enforce Rules
+    icon:
+      src: /icons/search.svg
+  - title: Enforce Rules
     details: Define what your AI can and cannot do. Patchwork blocks dangerous actions in real-time — before they execute.
-  - icon: "\U0001F4CB"
-    title: Prove Compliance
+    icon:
+      src: /icons/shield.svg
+  - title: Prove Compliance
     details: Generate reports mapped to SOC 2, ISO 27001, the EU AI Act, NIST AI RMF, and more. 7 frameworks, 31 controls.
-  - icon: "\U0001F512"
-    title: Tamper-Proof
+    icon:
+      src: /icons/clipboard.svg
+  - title: Tamper-Proof
     details: A 5-layer architecture — from hash chains to a root-owned relay daemon — makes it impossible for the AI to disable its own monitoring.
-  - icon: "\U0001F4BB"
-    title: Local-First
+    icon:
+      src: /icons/lock.svg
+  - title: Local-First
     details: Your data never leaves your machine. No cloud. No telemetry. Everything works offline.
-  - icon: "\U0001F30D"
-    title: Cross-Platform
+    icon:
+      src: /icons/laptop.svg
+  - title: Cross-Platform
     details: Works on macOS, Linux, and Windows. Supports Claude Code today, with more agents coming.
+    icon:
+      src: /icons/globe.svg
 ---
 
 ## The Problem
