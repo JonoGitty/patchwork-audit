@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { writeFileSync } from "node:fs";
-import { getReadStore } from "../store.js";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { getReadStore, REPORTS_DIR } from "../store.js";
 import { getSessionGitDiffs } from "../replay/git.js";
 import { renderAllEvents, renderInteractive, buildSessionHeader } from "../replay/terminal.js";
 import { renderHtmlReplay } from "../replay/html-renderer.js";
@@ -70,13 +70,16 @@ export const replayCommand = new Command("replay")
 		// HTML output
 		if (opts.html || (opts.output && opts.output.endsWith(".html"))) {
 			const html = renderHtmlReplay(events, gitDiffs);
-			if (opts.output) {
-				writeFileSync(opts.output, html, "utf-8");
-				console.error(chalk.green(`Replay written to ${opts.output}`));
-				console.error(chalk.dim(`Session: ${events[0].session_id} | ${events.length} events`));
-			} else {
-				process.stdout.write(html);
-			}
+			const outPath = opts.output || (() => {
+				mkdirSync(REPORTS_DIR, { recursive: true });
+				const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+				const shortId = events[0].session_id.slice(0, 8);
+				return `${REPORTS_DIR}/replay-${shortId}-${ts}.html`;
+			})();
+
+			writeFileSync(outPath, html, "utf-8");
+			console.error(chalk.green(`Replay written to ${outPath}`));
+			console.error(chalk.dim(`Session: ${events[0].session_id} | ${events.length} events`));
 			return;
 		}
 

@@ -1,9 +1,9 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { writeFileSync, existsSync } from "node:fs";
+import { writeFileSync, existsSync, mkdirSync } from "node:fs";
 import type { AuditEvent } from "@patchwork/core";
 import { loadActivePolicy, verifyChain, JsonlStore } from "@patchwork/core";
-import { getReadStore, EVENTS_PATH, SEALS_PATH, ATTESTATION_PATH } from "../store.js";
+import { getReadStore, EVENTS_PATH, SEALS_PATH, ATTESTATION_PATH, REPORTS_DIR } from "../store.js";
 import { computeStats, type StatsResult } from "./stats.js";
 import { FRAMEWORKS, FRAMEWORK_IDS, evaluateFramework, generateGaps, generateTrends } from "../compliance/frameworks.js";
 import { renderHtmlReport } from "../compliance/html-renderer.js";
@@ -211,22 +211,25 @@ export const reportCommand = new Command("report")
 			output = renderHtmlReport(report);
 		}
 
-		// Output
-		if (opts.output) {
-			try {
-				writeFileSync(opts.output, output, "utf-8");
-			} catch (err: unknown) {
-				console.error(chalk.red(`Failed to write report: ${err instanceof Error ? err.message : String(err)}`));
-				process.exitCode = 1;
-				return;
-			}
-			console.error(chalk.green(`Compliance report written to ${opts.output}`));
-			console.error(chalk.dim(`Framework(s): ${frameworkIds.join(", ")}`));
-			console.error(chalk.dim(`Events: ${events.length}, Sessions: ${sessions.length}`));
-			console.error(chalk.dim(`Overall grade: ${gradeText(overallGrade)}`));
-		} else {
-			process.stdout.write(output);
+		// Output — default to ~/.patchwork/reports/ when no -o given
+		const ext = opts.format === "json" ? "json" : "html";
+		const outPath = opts.output || (() => {
+			mkdirSync(REPORTS_DIR, { recursive: true });
+			const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+			return `${REPORTS_DIR}/report-${ts}.${ext}`;
+		})();
+
+		try {
+			writeFileSync(outPath, output, "utf-8");
+		} catch (err: unknown) {
+			console.error(chalk.red(`Failed to write report: ${err instanceof Error ? err.message : String(err)}`));
+			process.exitCode = 1;
+			return;
 		}
+		console.error(chalk.green(`Compliance report written to ${outPath}`));
+		console.error(chalk.dim(`Framework(s): ${frameworkIds.join(", ")}`));
+		console.error(chalk.dim(`Events: ${events.length}, Sessions: ${sessions.length}`));
+		console.error(chalk.dim(`Overall grade: ${gradeText(overallGrade)}`));
 	});
 
 function gradeText(grade: ControlStatus): string {

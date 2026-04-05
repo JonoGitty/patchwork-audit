@@ -1,8 +1,8 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, mkdirSync } from "node:fs";
 import type { AuditEvent } from "@patchwork/core";
-import { getReadStore } from "../store.js";
+import { getReadStore, REPORTS_DIR } from "../store.js";
 
 export const exportCommand = new Command("export")
 	.description("Export audit events in various formats")
@@ -38,12 +38,14 @@ export const exportCommand = new Command("export")
 				break;
 		}
 
-		if (opts.output) {
-			writeFileSync(opts.output, output, "utf-8");
-			console.error(chalk.green(`Exported ${events.length} events to ${opts.output}`));
-		} else {
-			console.log(output);
-		}
+		const outPath = opts.output || (() => {
+			mkdirSync(REPORTS_DIR, { recursive: true });
+			const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+			return `${REPORTS_DIR}/export-${ts}.${opts.format}`;
+		})();
+
+		writeFileSync(outPath, output, "utf-8");
+		console.error(chalk.green(`Exported ${events.length} events to ${outPath}`));
 	});
 
 function toCSV(events: AuditEvent[]): string {
