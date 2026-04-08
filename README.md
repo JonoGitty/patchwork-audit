@@ -306,6 +306,9 @@ patchwork report --framework all --include-trends --trend-period weekly -o trend
 
 See [docs/case-study.md](docs/case-study.md) for a real-world example.
 
+> [!IMPORTANT]
+> **Compliance disclaimer.** Patchwork generates audit evidence and compliance reports, but does not guarantee regulatory compliance. Compliance depends on your organisation's wider processes, policies, and legal interpretation. Patchwork is a tool that produces evidence — it does not replace legal advice, formal audits, or certified compliance assessments. Consult a qualified professional for compliance advice specific to your situation.
+
 ### Webhook alerts
 
 Set `PATCHWORK_WEBHOOK_URL` to receive real-time alerts on high-risk or denied events. Supports Slack, Discord, and generic JSON webhooks.

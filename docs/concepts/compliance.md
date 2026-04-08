@@ -2,6 +2,10 @@
 
 Patchwork maps your audit data to real-world compliance frameworks, evaluating which controls are met, partially met, or failing — and generating reports that auditors can review.
 
+::: warning Compliance Disclaimer
+Patchwork generates audit evidence and compliance reports, but does not guarantee regulatory compliance. Compliance depends on your organisation's wider processes, policies, and legal interpretation. Patchwork is a tool that produces evidence — it does not replace legal advice, formal audits, or certified compliance assessments. Consult a qualified professional for compliance advice specific to your situation.
+:::
+
 ## Supported Frameworks
 
 | Framework | Controls | Focus |
