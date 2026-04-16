@@ -185,7 +185,7 @@ describe("E2E: Claude Code session pipeline", async () => {
 			tool_input: { command: "npm test" },
 		}));
 
-		expect(result).toEqual({ allow: true });
+		expect(result).toEqual({});
 	});
 
 	it("classifies risk correctly through the pipeline", async () => {

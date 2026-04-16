@@ -123,7 +123,7 @@ describe("handleClaudeCodeHook", async () => {
 
 	it("handles PreToolUse by returning allow", async () => {
 		const result = await handleClaudeCodeHook(makeInput({ hook_event_name: "PreToolUse" }));
-		expect(result).toEqual({ allow: true });
+		expect(result).toEqual({});
 	});
 
 	it("handles PostToolUseFailure with failed status", async () => {

@@ -7,8 +7,11 @@ import { PRETOOL_TELEMETRY_PATH } from "../store.js";
 
 /** Fail-closed deny response for PreToolUse internal errors. */
 const FAIL_CLOSED_DENY = {
-	allow: false,
-	reason: "[Patchwork] Hook internal error (fail-closed mode)",
+	hookSpecificOutput: {
+		hookEventName: "PreToolUse",
+		permissionDecision: "deny",
+		permissionDecisionReason: "[Patchwork] Hook internal error (fail-closed mode)",
+	},
 } as const;
 
 /**
@@ -37,7 +40,7 @@ export const hookCommand = new Command("hook")
 			if (failClosed) {
 				process.stdout.write(JSON.stringify(FAIL_CLOSED_DENY));
 				outcome = "internal_error";
-				reason = FAIL_CLOSED_DENY.reason;
+				reason = FAIL_CLOSED_DENY.hookSpecificOutput.permissionDecisionReason;
 			}
 			emitPreToolTelemetry(isPreTool, telemetryJson, startMs, failClosed, outcome, reason);
 			return;
@@ -52,16 +55,16 @@ export const hookCommand = new Command("hook")
 			// Write output for hooks that expect a response (PreToolUse)
 			if (output) {
 				process.stdout.write(JSON.stringify(output));
-				if (isPreTool && !output.allow) {
+				if (isPreTool && output.hookSpecificOutput?.permissionDecision === "deny") {
 					outcome = "deny";
-					reason = output.reason || null;
+					reason = output.hookSpecificOutput.permissionDecisionReason || null;
 				}
 			}
 		} catch {
 			if (failClosed) {
 				process.stdout.write(JSON.stringify(FAIL_CLOSED_DENY));
 				outcome = "internal_error";
-				reason = FAIL_CLOSED_DENY.reason;
+				reason = FAIL_CLOSED_DENY.hookSpecificOutput.permissionDecisionReason;
 			}
 			// Non-PreToolUse or fail-closed disabled: fail silently (existing behavior)
 		}

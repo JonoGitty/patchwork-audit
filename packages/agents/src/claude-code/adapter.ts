@@ -325,12 +325,15 @@ function handlePreToolUse(store: Store, input: ClaudeCodeHookInput): ClaudeCodeH
 		fireWebhookAlert(event);
 
 		return {
-			allow: false,
-			reason: `[Patchwork] ${decision.reason}`,
+			hookSpecificOutput: {
+				hookEventName: "PreToolUse",
+				permissionDecision: "deny",
+				permissionDecisionReason: `[Patchwork] ${decision.reason}`,
+			},
 		};
 	}
 
-	return { allow: true };
+	return {};
 }
 
 async function handlePostToolUse(

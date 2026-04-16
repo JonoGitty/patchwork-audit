@@ -49,11 +49,27 @@ export interface ClaudeCodeHookInput {
 	subagent_prompt?: string;
 }
 
+/**
+ * Claude Code hook output format.
+ *
+ * PreToolUse hooks must return `hookSpecificOutput` with a `permissionDecision`
+ * to block actions. The format is:
+ *
+ *   { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "..." } }
+ *
+ * Returning `{ allow: false }` does NOT work — Claude Code ignores unknown fields.
+ */
 export interface ClaudeCodeHookOutput {
-	/** Whether to allow the action (PreToolUse only) */
+	hookSpecificOutput?: {
+		hookEventName: string;
+		permissionDecision?: "allow" | "deny";
+		permissionDecisionReason?: string;
+	};
+
+	/** @deprecated Use hookSpecificOutput.permissionDecision instead. Kept for test compatibility. */
 	allow?: boolean;
 
-	/** Reason for denial */
+	/** @deprecated Use hookSpecificOutput.permissionDecisionReason instead. */
 	reason?: string;
 
 	/** Feedback to provide to the agent (PostToolUse) */

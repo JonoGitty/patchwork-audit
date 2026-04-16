@@ -79,8 +79,8 @@ describe("hook pre-tool fail-closed mode", () => {
 			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
 		});
 		const parsed = JSON.parse(stdout);
-		expect(parsed.allow).toBe(false);
-		expect(parsed.reason).toContain("fail-closed");
+		expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+		expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("fail-closed");
 	});
 
 	it("B: PreToolUse + fail-closed disabled + invalid JSON => no deny output", async () => {
@@ -100,8 +100,8 @@ describe("hook pre-tool fail-closed mode", () => {
 			PATCHWORK_PRETOOL_FAIL_CLOSED: "1",
 		});
 		const parsed = JSON.parse(stdout);
-		expect(parsed.allow).toBe(false);
-		expect(parsed.reason).toContain("fail-closed");
+		expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+		expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("fail-closed");
 	});
 });
 
@@ -297,8 +297,8 @@ describe("hook PreToolUse telemetry file sink", () => {
 
 		// Fail-closed deny should still be emitted on stdout
 		const parsed = JSON.parse(stdout);
-		expect(parsed.allow).toBe(false);
-		expect(parsed.reason).toContain("fail-closed");
+		expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+		expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("fail-closed");
 
 		// stderr should contain the warning about failed write
 		expect(stderr).toContain("telemetry file write failed");
@@ -459,8 +459,8 @@ describe("hook PreToolUse telemetry file rotation", () => {
 
 		// Fail-closed deny should still work
 		const parsed = JSON.parse(stdout);
-		expect(parsed.allow).toBe(false);
-		expect(parsed.reason).toContain("fail-closed");
+		expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+		expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("fail-closed");
 	});
 });
 
@@ -569,8 +569,8 @@ describe("hook PreToolUse telemetry concurrency hardening", () => {
 
 		// Fail-closed deny must still be emitted
 		const parsed = JSON.parse(stdout);
-		expect(parsed.allow).toBe(false);
-		expect(parsed.reason).toContain("fail-closed");
+		expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+		expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("fail-closed");
 
 		// Stderr should contain the lock contention warning
 		expect(stderr).toContain("telemetry lock contention");
@@ -673,8 +673,8 @@ describe("hook PreToolUse telemetry append atomicity", () => {
 
 		// Fail-closed deny must still be emitted
 		const parsed = JSON.parse(stdout);
-		expect(parsed.allow).toBe(false);
-		expect(parsed.reason).toContain("fail-closed");
+		expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+		expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("fail-closed");
 
 		// Stderr should show lock contention warning
 		expect(stderr).toContain("telemetry lock contention");
