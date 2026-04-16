@@ -89,6 +89,10 @@ export default defineConfig({
 					items: [
 						{ text: "Threat Model", link: "/security/threat-model" },
 						{ text: "Architecture", link: "/security/architecture" },
+						{
+							text: "Advisory: Hook Bypass (Fixed)",
+							link: "/security/cve-2026-hook-bypass",
+						},
 					],
 				},
 			],
