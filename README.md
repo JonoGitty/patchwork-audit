@@ -564,6 +564,7 @@ Four packages in a TypeScript monorepo:
 - [x] **npm publish** -- `npm install -g patchwork-audit` (v0.6.1)
 - [x] **PreToolUse deny fix** -- hook response format corrected so denials actually block (v0.6.4, security fix)
 - [x] **Commit attestation fixes** -- signatures verify end-to-end against the root-owned keyring; scoped denial semantics so the policy working doesn't auto-fail every commit; chain anchor handling for rotated logs; seal tip match tolerates legitimate chain growth (v0.6.5)
+- [x] **Attestation runtime fixes** -- `tool_version` resolves correctly in bundled ESM (was `"unknown"` due to a tsup `__require` shim); `chain_valid` accurate for concurrent sessions via per-event hash integrity check (v0.6.6)
 
 **Planned:**
 - [ ] **Witness endpoints** -- configure external anchoring for off-machine seal verification
