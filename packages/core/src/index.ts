@@ -106,6 +106,8 @@ export {
 	type ChainStateResponse,
 	type SignRequest,
 	type SignResponse,
+	type VerifyRequest,
+	type VerifyResponse,
 } from "./relay/protocol.js";
 export {
 	loadRelayConfig,
@@ -131,7 +133,9 @@ export {
 } from "./relay/auto-seal.js";
 export {
 	requestSignature,
+	requestVerification,
 	type SignatureResult,
+	type VerifyResult,
 } from "./relay/signing-proxy.js";
 
 // Policy

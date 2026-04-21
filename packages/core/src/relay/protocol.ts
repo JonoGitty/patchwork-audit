@@ -34,7 +34,7 @@ export const RELAY_PROTOCOL_VERSION = 1;
  */
 export interface RelayMessage {
 	protocol_version: number;
-	type: "event" | "heartbeat" | "ping" | "seal_status" | "get_chain_state" | "sign";
+	type: "event" | "heartbeat" | "ping" | "seal_status" | "get_chain_state" | "sign" | "verify";
 	timestamp: string;
 	/** The serialized audit event (for type=event). */
 	payload?: Record<string, unknown>;
@@ -85,6 +85,23 @@ export interface SignResponse extends RelayResponse {
 	signature?: string;
 	key_id?: string;
 	signed_at?: string;
+}
+
+/** Verify request payload (layer 5). */
+export interface VerifyRequest {
+	/** The data that was signed. */
+	data: string;
+	/** The signature to verify (`hmac-sha256:<hex>`). */
+	signature: string;
+	/** The key ID that produced the signature. */
+	key_id: string;
+}
+
+/** Verify response (layer 5). */
+export interface VerifyResponse extends RelayResponse {
+	verified?: boolean;
+	/** Set when verification failed due to a known cause (unknown_key, signature_mismatch). */
+	reason?: string;
 }
 
 /** Heartbeat record written to the relay log. */

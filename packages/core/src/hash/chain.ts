@@ -50,6 +50,12 @@ export interface ChainVerification {
 	prev_link_mismatch_count: number;
 	first_failure_index: number | null;
 	is_valid: boolean;
+	/**
+	 * The prev_hash declared by the first chained event. If non-null, the log
+	 * is rooted at an anchor from an earlier (rotated/compacted) log and a
+	 * matching seal is needed to prove continuity. Null for genesis-rooted logs.
+	 */
+	chain_anchor_hash?: string | null;
 }
 
 /**
@@ -76,6 +82,7 @@ export function verifyChain(
 	};
 
 	let lastChainedHash: string | null = null;
+	let sawChainedEvent = false;
 
 	for (let i = 0; i < events.length; i++) {
 		const raw = events[i];
@@ -111,13 +118,21 @@ export function verifyChain(
 			}
 		}
 
-		// Verify the prev_hash link
-		const expectedPrev = lastChainedHash;
-		if (prevHash !== expectedPrev) {
-			result.prev_link_mismatch_count++;
-			result.is_valid = false;
-			if (result.first_failure_index === null) {
-				result.first_failure_index = i;
+		// Verify the prev_hash link. The first chained event we encounter
+		// establishes the chain anchor — its prev_hash either is null
+		// (genesis-rooted) or references an earlier log (rotated/compacted),
+		// in which case proof of continuity lives in the seal history.
+		if (!sawChainedEvent) {
+			result.chain_anchor_hash = prevHash ?? null;
+			sawChainedEvent = true;
+		} else {
+			const expectedPrev = lastChainedHash;
+			if (prevHash !== expectedPrev) {
+				result.prev_link_mismatch_count++;
+				result.is_valid = false;
+				if (result.first_failure_index === null) {
+					result.first_failure_index = i;
+				}
 			}
 		}
 

@@ -1,0 +1,39 @@
+# @patchwork/agents
+
+## 0.6.5
+
+### Patch Changes
+
+- Fix commit attestation: signature verification, chain integrity, denial semantics, and seal tip matching.
+
+  Four bugs combined to make every commit attestation ship as FAIL with a broken signature. All four are fixed in this release.
+
+  **1. Signature verification was impossible for relay-signed attestations.**
+  Attestations signed by the root-owned relay daemon stored a `key_id` that the user-level CLI could not resolve (the private key lives in the root-owned keyring at `/Library/Patchwork/keys/`). `patchwork commit-attest <sha> --verify` always reported "signature verification failed". Added a `verify` message type to the relay protocol and a new `requestVerification()` helper that tries the local keyring first, then asks the relay daemon to verify with its root-owned key. Verification now reports the source (`relay` or `local`).
+
+  **2. `tool_version` was always `"unknown"`.**
+  `getAgentVersion()` in the Claude Code adapter resolved `../../package.json` relative to the bundled `dist/index.js`, which pointed one directory too high. Fixed to probe the correct relative paths with a package-name sanity check.
+
+  **3. Hash chain was perpetually marked corrupt at event index 0.**
+  `verifyChain()` treated a non-null `prev_hash` on the first chained event as a broken link. In reality, when `events.jsonl` is rotated or the chain resumes from an earlier run, the first event legitimately references an earlier tip. Added a `chain_anchor_hash` field to `ChainVerification`; the first chained event establishes the anchor instead of triggering a mismatch. Continuity with earlier logs is proved by seal history, not by forcing a genesis-rooted log.
+
+  **4. Denial semantics produced 100% FAIL attestations.**
+  Any `status: denied` event anywhere in the session caused FAIL, meaning every attestation failed _because the policy was working correctly_. Replaced with `denials_high_risk_since_last_commit`: only `critical` or `high` risk denials in the window since the last commit cause FAIL. Low/medium denials are now recorded but informational — they represent expected policy enforcement, not a broken commit. The `policy_denials_present` failure reason is renamed to `high_risk_denials_since_last_commit`.
+
+  **5. Seal tip matching required an exact tip match.**
+  A seal was only reported valid when `current_tip === sealed_tip`, so any event appended after a seal caused `patchwork verify` to FAIL until the next auto-seal cycle. Seals are now validated by checking whether the sealed tip hash appears anywhere in the chain: if it does, the seal remains valid point-in-time evidence; only a truncated or rewritten chain (where the sealed tip is gone) fails the tip match. Added `events_since_seal` to the seal check result so operators can see how far the chain has grown since sealing.
+
+  ### Attestation coverage caveat (documented, unchanged)
+
+  Attestation only fires inside the PostToolUse hook, so commits made outside Claude Code (plain terminal, IDE built-in git, un-hooked agents) are not attested. Full coverage requires routing all commits through an instrumented agent or enforcing it with a pre-receive/CI gate.
+
+  ### API additions (backward compatible)
+
+  - `requestVerification()`, `VerifyResult`, `VerifyRequest`, `VerifyResponse` exported from `@patchwork/core`
+  - `"verify"` message type added to the relay protocol
+  - Optional `chain_anchor_hash` on `ChainVerification`
+  - Optional `denials_high_risk_since_last_commit` on `RiskSummary`
+  - Optional `events_since_seal` on `SealCheckResult`
+
+- Updated dependencies
+  - @patchwork/core@0.6.5

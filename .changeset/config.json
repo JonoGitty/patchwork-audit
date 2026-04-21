@@ -3,7 +3,7 @@
   "changelog": "@changesets/cli/changelog",
   "commit": false,
   "fixed": [
-    ["@patchwork/core", "@patchwork/agents", "@patchwork/web", "patchwork-audit", "@patchwork/team"]
+    ["@patchwork/core", "@patchwork/agents", "@patchwork/web", "patchwork-audit"]
   ],
   "linked": [],
   "access": "public",

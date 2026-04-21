@@ -29,7 +29,7 @@ import {
 import { dirname } from "node:path";
 import { AuditEventSchema } from "../schema/event.js";
 import { computeEventHash } from "../hash/chain.js";
-import { ensureKeyring, loadKeyById, signSeal } from "../hash/seal.js";
+import { ensureKeyring, loadKeyById, signSeal, verifySeal } from "../hash/seal.js";
 import {
 	RELAY_SOCKET_PATH,
 	RELAY_LOG_PATH,
@@ -44,6 +44,7 @@ import {
 	type SealStatusResponse,
 	type ChainStateResponse,
 	type SignResponse,
+	type VerifyResponse,
 } from "./protocol.js";
 import { loadRelayConfig, type RelayConfig } from "./config.js";
 import {
@@ -323,6 +324,9 @@ export class RelayDaemon {
 			case "sign":
 				return this.handleSign(msg);
 
+			case "verify":
+				return this.handleVerify(msg);
+
 			default:
 				return { ok: false, error: `Unknown message type: ${msg.type}` };
 		}
@@ -553,6 +557,36 @@ export class RelayDaemon {
 			this.log(`SIGN ERROR: ${errMsg}`);
 			return { ok: false, error: `Sign failed: ${errMsg}` };
 		}
+	}
+
+	/**
+	 * Handle a verify request — checks a signature against the root-owned keyring.
+	 *
+	 * Returns ok=true with verified=true/false. Only returns ok=false when the
+	 * request is malformed or the key does not exist in the root keyring.
+	 */
+	private handleVerify(msg: RelayMessage): VerifyResponse {
+		const payload = msg.payload as
+			| { data?: string; signature?: string; key_id?: string }
+			| undefined;
+
+		if (!payload?.data || !payload.signature || !payload.key_id) {
+			return { ok: false, error: "Missing verify payload fields (data, signature, key_id)" };
+		}
+
+		let key: Buffer;
+		try {
+			key = loadKeyById(this.keyringPath, payload.key_id);
+		} catch {
+			return { ok: true, verified: false, reason: "unknown_key" };
+		}
+
+		const verified = verifySeal(payload.data, payload.signature, key);
+		return {
+			ok: true,
+			verified,
+			...(verified ? {} : { reason: "signature_mismatch" }),
+		};
 	}
 
 	/** Maximum daemon log size before rotation (100 KB). */

@@ -330,4 +330,41 @@ describe("verifyChain", () => {
 
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
+
+	it("treats a non-null first prev_hash as a chain anchor, not a mismatch", () => {
+		// Simulates a log rotated or compacted from an earlier chain: the first
+		// event points to a prior tip that isn't in this file.
+		const anchorHash = "sha256:843fadacca1649d8eec3efa75095b57654e894df7f23b3b68018d538e3845de5";
+		const e1 = makeRawEvent({
+			id: "evt_rooted",
+			action: "file_read",
+			prev_hash: anchorHash,
+		});
+		e1.event_hash = computeEventHash(e1);
+		const e2 = makeRawEvent({
+			id: "evt_next",
+			action: "file_read",
+			prev_hash: e1.event_hash as string,
+		});
+		e2.event_hash = computeEventHash(e2);
+
+		const result = verifyChain([e1, e2]);
+
+		expect(result.is_valid).toBe(true);
+		expect(result.prev_link_mismatch_count).toBe(0);
+		expect(result.chain_anchor_hash).toBe(anchorHash);
+	});
+
+	it("sets chain_anchor_hash to null for genesis-rooted logs", () => {
+		const e1 = makeRawEvent({
+			id: "evt_genesis",
+			action: "file_read",
+			prev_hash: null,
+		});
+		e1.event_hash = computeEventHash(e1);
+
+		const result = verifyChain([e1]);
+		expect(result.is_valid).toBe(true);
+		expect(result.chain_anchor_hash).toBeNull();
+	});
 });

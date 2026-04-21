@@ -430,13 +430,36 @@ async function handlePostToolUse(
 	return null;
 }
 
-/** Resolve agent/tool version for attestation artifacts. */
+/**
+ * Resolve agent/tool version for attestation artifacts.
+ *
+ * Agents and the CLI are released together on the same fixed-version track,
+ * so either package.json is an authoritative source. This matters because
+ * the CLI bundles agents into its dist via tsup `noExternal`, which moves
+ * import.meta.url away from agents/dist/ and breaks relative-path resolution
+ * from inside this file. Accepting either package name handles both layouts.
+ */
 function getAgentVersion(): string {
+	const ACCEPTED_NAMES = new Set(["@patchwork/agents", "patchwork-audit"]);
 	try {
 		const { createRequire } = require("node:module") as typeof import("node:module");
 		const req = createRequire(import.meta.url);
-		const pkg = req("../../package.json") as { version: string };
-		return pkg.version;
+		for (const candidate of [
+			"../package.json",
+			"../../package.json",
+			"../../../package.json",
+			"../../../../package.json",
+		]) {
+			try {
+				const pkg = req(candidate) as { name?: string; version?: string };
+				if (pkg.name && ACCEPTED_NAMES.has(pkg.name) && typeof pkg.version === "string") {
+					return pkg.version;
+				}
+			} catch {
+				// Try next candidate
+			}
+		}
+		return "unknown";
 	} catch {
 		return "unknown";
 	}

@@ -46,20 +46,23 @@ if (layoutSrc !== layoutUpdated) {
 	console.log("  Updated packages/web/src/templates/layout.ts");
 }
 
-// 3. Team health endpoint
-const healthPath = resolve(
-	root,
-	"packages/team/src/server/routes/health.ts",
-);
+// 3. Team health endpoint — team is on its own version track (alpha), not in
+// the fixed group, so it reads its version from its own package.json.
 try {
+	const teamPkgPath = resolve(root, "packages/team/package.json");
+	const teamPkg = JSON.parse(readFileSync(teamPkgPath, "utf8"));
+	const healthPath = resolve(
+		root,
+		"packages/team/src/server/routes/health.ts",
+	);
 	const healthSrc = readFileSync(healthPath, "utf8");
 	const healthUpdated = healthSrc.replace(
 		/version: "[^"]+"/,
-		`version: "${version}"`,
+		`version: "${teamPkg.version}"`,
 	);
 	if (healthSrc !== healthUpdated) {
 		writeFileSync(healthPath, healthUpdated);
-		console.log("  Updated packages/team/src/server/routes/health.ts");
+		console.log(`  Updated packages/team/src/server/routes/health.ts → ${teamPkg.version}`);
 	}
 } catch {
 	// team package may not exist yet in all checkouts

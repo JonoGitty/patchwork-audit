@@ -13,12 +13,13 @@ import { connect } from "node:net";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getHomeDir } from "../path/home.js";
-import { ensureKeyring, signSeal } from "../hash/seal.js";
+import { loadKeyById, ensureKeyring, signSeal, verifySeal } from "../hash/seal.js";
 import {
 	RELAY_SOCKET_PATH,
 	RELAY_PROTOCOL_VERSION,
 	type RelayMessage,
 	type SignResponse,
+	type VerifyResponse,
 } from "./protocol.js";
 
 /** Timeout for signing requests in milliseconds. */
@@ -90,20 +91,97 @@ function sendSignRequest(
 	data: string,
 	keyId?: string,
 ): Promise<SignResponse> {
+	return sendRelayRequest<SignResponse>(socketPath, {
+		protocol_version: RELAY_PROTOCOL_VERSION,
+		type: "sign",
+		timestamp: new Date().toISOString(),
+		payload: {
+			data,
+			...(keyId ? { key_id: keyId } : {}),
+		},
+	});
+}
+
+/** Result of a verification request. */
+export interface VerifyResult {
+	verified: boolean;
+	source: "relay" | "local";
+	/** Set when verification fails — "unknown_key" or "signature_mismatch" or "no_key_available". */
+	reason?: string;
+}
+
+/**
+ * Verify a signature against a payload.
+ *
+ * Tries the local keyring first (for locally-signed attestations), then
+ * falls back to the relay daemon (for root-keyring-signed attestations).
+ * This ordering avoids unnecessary socket roundtrips for the common case
+ * while still supporting signatures produced by the root-owned keyring.
+ */
+export async function requestVerification(
+	data: string,
+	signature: string,
+	keyId: string,
+	options?: {
+		socketPath?: string;
+		localKeyringPath?: string;
+	},
+): Promise<VerifyResult> {
+	// Try local keyring first
+	const localKeyring = options?.localKeyringPath ?? getLocalKeyringPath();
+	try {
+		const key = loadKeyById(localKeyring, keyId);
+		const verified = verifySeal(data, signature, key);
+		return {
+			verified,
+			source: "local",
+			...(verified ? {} : { reason: "signature_mismatch" }),
+		};
+	} catch {
+		// Key not in local keyring — may be in root keyring. Fall through.
+	}
+
+	// Fall back to relay daemon (root keyring)
+	const sockPath = options?.socketPath ?? RELAY_SOCKET_PATH;
+	if (existsSync(sockPath)) {
+		try {
+			const resp = await sendVerifyRequest(sockPath, data, signature, keyId);
+			if (resp.ok) {
+				return {
+					verified: resp.verified === true,
+					source: "relay",
+					...(resp.reason ? { reason: resp.reason } : {}),
+				};
+			}
+		} catch {
+			// Relay unreachable — no way to verify
+		}
+	}
+
+	return { verified: false, source: "local", reason: "no_key_available" };
+}
+
+/** Send a verify request to the relay daemon over Unix socket. */
+function sendVerifyRequest(
+	socketPath: string,
+	data: string,
+	signature: string,
+	keyId: string,
+): Promise<VerifyResponse> {
+	return sendRelayRequest<VerifyResponse>(socketPath, {
+		protocol_version: RELAY_PROTOCOL_VERSION,
+		type: "verify",
+		timestamp: new Date().toISOString(),
+		payload: { data, signature, key_id: keyId },
+	});
+}
+
+/** Generic newline-delimited JSON request/response over a Unix socket. */
+function sendRelayRequest<T>(socketPath: string, msg: RelayMessage): Promise<T> {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => {
-			reject(new Error("Sign request timed out"));
+			reject(new Error("Relay request timed out"));
 		}, SIGN_TIMEOUT_MS);
-
-		const msg: RelayMessage = {
-			protocol_version: RELAY_PROTOCOL_VERSION,
-			type: "sign",
-			timestamp: new Date().toISOString(),
-			payload: {
-				data,
-				...(keyId ? { key_id: keyId } : {}),
-			},
-		};
 
 		const socket = connect(socketPath, () => {
 			socket.write(JSON.stringify(msg) + "\n");
@@ -112,9 +190,9 @@ function sendSignRequest(
 		socket.on("data", (chunk) => {
 			clearTimeout(timer);
 			try {
-				resolve(JSON.parse(chunk.toString().trim()));
+				resolve(JSON.parse(chunk.toString().trim()) as T);
 			} catch {
-				reject(new Error("Invalid sign response"));
+				reject(new Error("Invalid relay response"));
 			}
 			socket.destroy();
 		});

@@ -7,6 +7,13 @@ export const RiskSummarySchema = z.object({
 	low: z.number(),
 	none: z.number(),
 	denials: z.number(),
+	/**
+	 * Denials of critical/high-risk actions since the last commit.
+	 * These indicate the policy blocked something meaningful and should
+	 * typically cause attestation to FAIL. Optional for backward compatibility
+	 * with attestations generated before this field existed.
+	 */
+	denials_high_risk_since_last_commit: z.number().optional(),
 });
 
 export const CommitAttestationSchema = z.object({

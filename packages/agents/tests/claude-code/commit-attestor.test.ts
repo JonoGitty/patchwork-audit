@@ -95,7 +95,7 @@ describe("generateCommitAttestation", () => {
 		expect(attestation.failure_reasons).toContain("no_session_events");
 	});
 
-	it("counts denials in risk summary", async () => {
+	it("fails when a high-risk denial occurs since the last commit", async () => {
 		appendTestEvent({ status: "denied", risk: { level: "high", flags: ["sensitive_file"] } });
 		appendTestEvent();
 
@@ -109,9 +109,30 @@ describe("generateCommitAttestation", () => {
 		});
 
 		expect(attestation.risk_summary.denials).toBe(1);
+		expect(attestation.risk_summary.denials_high_risk_since_last_commit).toBe(1);
 		expect(attestation.risk_summary.high).toBe(1);
 		expect(attestation.pass).toBe(false);
-		expect(attestation.failure_reasons).toContain("policy_denials_present");
+		expect(attestation.failure_reasons).toContain("high_risk_denials_since_last_commit");
+	});
+
+	it("passes when only low/medium-risk denials occurred (policy working as intended)", async () => {
+		appendTestEvent({ status: "denied", risk: { level: "medium", flags: ["dev_policy"] } });
+		appendTestEvent({ status: "denied", risk: { level: "low", flags: ["routine"] } });
+		appendTestEvent();
+
+		const attestation = await generateCommitAttestation({
+			commitSha: "pass1234",
+			branch: "main",
+			sessionId,
+			projectRoot: "/tmp/project",
+			store,
+			toolVersion: "0.5.0-test",
+		});
+
+		expect(attestation.risk_summary.denials).toBe(2);
+		expect(attestation.risk_summary.denials_high_risk_since_last_commit).toBe(0);
+		expect(attestation.failure_reasons).not.toContain("high_risk_denials_since_last_commit");
+		expect(attestation.pass).toBe(true);
 	});
 
 	it("signs attestation when keyring exists", async () => {

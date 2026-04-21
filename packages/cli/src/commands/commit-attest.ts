@@ -6,11 +6,9 @@ import {
 	CommitAttestationSchema,
 	buildAttestationPayload,
 	hashAttestationPayload,
-	verifyAttestation,
-	ensureKeyring,
-	readSealKey,
+	requestVerification,
 } from "@patchwork/core";
-import { COMMIT_ATTESTATIONS_DIR, COMMIT_ATTESTATION_INDEX, KEYRING_DIR, SEAL_KEY_PATH } from "../store.js";
+import { COMMIT_ATTESTATIONS_DIR, COMMIT_ATTESTATION_INDEX, KEYRING_DIR } from "../store.js";
 
 export const commitAttestCommand = new Command("commit-attest")
 	.description("View and verify commit attestations")
@@ -18,7 +16,7 @@ export const commitAttestCommand = new Command("commit-attest")
 	.option("--verify", "Verify the attestation signature")
 	.option("--list", "List all attested commits")
 	.option("--json", "Output as JSON")
-	.action((sha, opts) => {
+	.action(async (sha, opts) => {
 		if (opts.list) {
 			return listAttestations(opts.json);
 		}
@@ -123,10 +121,10 @@ function listAttestations(json?: boolean): void {
 	}
 }
 
-function verifyCommitAttestation(
+async function verifyCommitAttestation(
 	attestation: ReturnType<typeof CommitAttestationSchema.parse>,
 	json?: boolean,
-): void {
+): Promise<void> {
 	if (attestation.signature === "unsigned") {
 		if (json) {
 			console.log(JSON.stringify({ verified: false, reason: "unsigned" }));
@@ -137,32 +135,12 @@ function verifyCommitAttestation(
 		return;
 	}
 
-	// Resolve signing key
-	let key: Buffer | null = null;
 	const keyId = attestation.key_id;
-
-	if (keyId) {
-		try {
-			const { loadKeyById } = require("@patchwork/core") as typeof import("@patchwork/core");
-			key = loadKeyById(KEYRING_DIR, keyId);
-		} catch { /* fall through */ }
-	}
-	if (!key) {
-		try {
-			const kr = ensureKeyring(KEYRING_DIR);
-			key = kr.key;
-		} catch {
-			try {
-				key = readSealKey(SEAL_KEY_PATH);
-			} catch { /* no key */ }
-		}
-	}
-
-	if (!key) {
+	if (!keyId) {
 		if (json) {
-			console.log(JSON.stringify({ verified: false, reason: "no_key_available" }));
+			console.log(JSON.stringify({ verified: false, reason: "no_key_id" }));
 		} else {
-			console.log(chalk.red("No signing key available to verify"));
+			console.log(chalk.red("FAIL — attestation has no key_id"));
 		}
 		process.exitCode = 1;
 		return;
@@ -183,18 +161,26 @@ function verifyCommitAttestation(
 		return;
 	}
 
-	// Check signature
-	const valid = verifyAttestation(payloadStr, attestation.signature, key);
+	// Verify against the appropriate keyring (local first, then root-owned relay).
+	const result = await requestVerification(payloadStr, attestation.signature, keyId, {
+		localKeyringPath: KEYRING_DIR,
+	});
 
 	if (json) {
-		console.log(JSON.stringify({ verified: valid, payload_hash: payloadHash }));
-	} else if (valid) {
-		console.log(chalk.green("VERIFIED — signature is valid"));
+		console.log(JSON.stringify({
+			verified: result.verified,
+			source: result.source,
+			payload_hash: payloadHash,
+			...(result.reason ? { reason: result.reason } : {}),
+		}));
+	} else if (result.verified) {
+		console.log(chalk.green(`VERIFIED — signature is valid (via ${result.source})`));
 	} else {
-		console.log(chalk.red("FAIL — signature verification failed"));
+		const suffix = result.reason ? ` (${result.reason})` : "";
+		console.log(chalk.red(`FAIL — signature verification failed${suffix}`));
 	}
 
-	if (!valid) process.exitCode = 1;
+	if (!result.verified) process.exitCode = 1;
 }
 
 function resolveShortSha(sha: string): string | null {

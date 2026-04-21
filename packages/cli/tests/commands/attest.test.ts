@@ -675,6 +675,8 @@ describe("attest --profile", () => {
 		const { exitCode } = await runAttest([
 			"--file", eventsPath,
 			"--profile", "baseline",
+			"--seal-file", join(tmpDir, "no-seal.jsonl"),
+			"--witness-file", join(tmpDir, "no-witness.jsonl"),
 			"--out", outPath,
 		]);
 

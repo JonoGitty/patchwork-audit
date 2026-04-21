@@ -348,7 +348,7 @@ describe("verify with seal", () => {
 		expect(exitCode).toBe(1);
 	});
 
-	it("fails when events tip no longer matches sealed tip", async () => {
+	it("passes when new events are appended after a seal (chain grew legitimately)", async () => {
 		const events = makeChainedEvents(3);
 		const eventsPath = join(tmpDir, "events.jsonl");
 		const keyPath = join(tmpDir, "keys", "seal.key");
@@ -370,11 +370,53 @@ describe("verify with seal", () => {
 		e4.event_hash = computeEventHash(e4);
 		writeJsonl(eventsPath, [...events, e4]);
 
-		const { exitCode } = await runVerify([
+		const { exitCode, output } = await runVerify([
 			"--file", eventsPath,
 			"--seal-file", sealPath,
 			"--key-file", keyPath,
+			"--json",
 		]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.seal.seal_tip_match).toBe(true);
+		expect(parsed.seal.events_since_seal).toBe(1);
+		expect(parsed.seal.seal_failure_reason).toBeNull();
+		expect(exitCode).toBeUndefined();
+	});
+
+	it("fails when the sealed tip has been removed from the chain (truncation/rewrite)", async () => {
+		const events = makeChainedEvents(3);
+		const eventsPath = join(tmpDir, "events.jsonl");
+		const keyPath = join(tmpDir, "keys", "seal.key");
+		const sealPath = join(tmpDir, "seals.jsonl");
+		writeJsonl(eventsPath, events);
+
+		await runSeal(["--file", eventsPath, "--key-file", keyPath, "--seal-file", sealPath]);
+
+		// Rewrite: drop the sealed event and replace it with a fresh one
+		// (same position, but with a different event_hash). The sealed tip
+		// is no longer present anywhere in the chain.
+		const replacement: Record<string, unknown> = {
+			id: "evt_replacement",
+			session_id: "ses_test",
+			timestamp: "2026-01-01T00:00:02.500Z",
+			agent: "claude-code",
+			action: "file_write",
+			status: "completed",
+			risk: { level: "medium", flags: [] },
+			prev_hash: events[1].event_hash,
+		};
+		replacement.event_hash = computeEventHash(replacement);
+		writeJsonl(eventsPath, [events[0], events[1], replacement]);
+
+		const { exitCode, output } = await runVerify([
+			"--file", eventsPath,
+			"--seal-file", sealPath,
+			"--key-file", keyPath,
+			"--json",
+		]);
+		const parsed = JSON.parse(output.join(""));
+		expect(parsed.seal.seal_tip_match).toBe(false);
+		expect(parsed.seal.seal_failure_reason).toMatch(/truncated or rewritten/);
 		expect(exitCode).toBe(1);
 	});
 

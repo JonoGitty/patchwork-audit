@@ -27,11 +27,24 @@ export interface SealCheckResult {
 	seal_checked: boolean;
 	seal_present: boolean;
 	seal_valid: boolean;
+	/**
+	 * True when the seal's tip hash appears in the current chain. A seal
+	 * remains a valid point-in-time commitment even if the chain has grown
+	 * past it — only a truncated/rewritten chain (where the sealed tip can't
+	 * be found) fails the tip match.
+	 */
 	seal_tip_match: boolean;
 	seal_tip_hash: string | null;
 	seal_age_seconds: number | null;
 	seal_corrupt_lines: number;
 	seal_failure_reason: string | null;
+	/**
+	 * Number of chained events appended after the sealed tip. Zero means the
+	 * chain is at the sealed tip; positive means events have been appended
+	 * since sealing (not a failure — the seal still proves chain-up-to-tip).
+	 * Null when the seal wasn't checked or the tip wasn't found.
+	 */
+	events_since_seal?: number | null;
 }
 
 /** Structured witness check result. */
@@ -504,15 +517,22 @@ function runSealCheck(
 		};
 	}
 
-	let currentTip: string | null = null;
-	for (let i = events.length - 1; i >= 0; i--) {
-		const h = events[i].event_hash;
-		if (typeof h === "string") {
-			currentTip = h;
-			break;
+	// Locate the sealed tip in the current chain. A seal remains a valid
+	// point-in-time commitment if its tip hash appears anywhere in the chain —
+	// any events after it are natural continuation, not tampering. Only a
+	// truncated or rewritten chain (where the sealed tip is absent) fails.
+	let sealedTipIndex = -1;
+	let chainedEventsTotal = 0;
+	for (let i = 0; i < events.length; i++) {
+		if (typeof events[i].event_hash === "string") {
+			chainedEventsTotal++;
+			if (events[i].event_hash === latestSeal.tip_hash && sealedTipIndex === -1) {
+				sealedTipIndex = chainedEventsTotal - 1; // 0-based among chained events
+			}
 		}
 	}
-	const tipMatch = currentTip === latestSeal.tip_hash;
+	const tipMatch = sealedTipIndex !== -1;
+	const eventsSinceSeal = tipMatch ? chainedEventsTotal - sealedTipIndex - 1 : null;
 
 	const sealTime = new Date(latestSeal.sealed_at).getTime();
 	const ageSeconds = Math.round((Date.now() - sealTime) / 1000);
@@ -526,7 +546,8 @@ function runSealCheck(
 			seal_tip_hash: latestSeal.tip_hash,
 			seal_age_seconds: ageSeconds,
 			seal_corrupt_lines: scanResult.corrupt_lines,
-			seal_failure_reason: `Chain tip mismatch: sealed=${latestSeal.tip_hash.slice(0, 20)}... current=${currentTip?.slice(0, 20) ?? "null"}...`,
+			seal_failure_reason: `Sealed tip not found in chain: sealed=${latestSeal.tip_hash.slice(0, 20)}... (chain truncated or rewritten)`,
+			events_since_seal: null,
 		};
 	}
 
@@ -540,6 +561,7 @@ function runSealCheck(
 			seal_age_seconds: ageSeconds,
 			seal_corrupt_lines: scanResult.corrupt_lines,
 			seal_failure_reason: `Seal too old: ${ageSeconds}s exceeds max ${maxAge}s`,
+			events_since_seal: eventsSinceSeal,
 		};
 	}
 
@@ -552,6 +574,7 @@ function runSealCheck(
 		seal_age_seconds: ageSeconds,
 		seal_corrupt_lines: scanResult.corrupt_lines,
 		seal_failure_reason: null,
+		events_since_seal: eventsSinceSeal,
 	};
 }
 

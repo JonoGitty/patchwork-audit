@@ -8,7 +8,7 @@ export function healthRoutes(): Hono {
 	app.get("/api/v1/health", (c) => {
 		return c.json({
 			ok: true,
-			version: "0.6.4",
+			version: "0.7.0-alpha.1",
 			uptime_ms: Date.now() - startedAt,
 		});
 	});

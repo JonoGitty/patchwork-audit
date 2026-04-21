@@ -246,13 +246,19 @@ git notes --ref=patchwork show <commit-sha>
 
 | Status | Meaning |
 |--------|---------|
-| **PASS** | Hash chain is intact, no policy denials in the session, events exist |
+| **PASS** | Hash chain is intact, no high-risk policy denials since the last commit, events exist |
 | **FAIL** | One or more issues detected (see `failure_reasons`) |
 
 Failure reasons:
 - `chain_integrity_failure` -- the hash chain has been tampered with or events were deleted
-- `policy_denials_present` -- the AI tried to do something that was blocked during this session
+- `high_risk_denials_since_last_commit` -- the AI attempted a critical- or high-risk action that was blocked between the last commit and this one. Low/medium-risk denials are recorded but don't fail the attestation, because they represent the policy working as intended, not a broken commit.
 - `no_session_events` -- no audit events exist for this session (hooks may not be working)
+
+### Coverage — which commits get attested
+
+Attestation runs inside the PostToolUse hook, so it only sees commits the instrumented agent makes. **Commits made outside Claude Code -- from a plain terminal, an IDE's built-in git, or another agent that isn't hooked -- will not be attested.** To confirm a branch has full coverage, compare `git log` against `patchwork commit-attest --list`.
+
+If an unattested commit appears in the history and you need a retrospective proof, there isn't one -- the session's events aren't linked to that SHA. The fix is structural: route all commits through an instrumented agent, or add a pre-receive/CI gate that rejects commits without a Patchwork note.
 
 ### Pushing notes to remote
 

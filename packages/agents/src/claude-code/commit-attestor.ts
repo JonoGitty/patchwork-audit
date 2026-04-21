@@ -59,6 +59,9 @@ export async function generateCommitAttestation(params: CommitAttestationParams)
 	const eventsSinceLastCommit = lastCommitIdx === -1
 		? sessionEvents.length
 		: sessionEvents.length - lastCommitIdx - 1;
+	const sinceLastCommitEvents = lastCommitIdx === -1
+		? sessionEvents
+		: sessionEvents.slice(lastCommitIdx + 1);
 
 	// Verify chain integrity
 	const rawEvents = sessionEvents.map((e) => e as unknown as Record<string, unknown>);
@@ -69,16 +72,23 @@ export async function generateCommitAttestation(params: CommitAttestationParams)
 		? (rawEvents[rawEvents.length - 1].event_hash as string) || null
 		: null;
 
-	// Compute risk summary
+	// Compute risk summary across the whole session (informational) plus a
+	// scoped count of high-risk denials since the last commit (load-bearing
+	// for pass/fail).
 	const riskSummary = computeRiskSummary(sessionEvents);
+	const highRiskDenialsSinceLastCommit = countHighRiskDenials(sinceLastCommitEvents);
+	riskSummary.denials_high_risk_since_last_commit = highRiskDenialsSinceLastCommit;
 
 	// Load active policy
 	const { source: policySource } = loadActivePolicy(projectRoot);
 
-	// Determine pass/fail
+	// Determine pass/fail. Expected denials (medium/low risk) are informational:
+	// they show the policy is working, not that the commit is unsafe. Only
+	// denials of critical/high-risk actions in the window leading up to this
+	// commit are treated as attestation failures.
 	const failureReasons: string[] = [];
 	if (!chain.is_valid) failureReasons.push("chain_integrity_failure");
-	if (riskSummary.denials > 0) failureReasons.push("policy_denials_present");
+	if (highRiskDenialsSinceLastCommit > 0) failureReasons.push("high_risk_denials_since_last_commit");
 	if (sessionEvents.length === 0) failureReasons.push("no_session_events");
 
 	// Build unsigned artifact
@@ -158,12 +168,14 @@ export function writeCommitAttestation(attestation: CommitAttestation): string {
  */
 export function addGitNote(attestation: CommitAttestation, cwd: string): void {
 	const risk = attestation.risk_summary;
+	const highRiskSinceCommit = risk.denials_high_risk_since_last_commit ?? 0;
 	const noteBody = [
 		`Patchwork-Approved: ${attestation.payload_hash}`,
 		`Status: ${attestation.pass ? "PASS" : "FAIL"}`,
 		`Session: ${attestation.session_id}`,
 		`Chain: ${attestation.chain_valid ? "valid" : "INVALID"} (${attestation.chain_chained_events} events, tip: ${attestation.chain_tip_hash || "none"})`,
 		`Risk: ${risk.critical} critical, ${risk.high} high, ${risk.medium} medium`,
+		`Denials: ${risk.denials} total, ${highRiskSinceCommit} high-risk since last commit`,
 		`Policy: ${attestation.policy_source}`,
 		...(attestation.failure_reasons.length > 0
 			? [`Failures: ${attestation.failure_reasons.join(", ")}`]
@@ -197,12 +209,23 @@ function computeRiskSummary(events: AuditEvent[]): RiskSummary {
 	const summary: RiskSummary = { critical: 0, high: 0, medium: 0, low: 0, none: 0, denials: 0 };
 	for (const e of events) {
 		const level = e.risk?.level;
-		if (level && level in summary) {
-			summary[level as keyof Omit<RiskSummary, "denials">]++;
+		if (level === "critical" || level === "high" || level === "medium" || level === "low" || level === "none") {
+			summary[level]++;
 		}
 		if (e.status === "denied") summary.denials++;
 	}
 	return summary;
+}
+
+/** Count denials of critical/high-risk actions — the load-bearing signal for attestation pass/fail. */
+function countHighRiskDenials(events: AuditEvent[]): number {
+	let count = 0;
+	for (const e of events) {
+		if (e.status !== "denied") continue;
+		const level = e.risk?.level;
+		if (level === "critical" || level === "high") count++;
+	}
+	return count;
 }
 
 function findLastCommitEventIndex(events: AuditEvent[]): number {
