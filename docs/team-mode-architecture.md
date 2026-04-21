@@ -1,6 +1,40 @@
-# Patchwork Team Mode: Architecture Plan
+# Patchwork Team Mode: Architecture
 
-> Planned feature. Not yet implemented. This document captures the full production-ready design.
+> **Status: Alpha (v0.7.0-alpha.1) — experimental, partially shipped, not published to npm.**
+>
+> The `@patchwork/team` package exists and has 99 passing unit tests, but has not been run in any real multi-machine deployment. Several features described below are still on the design path rather than in code. See **[Current Implementation Status](#current-implementation-status)** for what's actually shipped vs planned.
+
+---
+
+## Current Implementation Status
+
+| Capability | Design | Implemented | Notes |
+|---|---|---|---|
+| Sync agent (reads relay log, batches, pushes) | ✅ | ✅ | `packages/team/src/sync/` |
+| Machine enrollment (HMAC API key) | ✅ | ✅ | `sync/enrollment.ts` + server `/routes/enroll.ts` |
+| Cursor tracking + resume | ✅ | ✅ | `sync/cursor.ts` |
+| Exponential backoff on network errors | ✅ | ✅ | `sync/backoff.ts` |
+| Seal-batch reader | ✅ | ✅ | `sync/seal-reader.ts` |
+| Team server: `/api/v1/ingest` | ✅ | ✅ | HMAC-verified event ingestion |
+| Team server: `/api/v1/health` | ✅ | ✅ | |
+| Team server: `/api/v1/machines` | ✅ | ✅ | List enrolled machines |
+| Team server: `/api/v1/admin/*` | ✅ | Partial | Admin endpoints scaffold exists |
+| Storage backend | **Postgres + FTS** (plan) | **SQLite** (actual) | Shipped with better-sqlite3; Postgres deferred |
+| Query endpoints (`/api/v1/events`, `/sessions`, `/stats`) | ✅ | ❌ | No query API yet |
+| Policy distribution (`/api/v1/policy`) | ✅ | ❌ | Not wired |
+| Verify endpoint (`/api/v1/verify`) | ✅ | ❌ | Not wired |
+| Alert engine + rules | ✅ | ❌ | Not wired |
+| Reports API | ✅ | ❌ | Not wired |
+| Team dashboard (web UI) | ✅ | ❌ | Not built |
+| mTLS | ✅ | ❌ | HMAC-only today |
+| Rate limiting | ✅ | ❌ | Not wired |
+| CLI commands (`team server start`, `enroll`, `status`, `unenroll`) | ✅ | ✅ | Shipped in CLI v0.6.x |
+
+**What the alpha can do today**: run a team server on one machine, enroll clients, sync their audit events into a single SQLite database. That's it.
+
+**What the alpha can NOT do yet**: query those events, distribute policy from server to client, alert on high-risk activity, show a dashboard, or enforce mTLS.
+
+See the [**Team Mode guide**](./guides/team-mode.md) for the user-facing alpha walkthrough.
 
 ---
 
