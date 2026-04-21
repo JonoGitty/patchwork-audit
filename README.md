@@ -40,12 +40,8 @@ Every action is classified, logged, and -- if it violates policy -- blocked befo
 ## Quickstart
 
 ```bash
-git clone https://github.com/JonoGitty/patchwork-audit.git
-cd patchwork-audit
-pnpm install && pnpm build
-
-# Install CLI globally
-cd packages/cli && npm link && cd ../..
+# Install from npm (recommended)
+npm install -g patchwork-audit
 
 # Set up hooks with strict enforcement
 patchwork init claude-code --strict-profile --policy-mode fail-closed
@@ -54,6 +50,15 @@ patchwork init claude-code --strict-profile --policy-mode fail-closed
 patchwork dashboard      # web UI at localhost:3000
 patchwork log            # CLI event stream
 patchwork summary        # today's activity
+```
+
+### From source (for development)
+
+```bash
+git clone https://github.com/JonoGitty/patchwork-audit.git
+cd patchwork-audit
+pnpm install && pnpm build
+cd packages/cli && npm link && cd ../..
 ```
 
 ### Claude Code skill (optional)
@@ -557,6 +562,8 @@ Four packages in a TypeScript monorepo:
 - [x] **Relay forwarding fix** -- hooks now properly await relay socket write before exit (v0.6.1)
 - [x] **Hook format fix** -- correct nested matcher/hooks format for Claude Code settings.json (v0.6.1)
 - [x] **npm publish** -- `npm install -g patchwork-audit` (v0.6.1)
+- [x] **PreToolUse deny fix** -- hook response format corrected so denials actually block (v0.6.4, security fix)
+- [x] **Commit attestation fixes** -- signatures verify end-to-end against the root-owned keyring; scoped denial semantics so the policy working doesn't auto-fail every commit; chain anchor handling for rotated logs; seal tip match tolerates legitimate chain growth (v0.6.5)
 
 **Planned:**
 - [ ] **Witness endpoints** -- configure external anchoring for off-machine seal verification

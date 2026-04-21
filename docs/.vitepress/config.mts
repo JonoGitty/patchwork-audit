@@ -16,7 +16,7 @@ export default defineConfig({
 			{ text: "Concepts", link: "/concepts/how-it-works" },
 			{ text: "Reference", link: "/reference/cli" },
 			{
-				text: "v0.6.3",
+				text: "v0.6.5",
 				items: [
 					{
 						text: "Changelog",
