@@ -1,5 +1,28 @@
 # @patchwork/agents
 
+## 0.6.6
+
+### Patch Changes
+
+- Fix two runtime bugs in commit attestation that survived v0.6.5.
+
+  **1. `tool_version` was always `"unknown"` in production.**
+  The `getAgentVersion()` helper in the Claude Code adapter used `require("node:module")`, which tsup compiled into its `__require` shim. In the ESM runtime that shim throws (`Dynamic require of "module" is not supported`) and the fallback returns `"unknown"`. The fix is a static `import { createRequire } from "node:module"` at the top of the module — tsup preserves it, it works at runtime. Verified against the bundled `agents/dist/index.js`.
+
+  **2. `chain_valid` was always `false` when sessions ran concurrently.**
+  The commit-attestor called `verifyChain()` on the events of one session. But session events are a _filter_ over the global append-only chain; events from other sessions are interleaved between them, so each session event's `prev_hash` points at an event NOT in the filtered slice. `verifyChain` correctly reports this as a link mismatch, producing a false positive for "chain integrity failure" on every concurrent-session attestation.
+
+  Added a new `verifyEventHashes()` function in `@patchwork/core` that checks per-event hash integrity without requiring prev_hash continuity between events — the correct check for a filtered subset. The commit-attestor now uses it. Tampering is still caught (if any event's stored hash doesn't match the recomputed hash of its content, `chain_valid` is false); healthy concurrent-session logs pass.
+
+  **API additions (backward compatible)**
+
+  - `verifyEventHashes()`, `EventIntegrityResult` exported from `@patchwork/core`.
+
+  **Tests**: 883 passing (up from 878); 5 new covering both fixes.
+
+- Updated dependencies
+  - @patchwork/core@0.6.6
+
 ## 0.6.5
 
 ### Patch Changes

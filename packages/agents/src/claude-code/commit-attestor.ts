@@ -9,7 +9,7 @@ import {
 	type CommitAttestation,
 	type RiskSummary,
 	type Store,
-	verifyChain,
+	verifyEventHashes,
 	ensureKeyring,
 	readSealKey,
 	buildAttestationPayload,
@@ -63,11 +63,17 @@ export async function generateCommitAttestation(params: CommitAttestationParams)
 		? sessionEvents
 		: sessionEvents.slice(lastCommitIdx + 1);
 
-	// Verify chain integrity
+	// Verify per-event hash integrity. Session events are a *filter* over the
+	// global append-only chain; events from other sessions are interleaved
+	// between them in the underlying log, so they do not chain to each other.
+	// Running verifyChain on this slice would always report prev_link mismatches
+	// and produce a false negative. The correct check for tamper evidence is
+	// per-event hash integrity: does each event's stored hash match the
+	// deterministic hash of its content?
 	const rawEvents = sessionEvents.map((e) => e as unknown as Record<string, unknown>);
-	const chain = verifyChain(rawEvents);
+	const chain = verifyEventHashes(rawEvents);
 
-	// Compute chain tip hash
+	// Compute chain tip hash — last event in this session that has a hash
 	const chainTipHash = rawEvents.length > 0
 		? (rawEvents[rawEvents.length - 1].event_hash as string) || null
 		: null;
@@ -105,7 +111,7 @@ export async function generateCommitAttestation(params: CommitAttestationParams)
 		session_events_since_last_commit: eventsSinceLastCommit,
 		chain_tip_hash: chainTipHash,
 		chain_valid: chain.is_valid,
-		chain_chained_events: chain.chained_events,
+		chain_chained_events: chain.total - chain.unhashed_count,
 		risk_summary: riskSummary,
 		policy_source: policySource,
 		pass: failureReasons.length === 0,

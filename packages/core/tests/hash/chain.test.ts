@@ -368,3 +368,56 @@ describe("verifyChain", () => {
 		expect(result.chain_anchor_hash).toBeNull();
 	});
 });
+
+describe("verifyEventHashes (per-event tamper check)", () => {
+	it("passes a set of non-contiguous events whose hashes self-verify", async () => {
+		// Simulate events from one session that have events from other sessions
+		// interleaved in the global chain — their prev_hash fields point to
+		// events NOT in this slice, which would fail verifyChain but must not
+		// fail a per-event integrity check.
+		const { verifyEventHashes } = await import("../../src/hash/chain.js");
+		const e1 = makeRawEvent({
+			id: "evt_a",
+			action: "file_read",
+			prev_hash: "sha256:from-another-session-1",
+		});
+		e1.event_hash = computeEventHash(e1);
+		const e2 = makeRawEvent({
+			id: "evt_b",
+			action: "file_write",
+			prev_hash: "sha256:from-another-session-2",
+		});
+		e2.event_hash = computeEventHash(e2);
+
+		const result = verifyEventHashes([e1, e2]);
+		expect(result.is_valid).toBe(true);
+		expect(result.hash_mismatch_count).toBe(0);
+	});
+
+	it("catches tampering with an individual event", async () => {
+		const { verifyEventHashes } = await import("../../src/hash/chain.js");
+		const e1 = makeRawEvent({
+			id: "evt_a",
+			action: "file_read",
+			prev_hash: null,
+		});
+		e1.event_hash = computeEventHash(e1);
+
+		// Tamper with the action after hashing
+		const tampered = { ...e1, action: "command_execute" };
+
+		const result = verifyEventHashes([tampered]);
+		expect(result.is_valid).toBe(false);
+		expect(result.hash_mismatch_count).toBe(1);
+		expect(result.first_failure_index).toBe(0);
+	});
+
+	it("counts unhashed (legacy) events separately from mismatches", async () => {
+		const { verifyEventHashes } = await import("../../src/hash/chain.js");
+		const legacy = makeRawEvent({ id: "evt_legacy", action: "file_read" });
+		const result = verifyEventHashes([legacy]);
+		expect(result.is_valid).toBe(true);
+		expect(result.unhashed_count).toBe(1);
+		expect(result.hash_mismatch_count).toBe(0);
+	});
+});

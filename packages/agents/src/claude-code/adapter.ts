@@ -25,6 +25,7 @@ import {
 	statSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import { mapClaudeCodeTool } from "./mapper.js";
 import { isGitCommitCommand, extractCommitInfo, usesNoVerify } from "./git-commit-detector.js";
 import { generateCommitAttestation, writeCommitAttestation, addGitNote } from "./commit-attestor.js";
@@ -442,7 +443,9 @@ async function handlePostToolUse(
 function getAgentVersion(): string {
 	const ACCEPTED_NAMES = new Set(["@patchwork/agents", "patchwork-audit"]);
 	try {
-		const { createRequire } = require("node:module") as typeof import("node:module");
+		// Static ESM import — `require("node:module")` gets compiled to the
+		// tsup __require shim which throws in ESM context, sending us into
+		// the outer catch and yielding "unknown".
 		const req = createRequire(import.meta.url);
 		for (const candidate of [
 			"../package.json",

@@ -135,6 +135,57 @@ describe("generateCommitAttestation", () => {
 		expect(attestation.pass).toBe(true);
 	});
 
+	it("marks chain_valid=true when session events have prev_hashes pointing outside the session (interleaved with other sessions)", async () => {
+		// Simulates real-world state: two sessions are active, events interleave
+		// in the global log, so session X's events have prev_hash fields pointing
+		// at events from session Y. Per-event hashes self-verify; verifyChain
+		// would have flagged this as a chain break. verifyEventHashes should not.
+		appendTestEvent({ prev_hash: "sha256:from-other-session-a" } as Partial<AuditEvent>);
+		appendTestEvent({ prev_hash: "sha256:from-other-session-b" } as Partial<AuditEvent>);
+
+		const attestation = await generateCommitAttestation({
+			commitSha: "interleaved",
+			branch: "main",
+			sessionId,
+			projectRoot: "/tmp/project",
+			store,
+			toolVersion: "0.5.0-test",
+		});
+
+		expect(attestation.chain_valid).toBe(true);
+		expect(attestation.failure_reasons).not.toContain("chain_integrity_failure");
+		expect(attestation.pass).toBe(true);
+	});
+
+	it("catches tampering with a session event (per-event hash mismatch)", async () => {
+		// Write a valid event, then tamper with it directly in the file.
+		// Store.append always recomputes hashes, so we bypass it here.
+		appendTestEvent();
+		const eventsPath = join(tmpDir, ".patchwork", "events.jsonl");
+		const line = readFileSync(eventsPath, "utf-8").trim();
+		const parsed = JSON.parse(line);
+		parsed.action = "command_execute"; // changed from file_edit — hash won't match
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(eventsPath, JSON.stringify(parsed) + "\n", "utf-8");
+
+		// Use a fresh store to force re-reading the tampered file
+		const { JsonlStore: FreshStore } = await import("@patchwork/core");
+		const freshStore = new FreshStore(eventsPath);
+
+		const attestation = await generateCommitAttestation({
+			commitSha: "tampered",
+			branch: "main",
+			sessionId,
+			projectRoot: "/tmp/project",
+			store: freshStore,
+			toolVersion: "0.5.0-test",
+		});
+
+		expect(attestation.chain_valid).toBe(false);
+		expect(attestation.failure_reasons).toContain("chain_integrity_failure");
+		expect(attestation.pass).toBe(false);
+	});
+
 	it("signs attestation when keyring exists", async () => {
 		appendTestEvent();
 

@@ -9,5 +9,6 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": []
+  "___comment": "@patchwork/team is on its own alpha track and is excluded from updateInternalDependencies bumps via the ignore list. Remove from ignore when team graduates.",
+  "ignore": ["@patchwork/team"]
 }

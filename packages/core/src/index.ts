@@ -45,7 +45,9 @@ export {
 	canonicalize,
 	computeEventHash,
 	verifyChain,
+	verifyEventHashes,
 	type ChainVerification,
+	type EventIntegrityResult,
 } from "./hash/chain.js";
 export {
 	computeSealPayload,

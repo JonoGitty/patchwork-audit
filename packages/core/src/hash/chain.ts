@@ -40,6 +40,68 @@ export function computeEventHash(
 	return `sha256:${hash.digest("hex")}`;
 }
 
+/** Result of verifying per-event hash integrity of a non-contiguous event set. */
+export interface EventIntegrityResult {
+	total: number;
+	/** Events with schema validation failures. */
+	invalid_schema_count: number;
+	/** Events missing event_hash (legacy, pre-chain). */
+	unhashed_count: number;
+	/** Events whose stored event_hash does not match the recomputed hash. */
+	hash_mismatch_count: number;
+	/** Index of the first failure, or null if all events pass. */
+	first_failure_index: number | null;
+	is_valid: boolean;
+}
+
+/**
+ * Verify per-event hash integrity without requiring prev_hash linkage between
+ * events. Use this when checking a *filtered* subset of the global chain
+ * (e.g. events from one session) — subset events do not chain to each other
+ * because events from other sessions are interleaved between them.
+ *
+ * This still catches tampering: if any event's stored event_hash does not
+ * match the deterministic hash of its content, it fails.
+ */
+export function verifyEventHashes(
+	events: Record<string, unknown>[],
+): EventIntegrityResult {
+	const result: EventIntegrityResult = {
+		total: events.length,
+		invalid_schema_count: 0,
+		unhashed_count: 0,
+		hash_mismatch_count: 0,
+		first_failure_index: null,
+		is_valid: true,
+	};
+
+	for (let i = 0; i < events.length; i++) {
+		const raw = events[i];
+		const parsed = AuditEventSchema.safeParse(raw);
+		if (!parsed.success) {
+			result.invalid_schema_count++;
+			result.is_valid = false;
+			if (result.first_failure_index === null) result.first_failure_index = i;
+			continue;
+		}
+
+		const eventHash = (raw as Record<string, unknown>).event_hash as string | undefined;
+		if (!eventHash) {
+			result.unhashed_count++;
+			continue;
+		}
+
+		const recomputed = computeEventHash(raw as Record<string, unknown>);
+		if (recomputed !== eventHash) {
+			result.hash_mismatch_count++;
+			result.is_valid = false;
+			if (result.first_failure_index === null) result.first_failure_index = i;
+		}
+	}
+
+	return result;
+}
+
 /** Result of verifying the hash chain integrity of an event log. */
 export interface ChainVerification {
 	total_events: number;

@@ -79,7 +79,7 @@ let _pw_refresh = setInterval(() => {
         ${content}
     </main>
     <footer>
-        <span>Patchwork v0.6.5 — Local audit dashboard</span>
+        <span>Patchwork v0.6.6 — Local audit dashboard</span>
     </footer>
 </body>
 </html>`;
