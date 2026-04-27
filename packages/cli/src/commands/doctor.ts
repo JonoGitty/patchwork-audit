@@ -9,6 +9,17 @@ const PASS = chalk.green("\u2714");
 const FAIL = chalk.red("\u2718");
 const WARN = chalk.yellow("\u26A0");
 
+/** Extract command string from a hook entry (handles both nested and flat formats). */
+function getHookCommand(entry: any): string {
+	if (Array.isArray(entry?.hooks) && entry.hooks[0]?.command) {
+		return entry.hooks[0].command;
+	}
+	if (typeof entry?.command === "string") {
+		return entry.command;
+	}
+	return "";
+}
+
 export const doctorCommand = new Command("doctor")
 	.description("Check Patchwork health: hooks, node, store, policy, watchdog")
 	.action(() => {
@@ -57,9 +68,12 @@ export const doctorCommand = new Command("doctor")
 		}
 
 		// 3. Hooks use explicit node path (not bare patchwork)
-		const preToolCmd = hooks.PreToolUse?.[0]?.command || "";
-		if (preToolCmd.includes("/node ") || preToolCmd.includes("/node.exe ")) {
-			console.log(`  ${PASS} Hooks use explicit node path (architecture-safe)`);
+		const preToolCmd = getHookCommand(hooks.PreToolUse?.[0]);
+		const hasExplicitNode = /\/node(?:\.exe)?["'\s]/.test(preToolCmd);
+		const usesWrapper = /hook-wrapper\.(sh|cmd|bat|ps1)/.test(preToolCmd);
+		if (hasExplicitNode || usesWrapper) {
+			const detail = usesWrapper && !hasExplicitNode ? " (via hook-wrapper)" : "";
+			console.log(`  ${PASS} Hooks use explicit node path (architecture-safe)${detail}`);
 		} else if (preToolCmd.includes("patchwork hook")) {
 			console.log(`  ${WARN} Hooks use bare 'patchwork' — may fail on mixed-architecture Macs`);
 			console.log(`     Fix: patchwork init claude-code --strict-profile --policy-mode fail-closed`);
