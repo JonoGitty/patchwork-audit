@@ -15,14 +15,19 @@ export const commitAttestCommand = new Command("commit-attest")
 	.argument("[sha]", "Commit SHA to inspect")
 	.option("--verify", "Verify the attestation signature")
 	.option("--list", "List all attested commits")
+	.option("--failures", "Show recent attestation failures (commits that should have been attested but weren't)")
 	.option("--json", "Output as JSON")
 	.action(async (sha, opts) => {
 		if (opts.list) {
 			return listAttestations(opts.json);
 		}
 
+		if (opts.failures) {
+			return listFailures(opts.json);
+		}
+
 		if (!sha) {
-			console.log(chalk.red("Provide a commit SHA or use --list"));
+			console.log(chalk.red("Provide a commit SHA or use --list / --failures"));
 			process.exitCode = 1;
 			return;
 		}
@@ -84,6 +89,33 @@ export const commitAttestCommand = new Command("commit-attest")
 			console.log(chalk.red(`  Failures:     ${attestation.failure_reasons.join(", ")}`));
 		}
 	});
+
+function listFailures(json?: boolean): void {
+	const failuresPath = join(COMMIT_ATTESTATIONS_DIR, "_failures.jsonl");
+	if (!existsSync(failuresPath)) {
+		if (json) console.log(JSON.stringify({ failures: [] }));
+		else console.log("No attestation failures recorded.");
+		return;
+	}
+	const lines = readFileSync(failuresPath, "utf-8").split("\n").filter((l) => l.trim());
+	const entries = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+
+	if (json) {
+		console.log(JSON.stringify({ failures: entries }, null, 2));
+		return;
+	}
+	if (entries.length === 0) {
+		console.log("No attestation failures recorded.");
+		return;
+	}
+	console.log(chalk.bold(`Attestation Failures (${entries.length})`));
+	console.log();
+	for (const e of entries.slice(-20)) {
+		const sha = e.commit_sha || chalk.dim("<no-sha>");
+		console.log(`  ${e.timestamp}  ${chalk.red(e.stage)}  ${sha}  ${e.session_id}`);
+		console.log(`    ${chalk.red(e.error_message)}`);
+	}
+}
 
 function listAttestations(json?: boolean): void {
 	if (!existsSync(COMMIT_ATTESTATION_INDEX)) {
