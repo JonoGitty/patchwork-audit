@@ -25,6 +25,7 @@ import { join, dirname } from "node:path";
 
 function commitAttestationsDir() { return join(getHomeDir(), ".patchwork", "commit-attestations"); }
 function commitIndexPath() { return join(commitAttestationsDir(), "index.jsonl"); }
+function attestorFailuresPath() { return join(commitAttestationsDir(), "_failures.jsonl"); }
 function keyringDir() { return join(getHomeDir(), ".patchwork", "keys", "seal"); }
 function legacyKeyPath() { return join(getHomeDir(), ".patchwork", "keys", "seal.key"); }
 
@@ -192,6 +193,40 @@ export function addGitNote(attestation: CommitAttestation, cwd: string): void {
 		`git notes --ref=patchwork add -f -m ${shellQuote(noteBody)} ${attestation.commit_sha}`,
 		{ cwd, timeout: 5000, stdio: "ignore" },
 	);
+}
+
+/**
+ * Persist a record when commit attestation fails. Without this, the empty
+ * catch in the post-tool handler swallowed every error — so missed commits
+ * were invisible. Failures land in commit-attestations/_failures.jsonl.
+ */
+export function writeAttestationFailure(params: {
+	commitSha?: string;
+	branch?: string;
+	sessionId: string;
+	stage: "extract" | "generate" | "write" | "note";
+	error: unknown;
+}): void {
+	try {
+		if (!existsSync(commitAttestationsDir())) {
+			mkdirSync(commitAttestationsDir(), { recursive: true, mode: 0o700 });
+		}
+		const err = params.error;
+		const message = err instanceof Error ? err.message : String(err);
+		const stack = err instanceof Error ? err.stack : undefined;
+		const line = JSON.stringify({
+			timestamp: new Date().toISOString(),
+			stage: params.stage,
+			commit_sha: params.commitSha ?? null,
+			branch: params.branch ?? null,
+			session_id: params.sessionId,
+			error_message: message,
+			error_stack: stack,
+		}) + "\n";
+		appendFileSync(attestorFailuresPath(), line, { mode: 0o600 });
+	} catch {
+		// Failure to log a failure is non-fatal — never block the hook pipeline
+	}
 }
 
 /**

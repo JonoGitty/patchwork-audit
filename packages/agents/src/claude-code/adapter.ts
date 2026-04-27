@@ -28,7 +28,7 @@ import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { mapClaudeCodeTool } from "./mapper.js";
 import { isGitCommitCommand, extractCommitInfo, usesNoVerify } from "./git-commit-detector.js";
-import { generateCommitAttestation, writeCommitAttestation, addGitNote } from "./commit-attestor.js";
+import { generateCommitAttestation, writeCommitAttestation, addGitNote, writeAttestationFailure } from "./commit-attestor.js";
 import type { ClaudeCodeHookInput, ClaudeCodeHookOutput } from "./types.js";
 
 function getEventsPath(): string {
@@ -411,8 +411,14 @@ async function handlePostToolUse(
 					writeCommitAttestation(attestation);
 					try {
 						addGitNote(attestation, input.cwd);
-					} catch {
-						// git notes failure is non-fatal
+					} catch (err) {
+						writeAttestationFailure({
+							commitSha: commitInfo.sha,
+							branch: commitInfo.branch,
+							sessionId: input.session_id,
+							stage: "note",
+							error: err,
+						});
 					}
 
 					const noVerify = usesNoVerify(toolInput.command);
@@ -421,9 +427,29 @@ async function handlePostToolUse(
 					return {
 						feedback: `[Patchwork] Commit ${commitInfo.sha} attested: ${status}${warn} (${attestation.payload_hash})`,
 					};
-				} catch {
-					// Attestation generation must never block the hook pipeline
+				} catch (err) {
+					// Attestation generation must never block the hook pipeline,
+					// but record what went wrong so missed attestations are visible.
+					writeAttestationFailure({
+						commitSha: commitInfo.sha,
+						branch: commitInfo.branch,
+						sessionId: input.session_id,
+						stage: "generate",
+						error: err,
+					});
+					try {
+						const msg = err instanceof Error ? err.message : String(err);
+						console.error(`[Patchwork] Commit attestation failed for ${commitInfo.sha}: ${msg}`);
+					} catch { /* never throw from the catch */ }
 				}
+			} else if (stdout.length > 0) {
+				// We saw a successful git commit but couldn't parse [branch sha]
+				// out of stdout — record it so the stdout-pattern gap is visible.
+				writeAttestationFailure({
+					sessionId: input.session_id,
+					stage: "extract",
+					error: new Error(`extractCommitInfo returned null; stdout head: ${stdout.slice(0, 200)}`),
+				});
 			}
 		}
 	}

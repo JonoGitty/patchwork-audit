@@ -6,6 +6,7 @@ import {
 	generateCommitAttestation,
 	writeCommitAttestation,
 	readCommitAttestation,
+	writeAttestationFailure,
 } from "../../src/claude-code/commit-attestor.js";
 import {
 	JsonlStore,
@@ -295,5 +296,77 @@ describe("writeCommitAttestation / readCommitAttestation", () => {
 
 	it("returns null for nonexistent SHA", () => {
 		expect(readCommitAttestation("nonexistent")).toBeNull();
+	});
+});
+
+describe("writeAttestationFailure", () => {
+	let originalHome: string | undefined;
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-attest-fail-"));
+		originalHome = process.env.HOME;
+		process.env.HOME = tmpDir;
+	});
+
+	afterEach(() => {
+		process.env.HOME = originalHome;
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function readFailures(): any[] {
+		const path = join(tmpDir, ".patchwork", "commit-attestations", "_failures.jsonl");
+		if (!existsSync(path)) return [];
+		return readFileSync(path, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+	}
+
+	it("records an Error with stack", () => {
+		writeAttestationFailure({
+			commitSha: "abc1234",
+			branch: "main",
+			sessionId: "ses_x",
+			stage: "generate",
+			error: new Error("boom"),
+		});
+
+		const lines = readFailures();
+		expect(lines).toHaveLength(1);
+		expect(lines[0].commit_sha).toBe("abc1234");
+		expect(lines[0].branch).toBe("main");
+		expect(lines[0].session_id).toBe("ses_x");
+		expect(lines[0].stage).toBe("generate");
+		expect(lines[0].error_message).toBe("boom");
+		expect(lines[0].error_stack).toMatch(/Error: boom/);
+		expect(lines[0].timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+	});
+
+	it("records non-Error throws as string", () => {
+		writeAttestationFailure({
+			sessionId: "ses_y",
+			stage: "extract",
+			error: "raw string failure",
+		});
+
+		const lines = readFailures();
+		expect(lines).toHaveLength(1);
+		expect(lines[0].commit_sha).toBeNull();
+		expect(lines[0].branch).toBeNull();
+		expect(lines[0].error_message).toBe("raw string failure");
+		expect(lines[0].error_stack).toBeUndefined();
+	});
+
+	it("appends rather than overwrites", () => {
+		writeAttestationFailure({ sessionId: "s1", stage: "generate", error: new Error("first") });
+		writeAttestationFailure({ sessionId: "s2", stage: "write", error: new Error("second") });
+
+		const lines = readFailures();
+		expect(lines).toHaveLength(2);
+		expect(lines[0].error_message).toBe("first");
+		expect(lines[1].error_message).toBe("second");
+	});
+
+	it("creates the directory if missing", () => {
+		writeAttestationFailure({ sessionId: "s", stage: "note", error: new Error("x") });
+		expect(existsSync(join(tmpDir, ".patchwork", "commit-attestations"))).toBe(true);
 	});
 });
