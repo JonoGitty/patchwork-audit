@@ -13,6 +13,7 @@ import { apiRoutes } from "./routes/api.js";
 import { replayRoutes } from "./routes/replay.js";
 import { complianceRoutes } from "./routes/compliance.js";
 import { doctorRoutes } from "./routes/doctor.js";
+import { attestationRoutes } from "./routes/attestations.js";
 
 export interface DashboardOptions {
 	port?: number;
@@ -32,6 +33,7 @@ export function createApp(store: Store, searchStore: SearchableStore | null, dat
 	app.route("/", replayRoutes(store));
 	app.route("/", complianceRoutes(store));
 	app.route("/", doctorRoutes(store, dataDir));
+	app.route("/", attestationRoutes(store));
 
 	return app;
 }

@@ -3,6 +3,7 @@ const NAV_ITEMS = [
 	{ href: "/events", label: "Events", icon: "&#9776;" },
 	{ href: "/sessions", label: "Sessions", icon: "&#9201;" },
 	{ href: "/risk", label: "Risk", icon: "&#9888;" },
+	{ href: "/attestations", label: "Attestations", icon: "&#10004;" },
 	{ href: "/compliance", label: "Compliance", icon: "&#9878;" },
 	{ href: "/search", label: "Search", icon: "&#128269;" },
 	{ href: "/doctor", label: "Doctor", icon: "&#9889;" },

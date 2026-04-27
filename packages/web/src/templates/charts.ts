@@ -1,4 +1,5 @@
 import type { RiskTimelinePoint } from "../data/queries.js";
+import type { AttestationTimelinePoint } from "../data/attestations.js";
 
 export function activityBarChart(byDay: Record<string, number>, id = "activityChart"): string {
 	const sorted = Object.entries(byDay).sort((a, b) => a[0].localeCompare(b[0])).slice(-14);
@@ -114,6 +115,35 @@ export function horizontalBarChart(data: Array<[string, number]>, id: string, co
 			scales: {
 				x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' }, beginAtZero: true },
 				y: { grid: { display: false }, ticks: { color: '#8b949e', font: { family: 'monospace', size: 12 } } }
+			}
+		}
+	});
+	</script>`;
+}
+
+export function attestationTimelineChart(points: AttestationTimelinePoint[], id = "attestTimeline"): string {
+	const labels = JSON.stringify(points.map((p) => p.date.slice(5)));
+	const passData = JSON.stringify(points.map((p) => p.pass));
+	const failData = JSON.stringify(points.map((p) => p.fail));
+	return `<div class="chart-container">
+		<canvas id="${id}"></canvas>
+	</div>
+	<script>
+	new Chart(document.getElementById('${id}'), {
+		type: 'bar',
+		data: {
+			labels: ${labels},
+			datasets: [
+				{ label: 'Pass', data: ${passData}, backgroundColor: '#3fb950', stack: 's' },
+				{ label: 'Fail', data: ${failData}, backgroundColor: '#f85149', stack: 's' }
+			]
+		},
+		options: {
+			responsive: true, maintainAspectRatio: false,
+			plugins: { legend: { position: 'bottom', labels: { color: '#8b949e' } } },
+			scales: {
+				x: { stacked: true, grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
+				y: { stacked: true, beginAtZero: true, grid: { color: '#30363d' }, ticks: { color: '#8b949e' } }
 			}
 		}
 	});
