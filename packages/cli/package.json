@@ -1,6 +1,6 @@
 {
   "name": "patchwork-audit",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "The audit trail for AI coding agents",
   "type": "module",
   "bin": {
