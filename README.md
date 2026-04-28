@@ -565,6 +565,7 @@ Four packages in a TypeScript monorepo:
 - [x] **PreToolUse deny fix** -- hook response format corrected so denials actually block (v0.6.4, security fix)
 - [x] **Commit attestation fixes** -- signatures verify end-to-end against the root-owned keyring; scoped denial semantics so the policy working doesn't auto-fail every commit; chain anchor handling for rotated logs; seal tip match tolerates legitimate chain growth (v0.6.5)
 - [x] **Attestation runtime fixes** -- `tool_version` resolves correctly in bundled ESM (was `"unknown"` due to a tsup `__require` shim); `chain_valid` accurate for concurrent sessions via per-event hash integrity check (v0.6.6)
+- [x] **Attestation observability** -- `patchwork doctor` recognises Claude Code's nested hook format; previously-swallowed PostToolUse errors now persist to `_failures.jsonl` with stage tags, surfaced via `patchwork commit-attest --failures` and a new `/attestations` dashboard page (v0.6.7)
 
 **Planned:**
 - [ ] **Witness endpoints** -- configure external anchoring for off-machine seal verification
