@@ -566,6 +566,7 @@ Four packages in a TypeScript monorepo:
 - [x] **Commit attestation fixes** -- signatures verify end-to-end against the root-owned keyring; scoped denial semantics so the policy working doesn't auto-fail every commit; chain anchor handling for rotated logs; seal tip match tolerates legitimate chain growth (v0.6.5)
 - [x] **Attestation runtime fixes** -- `tool_version` resolves correctly in bundled ESM (was `"unknown"` due to a tsup `__require` shim); `chain_valid` accurate for concurrent sessions via per-event hash integrity check (v0.6.6)
 - [x] **Attestation observability** -- `patchwork doctor` recognises Claude Code's nested hook format; previously-swallowed PostToolUse errors now persist to `_failures.jsonl` with stage tags, surfaced via `patchwork commit-attest --failures` and a new `/attestations` dashboard page (v0.6.7)
+- [x] **Installer dedup + loopback risk fix** -- multiple Patchwork hook entries now collapse cleanly on re-install (no more duplicate attestations); curl/wget targeting localhost is medium-risk instead of critical so the dashboard's own self-introspection loop doesn't trip the policy (v0.6.8)
 
 **Planned:**
 - [ ] **Witness endpoints** -- configure external anchoring for off-machine seal verification

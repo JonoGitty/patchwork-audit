@@ -1,5 +1,57 @@
 # @patchwork/core
 
+## 0.6.8
+
+### Patch Changes
+
+- Two real bug fixes that ship to npm via the bundled CLI:
+
+  - **fix(installer): collapse duplicate patchwork hook entries.** Two
+    installer paths could both write hook entries — the canonical TS
+    `installClaudeCodeHooks` and the multi-user Python patcher in
+    `scripts/_lib.sh:install_user_hooks`. Their dedupe logic disagreed,
+    so when both ran (e.g. `patchwork init` followed by
+    `system-install.sh`) every PostToolUse event ended up with TWO
+    patchwork entries — one for `hook-wrapper.sh`, one for direct-node
+    — and both fired on every commit. Fix: broaden the patchwork-hook
+    regex to match `hook-wrapper.{sh,cmd,bat,ps1}` and `guard.sh` in
+    addition to `patchwork ... hook ...`, and replace `findIndex+replace`
+    with `filter+append` so multiple existing entries collapse to a
+    single canonical entry. The Python patcher gets matching dedupe at
+    the nested-format level. Three new regression tests cover the
+    collapse, non-patchwork hook preservation, and hook-wrapper/guard.sh
+    recognition.
+
+  - **fix(risk): downgrade curl/wget to medium when target is loopback
+    only.** The risk classifier marked any command starting with `curl `
+    or `wget ` as critical, which under a `max_risk: high` policy meant
+    blanket-blocked. Reasonable for unknown internet targets but it also
+    denied legitimate self-introspection: `curl http://localhost:3000`,
+    hitting an internal devtool on `127.0.0.1`, etc. Now: when the URL
+    resolves entirely to loopback (`localhost`, `127.0.0.1`, `::1`), the
+    risk is downgraded to medium and tagged `loopback_target`. Mixed
+    targets like `curl http://localhost/x https://attacker.com/y` stay
+    critical (conservative). 5 new tests cover localhost / 127.0.0.1 /
+    IPv6 / wget / mixed-URL.
+
+  Internal hygiene that doesn't ship to npm but is included in the
+  release commit:
+
+  - `refactor(install)`: align canonical multi-user installer with the
+    deployed v2 hash-baseline model (settings.json stays user-owned;
+    tamper detection via SHA-256 baseline). The v1 immutable-lock model
+    in `system-install.sh` was out of date with deployed reality.
+  - `fix(dashboard)`: launcher script prefers the bundled CLI over
+    `npx tsx`, so the dashboard LaunchAgent restarts cleanly under
+    launchd's restricted env.
+  - `chore`: TEST_LOG.md no longer auto-appends on every push (gated
+    behind `WRITE_TEST_LOG=1` for explicit release-time runs); doctor's
+    Guard staleness threshold raised to 8h with clearer wording; CI
+    workflows opt into Node 24 ahead of the GitHub 2026-09-16 deadline.
+
+  Tests: 895/895 across the project (290 CLI / 140 agents / 354 core /
+  99 team / 12 web).
+
 ## 0.6.7
 
 ### Patch Changes

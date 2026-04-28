@@ -31,7 +31,7 @@ const program = new Command();
 program
 	.name("patchwork")
 	.description("The audit trail for AI coding agents")
-	.version("0.6.7");
+	.version("0.6.8");
 
 program.addCommand(initCommand);
 program.addCommand(logCommand);
