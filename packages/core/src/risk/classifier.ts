@@ -20,6 +20,43 @@ const DENY_COMMAND_PREFIXES = [
 	"> /dev/",
 ];
 
+/**
+ * Hosts considered safe for read-only HTTP probes: localhost / loopback only.
+ * When curl/wget targets one of these, downgrade from critical → medium so
+ * that self-introspection of local services (the Patchwork dashboard,
+ * internal devtools) isn't blocked. Note: this is a host-match against the
+ * URL the user typed, not a runtime DNS check — it can't catch redirects.
+ */
+const SAFE_LOOPBACK_HOST_RE = /(?:^|\s|@|\/\/)(?:localhost|127\.0\.0\.1|\[::1\]|\[0:0:0:0:0:0:0:1\])(?:[:\/\s?#]|$)/i;
+
+function targetsLoopbackOnly(cmd: string): boolean {
+	// Capture each http(s) URL's host. The bracketed alternative `\[[^\]]+\]`
+	// keeps IPv6 hosts (e.g. [::1]) intact instead of being chopped on `:`.
+	const urlRe = /\bhttps?:\/\/(\[[^\]]+\]|[^\s\/:\)\?\#]+)/gi;
+	const hosts: string[] = [];
+	let match: RegExpExecArray | null;
+	while ((match = urlRe.exec(cmd)) !== null) {
+		// Strip user-info before host, then strip IPv6 brackets if present.
+		let host = match[1].toLowerCase();
+		host = host.split("@").pop() || host;
+		host = host.replace(/^\[|\]$/g, "");
+		hosts.push(host);
+	}
+
+	const isLoopback = (h: string): boolean =>
+		h === "localhost" ||
+		h === "127.0.0.1" ||
+		h === "::1" ||
+		h === "0:0:0:0:0:0:0:1";
+
+	if (hosts.length > 0) {
+		// Every URL in the command must be loopback to qualify.
+		return hosts.every(isLoopback);
+	}
+	// Scheme-less form (`curl localhost/path`): fall back to a textual check.
+	return SAFE_LOOPBACK_HOST_RE.test(cmd);
+}
+
 const HIGH_RISK_COMMAND_PREFIXES = [
 	"npm install",
 	"npm i ",
@@ -108,7 +145,18 @@ export function classifyRisk(action: string, target?: Target): Risk {
 
 		if (DENY_COMMAND_PREFIXES.some((p) => cmd.startsWith(p))) {
 			flags.push("dangerous_command");
-			level = raiseLevel(level, "critical");
+			// Special case: curl/wget targeting only loopback are downgraded so
+			// that local self-introspection (e.g. probing localhost services)
+			// isn't blanket-blocked. Outbound curl/wget stays critical.
+			if (
+				(cmd.startsWith("curl ") || cmd.startsWith("wget ")) &&
+				targetsLoopbackOnly(cmd)
+			) {
+				flags.push("loopback_target");
+				level = raiseLevel(level, "medium");
+			} else {
+				level = raiseLevel(level, "critical");
+			}
 		} else if (HIGH_RISK_COMMAND_PREFIXES.some((p) => cmd.startsWith(p))) {
 			flags.push("install_or_modify_command");
 			level = raiseLevel(level, "high");
