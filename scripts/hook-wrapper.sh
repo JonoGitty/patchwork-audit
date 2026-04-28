@@ -6,6 +6,13 @@
 # 2. Direct patchwork binary via PATH (~100ms, works for npm global install)
 # 3. tsx from repo source (~700ms, always resolves deps, development fallback)
 
+# --- Per-event env defaults ---
+# Enable in-toto/DSSE attestations on this machine (v0.6.9+). The post-tool
+# handler dual-emits the standard format alongside the bespoke one, with no
+# behavioural change to the bespoke path. Comment the next line out to revert
+# to v0.6.8-style single-format emission.
+[ "$1" = "post-tool" ] && export PATCHWORK_INTOTO=1
+
 # --- Strategy 1: Cached paths from guard (set at session start) ---
 if [ -f "$HOME/.patchwork/state/node-path" ] && [ -f "$HOME/.patchwork/state/patchwork-path" ]; then
     _NODE=$(cat "$HOME/.patchwork/state/node-path")
