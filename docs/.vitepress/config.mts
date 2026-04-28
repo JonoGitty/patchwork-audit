@@ -16,7 +16,7 @@ export default defineConfig({
 			{ text: "Concepts", link: "/concepts/how-it-works" },
 			{ text: "Reference", link: "/reference/cli" },
 			{
-				text: "v0.6.8",
+				text: "v0.6.9",
 				items: [
 					{
 						text: "Changelog",
@@ -82,6 +82,7 @@ export default defineConfig({
 						{ text: "Event Schema", link: "/reference/event-schema" },
 						{ text: "Policy Schema", link: "/reference/policy-schema" },
 						{ text: "Relay Protocol", link: "/reference/relay-protocol" },
+							{ text: "in-toto / DSSE Attestations", link: "/reference/intoto" },
 					],
 				},
 				{

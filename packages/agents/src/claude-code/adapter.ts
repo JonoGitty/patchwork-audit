@@ -28,7 +28,15 @@ import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { mapClaudeCodeTool } from "./mapper.js";
 import { isGitCommitCommand, extractCommitInfo, usesNoVerify } from "./git-commit-detector.js";
-import { generateCommitAttestation, writeCommitAttestation, addGitNote, writeAttestationFailure } from "./commit-attestor.js";
+import {
+	generateCommitAttestation,
+	writeCommitAttestation,
+	addGitNote,
+	writeAttestationFailure,
+	buildIntotoEnvelope,
+	writeIntotoEnvelope,
+	addIntotoGitNote,
+} from "./commit-attestor.js";
 import type { ClaudeCodeHookInput, ClaudeCodeHookOutput } from "./types.js";
 
 function getEventsPath(): string {
@@ -419,6 +427,35 @@ async function handlePostToolUse(
 							stage: "note",
 							error: err,
 						});
+					}
+
+					// Optional: emit in-toto/DSSE-formatted parallel attestation when
+					// PATCHWORK_INTOTO=1. Default off in v0.6.9; the bespoke path above
+					// is unaffected so existing tooling, dashboards, and CLI keep working.
+					if (process.env.PATCHWORK_INTOTO === "1") {
+						try {
+							const envelope = await buildIntotoEnvelope(attestation);
+							writeIntotoEnvelope(commitInfo.sha, envelope);
+							try {
+								addIntotoGitNote(commitInfo.sha, envelope, input.cwd);
+							} catch (err) {
+								writeAttestationFailure({
+									commitSha: commitInfo.sha,
+									branch: commitInfo.branch,
+									sessionId: input.session_id,
+									stage: "note",
+									error: err,
+								});
+							}
+						} catch (err) {
+							writeAttestationFailure({
+								commitSha: commitInfo.sha,
+								branch: commitInfo.branch,
+								sessionId: input.session_id,
+								stage: "generate",
+								error: err,
+							});
+						}
 					}
 
 					const noVerify = usesNoVerify(toolInput.command);

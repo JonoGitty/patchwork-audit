@@ -74,6 +74,24 @@ export {
 	signAttestation,
 	verifyAttestation,
 } from "./hash/attestation.js";
+export {
+	IN_TOTO_STATEMENT_TYPE,
+	PATCHWORK_PREDICATE_TYPE,
+	DSSE_PAYLOAD_TYPE,
+	dssePAE,
+	buildInTotoStatement,
+	buildDsseEnvelope,
+	verifyDsseEnvelope,
+	decodeStatement,
+	digestStatement,
+	type InTotoSubject,
+	type InTotoStatement,
+	type DsseSignature,
+	type DsseEnvelope,
+	type DsseSignFn,
+	type DsseVerifyFn,
+	type PatchworkAiAgentPredicate,
+} from "./attestation/intoto.js";
 
 // ID
 export { generateEventId, generateSessionId } from "./id/ulid.js";

@@ -95,6 +95,22 @@ describe("extractCommitInfo", () => {
 		const result = extractCommitInfo(output);
 		expect(result).toEqual({ sha: "9f8e7d6", branch: "main" });
 	});
+
+	it("extracts from a root commit (silently skipped pre-v0.6.9)", () => {
+		const output = "[main (root-commit) ab117fb] initial commit\n 1 file changed, 1 insertion(+)";
+		const result = extractCommitInfo(output);
+		expect(result).toEqual({ sha: "ab117fb", branch: "main" });
+	});
+
+	it("extracts from a detached HEAD (multi-token branch label)", () => {
+		const result = extractCommitInfo("[detached HEAD 1e8d7e3] cherry-picked");
+		expect(result).toEqual({ sha: "1e8d7e3", branch: "detached HEAD" });
+	});
+
+	it("extracts root commit on a feature branch", () => {
+		const result = extractCommitInfo("[feature/init (root-commit) abcdef0] bootstrap");
+		expect(result).toEqual({ sha: "abcdef0", branch: "feature/init" });
+	});
 });
 
 describe("usesNoVerify", () => {

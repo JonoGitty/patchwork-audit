@@ -7,6 +7,12 @@ import {
 	buildAttestationPayload,
 	hashAttestationPayload,
 	requestVerification,
+	verifyDsseEnvelope,
+	decodeStatement,
+	digestStatement,
+	type DsseEnvelope,
+	type InTotoStatement,
+	type PatchworkAiAgentPredicate,
 } from "@patchwork/core";
 import { COMMIT_ATTESTATIONS_DIR, COMMIT_ATTESTATION_INDEX, KEYRING_DIR } from "../store.js";
 
@@ -16,6 +22,8 @@ export const commitAttestCommand = new Command("commit-attest")
 	.option("--verify", "Verify the attestation signature")
 	.option("--list", "List all attested commits")
 	.option("--failures", "Show recent attestation failures (commits that should have been attested but weren't)")
+	.option("--intoto", "Show the in-toto/DSSE envelope (set PATCHWORK_INTOTO=1 in your hook to enable emission)")
+	.option("--intoto-verify", "Verify the in-toto/DSSE envelope's signature")
 	.option("--json", "Output as JSON")
 	.action(async (sha, opts) => {
 		if (opts.list) {
@@ -42,6 +50,10 @@ export const commitAttestCommand = new Command("commit-attest")
 			}
 			process.exitCode = 1;
 			return;
+		}
+
+		if (opts.intoto || opts.intotoVerify) {
+			return showOrVerifyIntoto(resolvedSha, !!opts.intotoVerify, opts.json);
 		}
 
 		const filePath = join(COMMIT_ATTESTATIONS_DIR, `${resolvedSha}.json`);
@@ -213,6 +225,84 @@ async function verifyCommitAttestation(
 	}
 
 	if (!result.verified) process.exitCode = 1;
+}
+
+async function showOrVerifyIntoto(
+	commitSha: string,
+	verify: boolean,
+	json?: boolean,
+): Promise<void> {
+	const envPath = join(COMMIT_ATTESTATIONS_DIR, `${commitSha}.intoto.json`);
+	if (!existsSync(envPath)) {
+		const msg = `No in-toto envelope for ${commitSha} (run with PATCHWORK_INTOTO=1 to enable emission)`;
+		if (json) console.log(JSON.stringify({ error: msg }));
+		else console.log(chalk.yellow(msg));
+		process.exitCode = 1;
+		return;
+	}
+	let envelope: DsseEnvelope;
+	try {
+		envelope = JSON.parse(readFileSync(envPath, "utf-8")) as DsseEnvelope;
+	} catch {
+		console.log(chalk.red("Invalid in-toto envelope file"));
+		process.exitCode = 1;
+		return;
+	}
+
+	if (verify) {
+		// DSSE verifyFn: convert sigBase64 → hex, prefix with "hmac-sha256:",
+		// hand to requestVerification with the PAE bytes as a UTF-8 string
+		// (lossless because the in-toto Statement payload is JSON, all UTF-8).
+		const ok = await verifyDsseEnvelope(envelope, async (keyid, pae, sigBase64) => {
+			const hex = Buffer.from(sigBase64, "base64").toString("hex");
+			const sigPatchwork = `hmac-sha256:${hex}`;
+			const result = await requestVerification(pae.toString("utf8"), sigPatchwork, keyid, {
+				localKeyringPath: KEYRING_DIR,
+			});
+			return result.verified;
+		});
+		if (json) {
+			console.log(JSON.stringify({
+				verified: ok,
+				digest: digestStatement(envelope),
+				keyids: envelope.signatures.map((s) => s.keyid),
+			}));
+		} else if (ok) {
+			console.log(chalk.green("VERIFIED — DSSE envelope signature is valid"));
+			console.log(`  Digest: ${digestStatement(envelope)}`);
+		} else {
+			console.log(chalk.red("FAIL — DSSE envelope signature did not verify"));
+		}
+		if (!ok) process.exitCode = 1;
+		return;
+	}
+
+	let stmt: InTotoStatement<PatchworkAiAgentPredicate>;
+	try {
+		stmt = decodeStatement<PatchworkAiAgentPredicate>(envelope);
+	} catch (err) {
+		console.log(chalk.red(`Cannot decode statement: ${(err as Error).message}`));
+		process.exitCode = 1;
+		return;
+	}
+
+	if (json) {
+		console.log(JSON.stringify({ envelope, statement: stmt, digest: digestStatement(envelope) }, null, 2));
+		return;
+	}
+
+	console.log(chalk.bold("In-toto / DSSE Envelope"));
+	console.log();
+	console.log(`  Subject:      ${stmt.subject[0]?.name ?? "<missing>"}`);
+	console.log(`  PredicateType:${stmt.predicateType}`);
+	console.log(`  PayloadType:  ${envelope.payloadType}`);
+	console.log(`  Digest:       ${digestStatement(envelope)}`);
+	console.log(`  Signatures:   ${envelope.signatures.length}`);
+	for (const sig of envelope.signatures) {
+		console.log(`    keyid=${sig.keyid}  sig=${sig.sig.slice(0, 16)}…`);
+	}
+	console.log();
+	console.log(chalk.dim("  Run with --intoto-verify to check the signature."));
 }
 
 function resolveShortSha(sha: string): string | null {

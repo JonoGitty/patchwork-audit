@@ -414,6 +414,9 @@ patchwork commit-attest [sha] [options]
 |--------|-------------|
 | `--verify` | Verify the attestation signature |
 | `--list` | List all attested commits |
+| `--failures` | Show recent attestation failures |
+| `--intoto` | Show the in-toto/DSSE envelope (requires `PATCHWORK_INTOTO=1` on the hook to enable emission — see [intoto reference](./intoto.md)) |
+| `--intoto-verify` | Verify the in-toto/DSSE envelope's signature |
 | `--json` | Output as JSON |
 
 ---

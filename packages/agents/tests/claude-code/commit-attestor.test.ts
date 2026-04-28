@@ -7,6 +7,9 @@ import {
 	writeCommitAttestation,
 	readCommitAttestation,
 	writeAttestationFailure,
+	buildIntotoEnvelope,
+	writeIntotoEnvelope,
+	readIntotoEnvelope,
 } from "../../src/claude-code/commit-attestor.js";
 import {
 	JsonlStore,
@@ -16,7 +19,14 @@ import {
 	verifyAttestation,
 	buildAttestationPayload,
 	ensureKeyring,
+	verifyDsseEnvelope,
+	decodeStatement,
+	digestStatement,
+	IN_TOTO_STATEMENT_TYPE,
+	PATCHWORK_PREDICATE_TYPE,
+	DSSE_PAYLOAD_TYPE,
 } from "@patchwork/core";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AuditEvent } from "@patchwork/core";
 
 describe("generateCommitAttestation", () => {
@@ -368,5 +378,167 @@ describe("writeAttestationFailure", () => {
 	it("creates the directory if missing", () => {
 		writeAttestationFailure({ sessionId: "s", stage: "note", error: new Error("x") });
 		expect(existsSync(join(tmpDir, ".patchwork", "commit-attestations"))).toBe(true);
+	});
+});
+
+describe("in-toto/DSSE envelope (v0.6.9 opt-in)", () => {
+	let originalHome: string | undefined;
+	let tmpDir: string;
+	let store: JsonlStore;
+	const sessionId = "ses_intoto_test";
+	// Force local-only signing — this dev machine has a real Patchwork relay
+	// running at the default socket path, which would otherwise sign with the
+	// root keyring and produce a different key_id than the test's tmp keyring.
+	const noRelay = "/nonexistent/patchwork-test-relay.sock";
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "patchwork-intoto-"));
+		originalHome = process.env.HOME;
+		process.env.HOME = tmpDir;
+
+		const eventsPath = join(tmpDir, ".patchwork", "events.jsonl");
+		mkdirSync(join(tmpDir, ".patchwork"), { recursive: true });
+		store = new JsonlStore(eventsPath);
+	});
+
+	afterEach(() => {
+		process.env.HOME = originalHome;
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function appendEvent(): void {
+		store.append({
+			schema_version: CURRENT_SCHEMA_VERSION,
+			id: generateEventId(),
+			session_id: sessionId,
+			timestamp: new Date().toISOString(),
+			agent: "claude-code",
+			action: "file_edit",
+			status: "completed",
+			risk: { level: "low", flags: [] },
+		});
+	}
+
+	it("buildIntotoEnvelope produces a valid DSSE envelope around the attestation", async () => {
+		appendEvent();
+		appendEvent();
+
+		const attestation = await generateCommitAttestation({
+			commitSha: "1111111111111111111111111111111111111111",
+			branch: "main",
+			sessionId,
+			projectRoot: "/tmp/project",
+			store,
+			toolVersion: "0.6.9-test",
+			relaySocketPath: noRelay,
+		});
+
+		const envelope = await buildIntotoEnvelope(attestation, { relaySocketPath: noRelay });
+		expect(envelope.payloadType).toBe(DSSE_PAYLOAD_TYPE);
+		expect(envelope.signatures).toHaveLength(1);
+		expect(envelope.signatures[0].keyid).toBe(attestation.key_id);
+		expect(envelope.payload.length).toBeGreaterThan(0);
+
+		const stmt = decodeStatement(envelope) as Record<string, unknown> & {
+			subject: { name: string; digest: Record<string, string> }[];
+			predicate: Record<string, unknown>;
+		};
+		expect(stmt._type).toBe(IN_TOTO_STATEMENT_TYPE);
+		expect(stmt.predicateType).toBe(PATCHWORK_PREDICATE_TYPE);
+		expect(stmt.subject[0].digest.gitCommit).toBe(attestation.commit_sha);
+		expect(stmt.predicate.session_id).toBe(sessionId);
+		// signing fields belong to the envelope, not the predicate
+		expect(stmt.predicate.signature).toBeUndefined();
+		expect(stmt.predicate.payload_hash).toBeUndefined();
+	});
+
+	it("write + read round-trip preserves the envelope exactly", async () => {
+		appendEvent();
+		const attestation = await generateCommitAttestation({
+			commitSha: "2222222222222222222222222222222222222222",
+			branch: "main",
+			sessionId,
+			projectRoot: "/tmp/project",
+			store,
+			toolVersion: "0.6.9-test",
+			relaySocketPath: noRelay,
+		});
+
+		const env = await buildIntotoEnvelope(attestation, { relaySocketPath: noRelay });
+		const path = writeIntotoEnvelope(attestation.commit_sha, env);
+		expect(existsSync(path)).toBe(true);
+
+		const read = readIntotoEnvelope(attestation.commit_sha);
+		expect(read).not.toBeNull();
+		expect(read!.payloadType).toBe(env.payloadType);
+		expect(read!.payload).toBe(env.payload);
+		expect(read!.signatures).toEqual(env.signatures);
+		expect(digestStatement(read!)).toBe(digestStatement(env));
+	});
+
+	it("envelope signature verifies against the local keyring (round-trip)", async () => {
+		appendEvent();
+		const attestation = await generateCommitAttestation({
+			commitSha: "3333333333333333333333333333333333333333",
+			branch: "main",
+			sessionId,
+			projectRoot: "/tmp/project",
+			store,
+			toolVersion: "0.6.9-test",
+			relaySocketPath: noRelay,
+		});
+
+		const env = await buildIntotoEnvelope(attestation, { relaySocketPath: noRelay });
+
+		// Reproduce the verifier the CLI uses: re-derive HMAC with the local
+		// keyring's key and compare to the envelope's signature.
+		const keyringPath = join(tmpDir, ".patchwork", "keys", "seal");
+		const { keyId, key } = ensureKeyring(keyringPath);
+		expect(keyId).toBe(attestation.key_id);
+
+		const ok = await verifyDsseEnvelope(env, async (kid, pae, sigBase64) => {
+			if (kid !== keyId) return false;
+			const expected = createHmac("sha256", key).update(pae).digest();
+			const got = Buffer.from(sigBase64, "base64");
+			if (got.length !== expected.length) return false;
+			return timingSafeEqual(expected, got);
+		});
+		expect(ok).toBe(true);
+	});
+
+	it("envelope rejects payload tampering", async () => {
+		appendEvent();
+		const attestation = await generateCommitAttestation({
+			commitSha: "4444444444444444444444444444444444444444",
+			branch: "main",
+			sessionId,
+			projectRoot: "/tmp/project",
+			store,
+			toolVersion: "0.6.9-test",
+			relaySocketPath: noRelay,
+		});
+
+		const env = await buildIntotoEnvelope(attestation, { relaySocketPath: noRelay });
+		const decoded = JSON.parse(Buffer.from(env.payload, "base64").toString("utf8"));
+		decoded.predicate.pass = false;
+		const tampered = {
+			...env,
+			payload: Buffer.from(JSON.stringify(decoded), "utf8").toString("base64"),
+		};
+
+		const keyringPath = join(tmpDir, ".patchwork", "keys", "seal");
+		const { key } = ensureKeyring(keyringPath);
+
+		const ok = await verifyDsseEnvelope(tampered, async (_kid, pae, sigBase64) => {
+			const expected = createHmac("sha256", key).update(pae).digest();
+			const got = Buffer.from(sigBase64, "base64");
+			if (got.length !== expected.length) return false;
+			return timingSafeEqual(expected, got);
+		});
+		expect(ok).toBe(false);
+	});
+
+	it("readIntotoEnvelope returns null when none exists", () => {
+		expect(readIntotoEnvelope("0000000000000000000000000000000000000000")).toBeNull();
 	});
 });

@@ -6,8 +6,17 @@
 /** Matches `git commit` but not `git log`, `echo "git commit"`, or comments. */
 const GIT_COMMIT_RE = /(?:^|&&|\|\||;)\s*(?:(?:[\w]+=\S+\s+)*)git\s+commit\b/;
 
-/** Git's standard output: `[branch abc1234] message` */
-const COMMIT_OUTPUT_RE = /\[([^\s\]]+)\s+([a-f0-9]{7,40})\]/;
+/**
+ * Git's commit-line output, covering all observed forms:
+ *   - normal:        `[main abc1234] msg`
+ *   - root commit:   `[main (root-commit) abc1234] msg`
+ *   - detached HEAD: `[detached HEAD abc1234] msg`
+ *
+ * The branch capture is non-greedy and may include spaces (for "detached
+ * HEAD"); the optional `(root-commit)` flag is consumed but not captured;
+ * the SHA is the trailing hex token before the closing bracket.
+ */
+const COMMIT_OUTPUT_RE = /\[(.+?)(?:\s+\(root-commit\))?\s+([a-f0-9]{7,40})\]/;
 
 /** Detects `--no-verify` flag usage. */
 const NO_VERIFY_RE = /\bgit\s+commit\b[^;|&]*--no-verify/;

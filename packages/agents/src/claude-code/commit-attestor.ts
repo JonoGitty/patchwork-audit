@@ -9,6 +9,7 @@ import {
 	type CommitAttestation,
 	type RiskSummary,
 	type Store,
+	type DsseEnvelope,
 	verifyEventHashes,
 	ensureKeyring,
 	readSealKey,
@@ -18,6 +19,8 @@ import {
 	loadActivePolicy,
 	getHomeDir,
 	requestSignature,
+	buildInTotoStatement,
+	buildDsseEnvelope,
 } from "@patchwork/core";
 import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
@@ -193,6 +196,77 @@ export function addGitNote(attestation: CommitAttestation, cwd: string): void {
 		`git notes --ref=patchwork add -f -m ${shellQuote(noteBody)} ${attestation.commit_sha}`,
 		{ cwd, timeout: 5000, stdio: "ignore" },
 	);
+}
+
+/**
+ * Build a DSSE-wrapped in-toto Statement around an existing commit attestation.
+ *
+ * Pure additive output: the original Patchwork-format attestation is unchanged.
+ * Signing reuses the same key path as the bespoke attestation (relay proxy
+ * with local-keyring fallback) so verification can use the same `key_id`.
+ *
+ * Opt-in via `PATCHWORK_INTOTO=1`. Off by default in v0.6.9 while the format
+ * stabilises.
+ */
+export async function buildIntotoEnvelope(
+	attestation: CommitAttestation,
+	options?: { relaySocketPath?: string },
+): Promise<DsseEnvelope> {
+	const statement = buildInTotoStatement(attestation);
+	return buildDsseEnvelope(statement, async (pae) => {
+		// PAE for an in-toto Statement is `DSSEv1 N application/vnd.in-toto+json M <utf8-json>`
+		// — pure UTF-8, so the round-trip through requestSignature's string API is lossless.
+		const paeStr = pae.toString("utf8");
+		const result = await requestSignature(paeStr, {
+			localKeyringPath: keyringDir(),
+			...(options?.relaySocketPath !== undefined
+				? { socketPath: options.relaySocketPath }
+				: {}),
+		});
+		// requestSignature returns "hmac-sha256:<hex>" — DSSE wants raw signature
+		// bytes as base64. Strip the prefix and recode.
+		const hex = result.signature.replace(/^hmac-sha256:/, "");
+		const sigBase64 = Buffer.from(hex, "hex").toString("base64");
+		return { keyid: result.key_id, sigBase64 };
+	});
+}
+
+/**
+ * Write an in-toto/DSSE envelope to disk alongside the bespoke attestation.
+ * Path: ~/.patchwork/commit-attestations/<sha>.intoto.json
+ */
+export function writeIntotoEnvelope(commitSha: string, envelope: DsseEnvelope): string {
+	if (!existsSync(commitAttestationsDir())) {
+		mkdirSync(commitAttestationsDir(), { recursive: true, mode: 0o700 });
+	}
+	const filePath = join(commitAttestationsDir(), `${commitSha}.intoto.json`);
+	writeFileSync(filePath, JSON.stringify(envelope, null, 2) + "\n", { mode: 0o600 });
+	return filePath;
+}
+
+/**
+ * Attach the DSSE envelope as a git note under refs/notes/patchwork-intoto,
+ * parallel to (and not replacing) the existing refs/notes/patchwork note.
+ */
+export function addIntotoGitNote(commitSha: string, envelope: DsseEnvelope, cwd: string): void {
+	const noteBody = JSON.stringify(envelope);
+	execSync(
+		`git notes --ref=patchwork-intoto add -f -m ${shellQuote(noteBody)} ${commitSha}`,
+		{ cwd, timeout: 5000, stdio: "ignore" },
+	);
+}
+
+/**
+ * Read an existing in-toto/DSSE envelope from disk.
+ */
+export function readIntotoEnvelope(commitSha: string): DsseEnvelope | null {
+	const filePath = join(commitAttestationsDir(), `${commitSha}.intoto.json`);
+	if (!existsSync(filePath)) return null;
+	try {
+		return JSON.parse(readFileSync(filePath, "utf-8")) as DsseEnvelope;
+	} catch {
+		return null;
+	}
 }
 
 /**

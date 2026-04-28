@@ -1,5 +1,33 @@
 # patchwork-audit
 
+## 0.6.9
+
+### Patch Changes
+
+- ## Why this release
+
+  A competitive scan in late April 2026 surfaced 3-4 OSS projects (InALign, Asqav, Nobulex, Luke Hinds' `nono`) that ship hash-chained tamper-evident audit logs for AI agents — the core idea Patchwork pioneered is now table stakes. At the same time, GitHub Copilot Enterprise went GA with full agent audit logs (Feb 2026) and now signs every cloud-agent commit (Apr 2026), which closes a chunk of Patchwork's value proposition for Copilot users specifically.
+
+  The competitive durability isn't in **whether** Patchwork records sessions — that's a commodity now. It's in **what format** it produces. Vendor audit logs will not converge on Patchwork's bespoke schema; they will converge on the SLSA / in-toto / Sigstore standards lineage that the wider supply-chain world already uses. v0.6.9 starts emitting attestations in that format so a Patchwork-attested commit drops into supply-chain pipelines as a recognisable [in-toto Statement v1](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md) inside a [DSSE envelope](https://github.com/secure-systems-lab/dsse/blob/master/envelope.md), with a stable predicate type at `https://patchwork-audit.dev/ai-agent-session/v1`.
+
+  This is purely additive — no existing path changes. Existing CLI, dashboard, git notes (`refs/notes/patchwork`), JSON files at `~/.patchwork/commit-attestations/*.json`, the Compliance API, and the bespoke `--verify` path all behave exactly as in v0.6.8.
+
+  ## What ships
+
+  - **In-toto / DSSE attestations (opt-in)** — set `PATCHWORK_INTOTO=1` on the PostToolUse hook command and Patchwork dual-emits each commit attestation as a DSSE envelope (`<sha>.intoto.json` on disk, `refs/notes/patchwork-intoto` git note). The envelope's PAE is signed with the same key path as the bespoke attestation (relay proxy with local-keyring fallback), so verification stays consistent across formats.
+  - **CLI inspectors** — `patchwork commit-attest <sha> --intoto` shows the envelope; `--intoto-verify` validates the DSSE signature; `--json` dumps envelope + decoded statement + digest for tooling.
+  - **Root-commit fix** — `extractCommitInfo`'s regex couldn't parse git's root-commit output `[main (root-commit) abc1234]`, silently skipping attestation on the first commit in any repo. Also broke on detached-HEAD output `[detached HEAD abc1234]`. Fixed and tested across all three forms.
+
+  ## What does NOT change
+
+  - Bespoke attestation format and schema
+  - `commit-attest --list`, `--failures`, `--verify`, `--show <sha>` output
+  - `/attestations` dashboard page
+  - Existing git notes under `refs/notes/patchwork`
+  - Default behaviour: in-toto emission is **off** unless `PATCHWORK_INTOTO=1` is set
+
+  Tests: 921/921 (290 CLI / 148 agents / 372 core / 99 team / 12 web).
+
 ## 0.6.8
 
 ### Patch Changes
