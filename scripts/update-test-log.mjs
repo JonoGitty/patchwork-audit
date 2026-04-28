@@ -144,7 +144,19 @@ function ensureLogHeader() {
 }
 
 function main() {
-	ensureLogHeader();
+	// By default this script verifies the test suite passes WITHOUT writing
+	// to docs/TEST_LOG.md. The pre-push git hook calls it as a verification
+	// gate; if it always wrote the log, every push would dirty the working
+	// tree (since the log change isn't committed by the push itself), and
+	// users would have to commit-and-push again ad infinitum.
+	//
+	// To actually append a new release-time entry to the log, run:
+	//   WRITE_TEST_LOG=1 pnpm test:log
+	const writeLog = process.env.WRITE_TEST_LOG === "1";
+
+	if (writeLog) {
+		ensureLogHeader();
+	}
 
 	const runAt = new Date().toISOString();
 	const packageSummaries = [];
@@ -168,19 +180,28 @@ function main() {
 	}
 
 	const status = hasFailure ? "FAIL" : "PASS";
-	const entry = [
-		`## ${runAt}`,
-		"",
-		`- Overall status: ${status}`,
-		`- Totals: ${passed}/${total} passed, ${failed} failed across ${suites} suites`,
-		"",
-		...packageSummaries,
-		"---",
-		"",
-	].join("\n");
 
-	const existing = readFileSync(LOG_PATH, "utf-8");
-	writeFileSync(LOG_PATH, `${existing.trimEnd()}\n\n${entry}`, "utf-8");
+	if (writeLog) {
+		const entry = [
+			`## ${runAt}`,
+			"",
+			`- Overall status: ${status}`,
+			`- Totals: ${passed}/${total} passed, ${failed} failed across ${suites} suites`,
+			"",
+			...packageSummaries,
+			"---",
+			"",
+		].join("\n");
+
+		const existing = readFileSync(LOG_PATH, "utf-8");
+		writeFileSync(LOG_PATH, `${existing.trimEnd()}\n\n${entry}`, "utf-8");
+		process.stdout.write(`[test-log] appended entry for ${runAt} → ${LOG_PATH}\n`);
+	} else {
+		process.stdout.write(
+			`[test-log] verification only — ${passed}/${total} passed across ${suites} suites. ` +
+				"Set WRITE_TEST_LOG=1 to append a docs/TEST_LOG.md entry.\n",
+		);
+	}
 
 	if (hasFailure) {
 		process.exitCode = 1;

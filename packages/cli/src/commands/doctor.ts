@@ -155,15 +155,28 @@ export const doctorCommand = new Command("doctor")
 		}
 
 		// 8. Guard status
+		// Guard fires on SessionStart only, so during a long Claude Code
+		// session it can sit unrefreshed for hours without anything being
+		// wrong — the system watchdog is what does continuous freshness
+		// monitoring (every ~5min via LaunchDaemon). Threshold reflects
+		// that: only flag if guard hasn't run in ~8h, which captures
+		// "fresh install / hooks broken" cases without false-positiving on
+		// a normal long session.
+		const GUARD_STALE_MIN = 480;
 		if (existsSync(guardStatusPath)) {
 			try {
 				const guard = JSON.parse(readFileSync(guardStatusPath, "utf-8"));
 				const age = Date.now() - new Date(guard.ts).getTime();
 				const ageMin = Math.floor(age / 60000);
-				if (guard.status === "ok" && ageMin < 60) {
-					console.log(`  ${PASS} Guard last ran ${ageMin}m ago — OK`);
+				const ageLabel = ageMin >= 60
+					? `${Math.floor(ageMin / 60)}h${ageMin % 60 ? ` ${ageMin % 60}m` : ""}`
+					: `${ageMin}m`;
+				if (guard.status === "ok" && ageMin < GUARD_STALE_MIN) {
+					console.log(`  ${PASS} Guard last ran ${ageLabel} ago (since this session's SessionStart)`);
 				} else if (guard.status === "ok") {
-					console.log(`  ${WARN} Guard last ran ${ageMin}m ago — may be stale`);
+					console.log(
+						`  ${WARN} Guard last ran ${ageLabel} ago — start a new Claude Code session or check hooks`,
+					);
 					warnings++;
 				} else {
 					console.log(`  ${FAIL} Guard last status: ${guard.status} (${guard.reason || "unknown"})`);

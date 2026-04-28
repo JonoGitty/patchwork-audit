@@ -4,10 +4,12 @@ Rolling record of test runs during development.
 
 ## How To Update
 
-- Run `pnpm test:log` from repo root.
-- The command runs tests for each package and appends a timestamped entry here.
-- Run `pnpm hooks:install` once to enable the local `pre-push` hook that runs `pnpm test:log`.
-- CI also runs `pnpm test:log` on Node 22 and uploads this file as an artifact.
+- `pnpm test:log` runs the tests as a verification gate (no log write — used by
+  the pre-push hook so pushing doesn't dirty the working tree on every run).
+- `pnpm test:log:write` runs the tests and **appends a timestamped entry** here.
+  Use this for release-time runs (e.g. before tagging a version) so the log
+  records a definitive pre-release pass.
+- `pnpm hooks:install` enables the local `pre-push` hook (verify-only).
 
 ## 2026-02-12T17:30:38.000Z
 

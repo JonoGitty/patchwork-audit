@@ -5,6 +5,12 @@ on:
   pull_request:
     branches: [main]
 
+# Opt JavaScript actions into Node.js 24 ahead of GitHub's 2026-09-16
+# deprecation of Node 20 on Actions runners. Removes the deprecation
+# annotation on every run and surfaces any forward-compat breakage now.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,13 +27,4 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test
-        if: matrix.node-version != 22
-      - run: pnpm test:log
-        if: matrix.node-version == 22
-      - uses: actions/upload-artifact@v5
-        if: matrix.node-version == 22
-        with:
-          name: test-log-node-${{ matrix.node-version }}
-          path: docs/TEST_LOG.md
-          if-no-files-found: error
       - run: pnpm lint
