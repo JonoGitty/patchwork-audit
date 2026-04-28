@@ -293,8 +293,57 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
+# Settings.json baseline (v2 hash-baseline tamper detection)
+# ---------------------------------------------------------------------------
+# v2 model: settings.json stays user-owned and writable so Claude Code can
+# read it normally. Tampering is detected via SHA-256 baseline comparison
+# in the system watchdog. See scripts/system-watchdog.sh.
+record_settings_baseline() {
+    local user="$1"
+    local home settings baseline_dir baseline_file hash
+    home=$(get_user_home "$user")
+    settings="$home/.claude/settings.json"
+    baseline_dir="$SYSTEM_DIR/baselines"
+    baseline_file="$baseline_dir/$user.sha256"
+
+    if [[ ! -f "$settings" ]]; then
+        echo "  [$user] WARN: settings.json missing — skipping baseline"
+        return 1
+    fi
+
+    mkdir -p "$baseline_dir" 2>/dev/null || true
+    chmod 700 "$baseline_dir" 2>/dev/null || true
+    chown "root:$(root_group)" "$baseline_dir" 2>/dev/null || true
+
+    hash=$(shasum -a 256 "$settings" 2>/dev/null | awk '{print $1}')
+    if [[ -z "$hash" ]]; then
+        echo "  [$user] ERROR: failed to compute settings.json hash"
+        return 1
+    fi
+
+    echo "$hash" > "$baseline_file"
+    chmod 600 "$baseline_file"
+    chown "root:$(root_group)" "$baseline_file"
+    echo "  [$user] settings.json baseline recorded ($hash)"
+}
+
+clear_settings_baseline() {
+    local user="$1"
+    local baseline_file="$SYSTEM_DIR/baselines/$user.sha256"
+    if [[ -f "$baseline_file" ]]; then
+        rm -f "$baseline_file"
+        echo "  [$user] settings.json baseline cleared"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Settings.json locking / unlocking
 # ---------------------------------------------------------------------------
+# DEPRECATED (v1 model): lock_user_settings made settings.json root-owned and
+# immutable (chflags schg / chattr +i). This broke Claude Code's ability to
+# read the file. v2 uses record_settings_baseline above. Kept for migration
+# compatibility — unlock_user_settings is still used by teardown to clear any
+# legacy v1 immutable flag.
 lock_user_settings() {
     local user="$1"
     local home
@@ -328,34 +377,16 @@ unlock_user_settings() {
 # ---------------------------------------------------------------------------
 install_system_daemon() {
     local watchdog_script="$SYSTEM_DIR/system-watchdog.sh"
+    local repo_dir="${PATCHWORK_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
     if [[ "$PLATFORM" == "Darwin" ]]; then
-        # macOS: LaunchDaemon plist
-        cat > "$DAEMON_PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>$DAEMON_LABEL</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>$watchdog_script</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>300</integer>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StandardErrorPath</key>
-    <string>$SYSTEM_DIR/watchdog-stderr.log</string>
-    <key>StandardOutPath</key>
-    <string>$SYSTEM_DIR/watchdog.log</string>
-    <key>KeepAlive</key>
-    <false/>
-</dict>
-</plist>
-PLIST
+        # macOS: copy LaunchDaemon plist template
+        local plist_template="$repo_dir/scripts/com.patchwork.system-watchdog.plist"
+        if [[ ! -f "$plist_template" ]]; then
+            echo "  ERROR: plist template not found at $plist_template"
+            return 1
+        fi
+        cp "$plist_template" "$DAEMON_PLIST"
         chown "root:$(root_group)" "$DAEMON_PLIST"
         chmod 644 "$DAEMON_PLIST"
         launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
@@ -422,7 +453,7 @@ setup_user() {
     fi
 
     install_user_hooks "$user"
-    lock_user_settings "$user"
+    record_settings_baseline "$user"
     add_to_registry "$user"
     return 0
 }
@@ -430,6 +461,7 @@ setup_user() {
 teardown_user() {
     local user="$1"
     unlock_user_settings "$user"
+    clear_settings_baseline "$user"
     remove_from_registry "$user"
 
     # Remove user-level daemon/agent

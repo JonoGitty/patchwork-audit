@@ -163,140 +163,21 @@ done
 echo ""
 echo "[5/6] Installing system watchdog daemon..."
 
-# Write the multi-user watchdog script (cross-platform)
-cat > "$SYSTEM_DIR/system-watchdog.sh" <<WATCHDOG
-#!/bin/bash
-# Patchwork System Watchdog — runs as root via LaunchDaemon (macOS) or systemd (Linux).
-# Monitors ALL enrolled users and re-locks settings if tampered.
-
-set -euo pipefail
-
-PLATFORM="\$(uname)"
-SYSTEM_DIR="$SYSTEM_DIR"
-USERS_CONF="\$SYSTEM_DIR/users.conf"
-LOG_FILE="\$SYSTEM_DIR/watchdog.log"
-
-log() { echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) \$1" >> "\$LOG_FILE"; }
-
-get_file_perms() {
-    if [[ "\$PLATFORM" == "Darwin" ]]; then stat -f "%Lp" "\$1" 2>/dev/null
-    else stat -c "%a" "\$1" 2>/dev/null; fi
-}
-get_file_owner() {
-    if [[ "\$PLATFORM" == "Darwin" ]]; then stat -f "%Su:%Sg" "\$1" 2>/dev/null
-    else stat -c "%U:%G" "\$1" 2>/dev/null; fi
-}
-get_file_size() {
-    if [[ "\$PLATFORM" == "Darwin" ]]; then stat -f%z "\$1" 2>/dev/null || echo 0
-    else stat -c "%s" "\$1" 2>/dev/null || echo 0; fi
-}
-root_group() { if [[ "\$PLATFORM" == "Darwin" ]]; then echo "wheel"; else echo "root"; fi; }
-lock_file() {
-    if [[ "\$PLATFORM" == "Darwin" ]]; then chflags schg "\$1"
-    else chattr +i "\$1" 2>/dev/null || true; fi
-}
-unlock_file() {
-    if [[ "\$PLATFORM" == "Darwin" ]]; then chflags noschg "\$1" 2>/dev/null || true
-    else chattr -i "\$1" 2>/dev/null || true; fi
-}
-is_file_locked() {
-    if [[ "\$PLATFORM" == "Darwin" ]]; then
-        local flags; flags=\$(stat -f "%Sf" "\$1" 2>/dev/null); [[ "\$flags" == *"schg"* ]]
-    else
-        local attrs; attrs=\$(lsattr "\$1" 2>/dev/null | cut -d' ' -f1); [[ "\$attrs" == *"i"* ]]
-    fi
-}
-
-find_node_for_user() {
-    local user="\$1" home; home=\$(eval echo "~\$user")
-    for candidate in "\$home/local/nodejs/"node-*/bin /usr/local/bin /opt/homebrew/bin "\$home/.nvm/versions/node/"*/bin "\$home/.volta/bin"; do
-        if [[ -x "\$candidate/node" ]] && "\$candidate/node" --version &>/dev/null; then echo "\$candidate"; return 0; fi
-    done
-    return 1
-}
-
-user_group() {
-    if [[ "\$PLATFORM" == "Darwin" ]]; then echo "staff"
-    else id -gn "\$1" 2>/dev/null || echo "\$1"; fi
-}
-
-monitor_user() {
-    local user="\$1" home; home=\$(eval echo "~\$user")
-    local settings="\$home/.claude/settings.json"
-    [[ -d "\$home" ]] || return
-
-    if [[ ! -f "\$settings" ]]; then
-        log "[\$user] CRITICAL: settings.json missing — recreating"
-        sudo -u "\$user" mkdir -p "\$home/.claude"
-        local node_bin; node_bin=\$(find_node_for_user "\$user") || true
-        if [[ -n "\$node_bin" && -x "\$node_bin/patchwork" ]]; then
-            sudo -u "\$user" PATH="\$node_bin:\$PATH" "\$node_bin/patchwork" init claude-code --strict-profile --policy-mode fail-closed 2>/dev/null || true
-        fi
-        if [[ -f "\$settings" ]]; then
-            chown "root:\$(root_group)" "\$settings"; chmod 644 "\$settings"; lock_file "\$settings"
-            log "[\$user] REINSTALLED: settings.json recreated and locked"
-        fi
-        return
-    fi
-
-    local owner; owner=\$(get_file_owner "\$settings")
-    if [[ "\$owner" != "root:\$(root_group)" ]]; then
-        log "[\$user] WARNING: settings.json owned by \$owner — relocking"
-        unlock_file "\$settings"; chown "root:\$(root_group)" "\$settings"; chmod 644 "\$settings"; lock_file "\$settings"
-        log "[\$user] FIXED: ownership restored"
-    fi
-
-    if ! is_file_locked "\$settings"; then
-        log "[\$user] WARNING: settings.json not immutable — relocking"
-        lock_file "\$settings"; log "[\$user] FIXED: immutable flag restored"
-    fi
-
-    if ! grep -q "patchwork hook\|hook-wrapper\.sh\|guard\.sh" "\$settings" 2>/dev/null; then
-        log "[\$user] CRITICAL: patchwork hooks missing — reinstalling"
-        unlock_file "\$settings"; chown "\$user:\$(user_group "\$user")" "\$settings"
-        local node_bin; node_bin=\$(find_node_for_user "\$user") || true
-        if [[ -n "\$node_bin" && -x "\$node_bin/patchwork" ]]; then
-            sudo -u "\$user" PATH="\$node_bin:\$PATH" "\$node_bin/patchwork" init claude-code --strict-profile --policy-mode fail-closed 2>/dev/null || true
-        fi
-        chown "root:\$(root_group)" "\$settings"; chmod 644 "\$settings"; lock_file "\$settings"
-        log "[\$user] REINSTALLED: hooks restored and relocked"
-    fi
-
-    local pw_dir="\$home/.patchwork"
-    if [[ -d "\$pw_dir" ]]; then
-        local perms; perms=\$(get_file_perms "\$pw_dir")
-        if [[ "\$perms" != "700" ]]; then chmod 700 "\$pw_dir"; log "[\$user] FIXED: .patchwork permissions"; fi
-    fi
-}
-
-[[ ! -f "\$USERS_CONF" ]] && { log "ERROR: users.conf not found"; exit 1; }
-
-if [[ -f "\$SYSTEM_DIR/policy.yml" ]]; then
-    local_owner=\$(get_file_owner "\$SYSTEM_DIR/policy.yml")
-    if [[ "\$local_owner" != "root:\$(root_group)" ]]; then
-        chown "root:\$(root_group)" "\$SYSTEM_DIR/policy.yml"; chmod 644 "\$SYSTEM_DIR/policy.yml"
-        log "FIXED: system policy ownership restored"
-    fi
+# Copy the v2 hash-baseline watchdog script from template
+WATCHDOG_TEMPLATE="$REPO_DIR/scripts/system-watchdog.sh"
+if [[ ! -f "$WATCHDOG_TEMPLATE" ]]; then
+    echo "  ERROR: watchdog template not found at $WATCHDOG_TEMPLATE"
+    exit 1
 fi
-
-while IFS= read -r user; do
-    [[ -z "\$user" || "\$user" == \\#* ]] && continue
-    monitor_user "\$user"
-done < "\$USERS_CONF"
-
-if [[ -f "\$LOG_FILE" ]] && [[ "\$(get_file_size "\$LOG_FILE")" -gt 512000 ]]; then
-    tail -500 "\$LOG_FILE" > "\$LOG_FILE.tmp" && mv "\$LOG_FILE.tmp" "\$LOG_FILE"
-    log "ROTATED: watchdog log trimmed"
-fi
-WATCHDOG
-
+unlock_file "$SYSTEM_DIR/system-watchdog.sh" 2>/dev/null || true
+cp "$WATCHDOG_TEMPLATE" "$SYSTEM_DIR/system-watchdog.sh"
 chown "root:$(root_group)" "$SYSTEM_DIR/system-watchdog.sh"
 chmod 755 "$SYSTEM_DIR/system-watchdog.sh"
 
 # Install the daemon (cross-platform: launchctl on macOS, systemd on Linux)
 install_system_daemon
 
-echo "  Watchdog daemon installed"
+echo "  Watchdog daemon installed (v2 hash-baseline model)"
 
 # --- Step 6: Install relay daemon (layer 2 tamper-proof audit) ---
 echo ""
@@ -356,8 +237,10 @@ done < "$USERS_CONF"
 [[ $FAILED -gt 0 ]] && echo "  Failed: $FAILED"
 echo ""
 echo "  Protected:"
-echo "    ~/.claude/settings.json           (root:$(root_group), 644, immutable) per user"
-echo "    $SYSTEM_DIR/policy.yml            (root:$(root_group), 644)"
+echo "    ~/.claude/settings.json           (user-owned, 644, hash-baseline) per user"
+echo "    $SYSTEM_DIR/baselines/<user>.sha256 (root:$(root_group), 600) per user"
+echo "    $SYSTEM_DIR/policy.yml            (root:$(root_group), 644, immutable)"
+echo "    $SYSTEM_DIR/system-watchdog.sh    (root:$(root_group), 755, immutable)"
 echo "    $SYSTEM_DIR/events.relay.jsonl    (root:$(root_group), 644, append-only)"
 echo ""
 echo "  Manage users:"
