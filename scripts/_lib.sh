@@ -241,7 +241,10 @@ install_user_hooks() {
             init claude-code --strict-profile --policy-mode fail-closed 2>/dev/null || true
     fi
 
-    # Patch hooks to use the shared hook-wrapper and guard
+    # Patch hooks to use the shared hook-wrapper and guard.
+    # Writes Claude Code's nested format: hooks[event] = [{matcher, hooks: [{type, command, timeout}]}]
+    # Dedupe descends into the nested array so prior patchwork entries are
+    # always replaced (not duplicated) regardless of which installer wrote them.
     if [[ -f "$settings" ]]; then
         python3 - "$settings" "$SYSTEM_DIR" <<'PYEOF'
 import json, sys, re
@@ -259,26 +262,41 @@ except (json.JSONDecodeError, FileNotFoundError):
 
 hooks = s.get("hooks", {})
 
+def matcher(handler):
+    return {"matcher": "", "hooks": [handler]}
+
 desired = {
-    "PreToolUse": [{
+    "PreToolUse": [matcher({
         "type": "command",
         "command": f"PATCHWORK_PRETOOL_FAIL_CLOSED=1 PATCHWORK_PRETOOL_WARN_MS=500 PATCHWORK_PRETOOL_TELEMETRY_JSON=1 {wrapper} pre-tool",
         "timeout": 1500,
-    }],
-    "PostToolUse": [{"type": "command", "command": f"{wrapper} post-tool", "timeout": 1000}],
-    "PostToolUseFailure": [{"type": "command", "command": f"{wrapper} post-tool-failure", "timeout": 1000}],
-    "SessionStart": [{"type": "command", "command": guard, "timeout": 1500}],
-    "SessionEnd": [{"type": "command", "command": f"{wrapper} session-end", "timeout": 500}],
-    "UserPromptSubmit": [{"type": "command", "command": f"{wrapper} prompt-submit", "timeout": 500}],
-    "SubagentStart": [{"type": "command", "command": f"{wrapper} subagent-start", "timeout": 500}],
-    "SubagentStop": [{"type": "command", "command": f"{wrapper} subagent-stop", "timeout": 500}],
+    })],
+    "PostToolUse":        [matcher({"type": "command", "command": f"{wrapper} post-tool",          "timeout": 1000})],
+    "PostToolUseFailure": [matcher({"type": "command", "command": f"{wrapper} post-tool-failure", "timeout": 1000})],
+    "SessionStart":       [matcher({"type": "command", "command": guard,                          "timeout": 1500})],
+    "SessionEnd":         [matcher({"type": "command", "command": f"{wrapper} session-end",       "timeout": 500})],
+    "UserPromptSubmit":   [matcher({"type": "command", "command": f"{wrapper} prompt-submit",     "timeout": 500})],
+    "SubagentStart":      [matcher({"type": "command", "command": f"{wrapper} subagent-start",    "timeout": 500})],
+    "SubagentStop":       [matcher({"type": "command", "command": f"{wrapper} subagent-stop",     "timeout": 500})],
 }
 
-PATCHWORK_RE = re.compile(r'\bpatchwork hook\b|hook-wrapper\.sh|guard\.sh')
+PATCHWORK_RE = re.compile(r'\bpatchwork(?:[^"]*"?\s+|\s+)hook\b|hook-wrapper\.(?:sh|cmd|bat|ps1)|guard\.sh')
+
+def is_patchwork(entry):
+    if not isinstance(entry, dict):
+        return False
+    nested = entry.get("hooks")
+    if isinstance(nested, list):
+        return any(
+            isinstance(h, dict) and isinstance(h.get("command"), str) and PATCHWORK_RE.search(h["command"])
+            for h in nested
+        )
+    cmd = entry.get("command")
+    return isinstance(cmd, str) and bool(PATCHWORK_RE.search(cmd))
 
 for event, hook_defs in desired.items():
     existing = hooks.get(event, [])
-    cleaned = [h for h in existing if not (isinstance(h.get("command"), str) and PATCHWORK_RE.search(h["command"]))]
+    cleaned = [h for h in existing if not is_patchwork(h)]
     hooks[event] = cleaned + hook_defs
 
 s["hooks"] = hooks

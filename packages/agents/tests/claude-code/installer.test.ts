@@ -135,6 +135,116 @@ describe("installClaudeCodeHooks", () => {
 		expect(settings.hooks.PostToolUse[0].matcher).toBe("");
 		expect(Array.isArray(settings.hooks.PostToolUse[0].hooks)).toBe(true);
 	});
+
+	it("collapses multiple existing patchwork entries into a single canonical entry", () => {
+		// Reproduces the production state where the system multi-user installer
+		// (scripts/_lib.sh) added a hook-wrapper.sh entry alongside the direct-node
+		// entry written by `patchwork init`. Both fired on every commit, producing
+		// duplicate attestations ~200ms apart.
+		const claudeDir = join(projectPath, ".claude");
+		mkdirSync(claudeDir, { recursive: true });
+		writeFileSync(
+			join(claudeDir, "settings.json"),
+			JSON.stringify({
+				hooks: {
+					PostToolUse: [
+						// hook-wrapper entry from system multi-user installer
+						{
+							matcher: "",
+							hooks: [{ type: "command", command: "bash /Library/Patchwork/hook-wrapper.sh post-tool", timeout: 1000 }],
+						},
+						// direct-node entry from `patchwork init`
+						{
+							matcher: "",
+							hooks: [{ type: "command", command: '"/usr/local/bin/node" "/usr/local/bin/patchwork" hook post-tool', timeout: 2000 }],
+						},
+					],
+					PreToolUse: [
+						{
+							matcher: "",
+							hooks: [{ type: "command", command: "bash /Library/Patchwork/hook-wrapper.sh pre-tool", timeout: 1500 }],
+						},
+						{
+							matcher: "",
+							hooks: [{ type: "command", command: '"/usr/local/bin/node" "/usr/local/bin/patchwork" hook pre-tool', timeout: 2000 }],
+						},
+					],
+				},
+			}),
+			"utf-8",
+		);
+
+		const result = installClaudeCodeHooks(projectPath);
+		expect(result.success).toBe(true);
+
+		const settings = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf-8"));
+		// Both events must collapse to exactly one matcher group each
+		expect(settings.hooks.PostToolUse).toHaveLength(1);
+		expect(settings.hooks.PreToolUse).toHaveLength(1);
+		// And it must be the canonical (direct-node) format the installer writes
+		expect(settings.hooks.PostToolUse[0].hooks[0].command).toMatch(/patchwork.*hook post-tool$/);
+		expect(settings.hooks.PreToolUse[0].hooks[0].command).toMatch(/patchwork.*hook pre-tool$/);
+	});
+
+	it("preserves non-patchwork hooks while collapsing patchwork duplicates", () => {
+		const claudeDir = join(projectPath, ".claude");
+		mkdirSync(claudeDir, { recursive: true });
+		const userHook = {
+			matcher: "Edit",
+			hooks: [{ type: "command", command: "echo user-hook", timeout: 500 }],
+		};
+		writeFileSync(
+			join(claudeDir, "settings.json"),
+			JSON.stringify({
+				hooks: {
+					PostToolUse: [
+						userHook,
+						{
+							matcher: "",
+							hooks: [{ type: "command", command: "bash /Library/Patchwork/hook-wrapper.sh post-tool", timeout: 1000 }],
+						},
+						{
+							matcher: "",
+							hooks: [{ type: "command", command: '"/usr/local/bin/node" "/usr/local/bin/patchwork" hook post-tool', timeout: 2000 }],
+						},
+					],
+				},
+			}),
+			"utf-8",
+		);
+
+		installClaudeCodeHooks(projectPath);
+		const settings = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf-8"));
+		expect(settings.hooks.PostToolUse).toHaveLength(2); // user hook + 1 patchwork
+		expect(settings.hooks.PostToolUse[0]).toEqual(userHook);
+		expect(settings.hooks.PostToolUse[1].hooks[0].command).toMatch(/patchwork.*hook post-tool$/);
+	});
+
+	it("recognises hook-wrapper and guard.sh entries as patchwork (no duplicates from drift)", () => {
+		const claudeDir = join(projectPath, ".claude");
+		mkdirSync(claudeDir, { recursive: true });
+		writeFileSync(
+			join(claudeDir, "settings.json"),
+			JSON.stringify({
+				hooks: {
+					SessionStart: [
+						// guard.sh — installed by system multi-user installer
+						{ matcher: "", hooks: [{ type: "command", command: "bash /Library/Patchwork/guard.sh", timeout: 1500 }] },
+					],
+					PostToolUse: [
+						// hook-wrapper.sh
+						{ matcher: "", hooks: [{ type: "command", command: "bash /Library/Patchwork/hook-wrapper.sh post-tool", timeout: 1000 }] },
+					],
+				},
+			}),
+			"utf-8",
+		);
+
+		installClaudeCodeHooks(projectPath);
+		const settings = JSON.parse(readFileSync(join(claudeDir, "settings.json"), "utf-8"));
+		expect(settings.hooks.SessionStart).toHaveLength(1);
+		expect(settings.hooks.PostToolUse).toHaveLength(1);
+	});
 });
 
 describe("uninstallClaudeCodeHooks", () => {

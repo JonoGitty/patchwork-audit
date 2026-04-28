@@ -6,12 +6,19 @@ const CLAUDE_SETTINGS_DIR = join(getHomeDir(), ".claude");
 const CLAUDE_SETTINGS_PATH = join(CLAUDE_SETTINGS_DIR, "settings.json");
 
 /**
- * Matches any command that references patchwork followed by "hook" — handles:
- *   - bare binary:  `patchwork hook pre-tool`
- *   - full JS path: `"C:/.../patchwork-audit/dist/index.js" hook pre-tool`
- *   - with env-var prefixes: `PATCHWORK_PRETOOL_FAIL_CLOSED=1 ... hook pre-tool`
+ * Matches any command that references the Patchwork hook pipeline. Recognises:
+ *   - bare binary:    `patchwork hook pre-tool`
+ *   - full JS path:   `"C:/.../patchwork-audit/dist/index.js" hook pre-tool`
+ *   - env-var prefix: `PATCHWORK_PRETOOL_FAIL_CLOSED=1 ... patchwork hook pre-tool`
+ *   - hook-wrapper:   `bash /path/to/hook-wrapper.sh post-tool` (system multi-user)
+ *   - hook-wrapper on Windows/PowerShell: `hook-wrapper.cmd|bat|ps1`
+ *   - guard script:   `bash /path/to/guard.sh` (SessionStart hook)
+ *
+ * Used for dedup across both the in-tree TS installer and the multi-user
+ * Python patcher in scripts/_lib.sh — both need to recognise the same set
+ * of "this is a Patchwork hook entry" patterns or duplicates accrue.
  */
-const PATCHWORK_HOOK_RE = /patchwork(?:[^"]*"?\s+|\s+)hook\b/;
+const PATCHWORK_HOOK_RE = /patchwork(?:[^"]*"?\s+|\s+)hook\b|hook-wrapper\.(?:sh|cmd|bat|ps1)|guard\.sh/;
 
 /** A single hook handler within a matcher group. */
 interface HookHandler {
@@ -252,32 +259,34 @@ export function installClaudeCodeHooks(
 			const existing = existingHooks[eventName] || [];
 			const desiredCmd = hookDefs[0].hooks[0].command;
 
-			// Find existing patchwork matcher group (check nested hooks[].command)
-			const patchworkIdx = existing.findIndex((entry: any) => {
-				// Handle both new nested format and legacy flat format
+			// Identify ALL existing patchwork entries (handles nested + legacy flat).
+			// Filter+append (not findIndex+replace) so duplicate entries — which
+			// can accrue when multiple installers run, e.g. `patchwork init` plus
+			// the system multi-user installer — get collapsed to a single entry.
+			const isPatchwork = (entry: any): boolean => {
+				if (!entry || typeof entry !== "object") return false;
 				if (Array.isArray(entry.hooks)) {
 					return entry.hooks.some(
-						(h: any) => typeof h.command === "string" && PATCHWORK_HOOK_RE.test(h.command),
+						(h: any) => typeof h?.command === "string" && PATCHWORK_HOOK_RE.test(h.command),
 					);
 				}
-				// Legacy flat format: { type, command, timeout }
 				return typeof entry.command === "string" && PATCHWORK_HOOK_RE.test(entry.command);
-			});
+			};
 
-			if (patchworkIdx === -1) {
-				// No patchwork hook yet — append
-				existingHooks[eventName] = [...existing, ...hookDefs];
+			const patchworkEntries = existing.filter(isPatchwork);
+			const otherEntries = existing.filter((e) => !isPatchwork(e));
+
+			if (patchworkEntries.length === 0) {
+				existingHooks[eventName] = [...otherEntries, ...hookDefs];
 				hooksInstalled.push(eventName);
 			} else {
-				// Patchwork hook exists — replace with correct nested format
-				const current = existing[patchworkIdx] as any;
-				const currentCmd = Array.isArray(current.hooks)
-					? current.hooks[0]?.command
-					: current.command;
-
-				// Always replace to ensure correct nested structure
-				if (currentCmd !== desiredCmd || !Array.isArray(current.hooks)) {
-					existing[patchworkIdx] = hookDefs[0];
+				// Replace any number of existing patchwork entries with a single
+				// canonical nested entry. This is the fix for duplicate fires.
+				existingHooks[eventName] = [...otherEntries, ...hookDefs];
+				const sameCmd = patchworkEntries.length === 1 &&
+					Array.isArray((patchworkEntries[0] as any).hooks) &&
+					(patchworkEntries[0] as any).hooks[0]?.command === desiredCmd;
+				if (!sameCmd) {
 					hooksUpdated.push(eventName);
 				}
 			}
