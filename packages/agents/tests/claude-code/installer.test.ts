@@ -351,7 +351,9 @@ describe("installer PreToolUse options", () => {
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = getCmd(settings.hooks.PreToolUse[0]);
 		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
-		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS=500");
+		// Env values are POSIX-quoted now to defeat shell metacharacter
+		// injection via interpolated paths/values.
+		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS='500'");
 		expect(cmd).toMatch(/patchwork.*hook pre-tool/);
 
 		// Other hooks should not have env prefixes
@@ -447,7 +449,7 @@ describe("upgrade-in-place hook reconfiguration", () => {
 
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		expect(settings.hooks.PreToolUse).toHaveLength(1);
-		expect(getCmd(settings.hooks.PreToolUse[0])).toContain("PATCHWORK_PRETOOL_WARN_MS=200");
+		expect(getCmd(settings.hooks.PreToolUse[0])).toContain("PATCHWORK_PRETOOL_WARN_MS='200'");
 		expect(getCmd(settings.hooks.PreToolUse[0])).not.toContain("500");
 	});
 

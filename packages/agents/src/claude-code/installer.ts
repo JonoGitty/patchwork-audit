@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync, realpathSync, renameSync, unlinkSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { getHomeDir } from "@patchwork/core";
 
@@ -145,37 +146,41 @@ function buildHooks(binPath?: string, options?: InstallOptions) {
 	}
 
 	// Claude Code runs hook commands through /usr/bin/bash (even on Windows via Git Bash).
-	// Backslash paths break (bash interprets \P as escape), and paths with spaces need quoting.
-	// Use forward slashes and quote both paths for cross-platform safety.
-	const quote = (p: string) => `"${p.replace(/\\/g, "/")}"`;
-	const cmd = `${quote(nodeExec)} ${quote(patchworkBin)}`;
+	// Single-quote everything we interpolate so a malicious install path,
+	// telemetry filename, or env value can't break out of the quoting and
+	// inject shell syntax. POSIX single-quote escaping is "wrap in
+	// single quotes, replace each `'` with `'\''` ".
+	const sq = (s: string): string => `'${String(s).replace(/'/g, "'\\''")}'`;
+	// Forward slashes for cross-platform bash compat (Windows Git Bash dies on `\P`).
+	const sqPath = (p: string) => sq(p.replace(/\\/g, "/"));
+	const cmd = `${sqPath(nodeExec)} ${sqPath(patchworkBin)}`;
 
-	// Build env prefix for PreToolUse command
+	// Build env prefix for PreToolUse command — every value gets shell-escaped.
 	const { enabled: failClosed } = resolveFailClosed(options);
 	const envParts: string[] = [];
 	if (failClosed) {
 		envParts.push("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 	}
 	if (options?.pretoolWarnMs !== undefined) {
-		envParts.push(`PATCHWORK_PRETOOL_WARN_MS=${options.pretoolWarnMs}`);
+		envParts.push(`PATCHWORK_PRETOOL_WARN_MS=${sq(String(options.pretoolWarnMs))}`);
 	}
 	if (options?.pretoolTelemetryJson) {
 		envParts.push("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
 	}
 	if (options?.pretoolTelemetryDest) {
-		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_DEST=${options.pretoolTelemetryDest}`);
+		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_DEST=${sq(options.pretoolTelemetryDest)}`);
 	}
 	if (options?.pretoolTelemetryFile) {
-		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_FILE=${options.pretoolTelemetryFile}`);
+		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_FILE=${sq(options.pretoolTelemetryFile)}`);
 	}
 	if (options?.pretoolTelemetryMaxBytes !== undefined) {
-		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES=${options.pretoolTelemetryMaxBytes}`);
+		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES=${sq(String(options.pretoolTelemetryMaxBytes))}`);
 	}
 	if (options?.pretoolTelemetryMaxFiles !== undefined) {
-		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES=${options.pretoolTelemetryMaxFiles}`);
+		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES=${sq(String(options.pretoolTelemetryMaxFiles))}`);
 	}
 	if (options?.pretoolTelemetryLockMode) {
-		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_LOCK_MODE=${options.pretoolTelemetryLockMode}`);
+		envParts.push(`PATCHWORK_PRETOOL_TELEMETRY_LOCK_MODE=${sq(options.pretoolTelemetryLockMode)}`);
 	}
 	const preToolCmd = envParts.length > 0
 		? `${envParts.join(" ")} ${cmd} hook pre-tool`
@@ -242,6 +247,41 @@ export function installClaudeCodeHooks(
 			mkdirSync(settingsDir, { recursive: true });
 		}
 
+		// Defence: refuse to follow symlinks at .claude/ or settings.json when
+		// installing into a project directory. Without this, a malicious repo
+		// can ship `.claude -> ~/.config/someapp` and have `patchwork init`
+		// silently overwrite arbitrary user-writable files outside the project.
+		if (projectPath) {
+			try {
+				if (existsSync(settingsDir) && lstatSync(settingsDir).isSymbolicLink()) {
+					return {
+						success: false,
+						settingsPath,
+						hooksInstalled: [],
+						hooksUpdated: [],
+						error: `Refusing to install: ${settingsDir} is a symlink. Resolve it manually before re-running.`,
+					};
+				}
+				if (existsSync(settingsPath) && lstatSync(settingsPath).isSymbolicLink()) {
+					return {
+						success: false,
+						settingsPath,
+						hooksInstalled: [],
+						hooksUpdated: [],
+						error: `Refusing to install: ${settingsPath} is a symlink. Resolve it manually before re-running.`,
+					};
+				}
+			} catch (e) {
+				return {
+					success: false,
+					settingsPath,
+					hooksInstalled: [],
+					hooksUpdated: [],
+					error: `Symlink check failed: ${(e as Error).message}`,
+				};
+			}
+		}
+
 		// Read existing settings
 		let settings: Record<string, unknown> = {};
 		if (existsSync(settingsPath)) {
@@ -294,8 +334,25 @@ export function installClaudeCodeHooks(
 
 		settings.hooks = existingHooks;
 
-		// Write back
-		writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+		// Write back. For project installs we use an atomic re-checked write to
+		// close the TOCTOU window between the earlier lstat() and the final
+		// write(): a malicious repo running concurrent code could have
+		// swapped settings.json (or .claude/) for a symlink in the meantime.
+		const serialized = JSON.stringify(settings, null, 2) + "\n";
+		if (projectPath) {
+			const writeErr = atomicWriteRefuseSymlink(settingsPath, settingsDir, serialized);
+			if (writeErr) {
+				return {
+					success: false,
+					settingsPath,
+					hooksInstalled: [],
+					hooksUpdated: [],
+					error: writeErr,
+				};
+			}
+		} else {
+			writeFileSync(settingsPath, serialized, "utf-8");
+		}
 
 		return {
 			success: true,
@@ -365,5 +422,52 @@ export function uninstallClaudeCodeHooks(projectPath?: string): InstallResult {
 			hooksUpdated: [],
 			error: err instanceof Error ? err.message : String(err),
 		};
+	}
+}
+
+/**
+ * Atomically write `content` to `targetPath`, after a final lstat() check on
+ * both the target file and its containing directory immediately before the
+ * write. Returns null on success, or an error message on failure.
+ *
+ * Closes the TOCTOU window between the install routine's earlier symlink
+ * checks and the final writeFileSync() — without this, a concurrent attacker
+ * with write access to the project directory could swap the file (or its
+ * parent) for a symlink between the two operations and have the install
+ * silently overwrite something outside the project.
+ *
+ * Implementation:
+ *   - Writes to a sibling temp file inside `targetDir` (so the rename is on
+ *     the same filesystem and therefore atomic on POSIX).
+ *   - lstat()s `targetDir` and `targetPath` again right before the rename.
+ *   - Renames temp → targetPath. The rename is the commit point; on POSIX,
+ *     rename(2) does not follow symlinks at the destination, so even if the
+ *     attacker wins the narrowed race they only overwrite the symlink itself.
+ */
+function atomicWriteRefuseSymlink(
+	targetPath: string,
+	targetDir: string,
+	content: string,
+): string | null {
+	if (lstatSync(targetDir).isSymbolicLink()) {
+		return `Refusing to write: ${targetDir} became a symlink between checks.`;
+	}
+	if (existsSync(targetPath) && lstatSync(targetPath).isSymbolicLink()) {
+		return `Refusing to write: ${targetPath} became a symlink between checks.`;
+	}
+
+	const tmpName = `.${randomBytes(8).toString("hex")}.patchwork.tmp`;
+	const tmpPath = `${targetDir}/${tmpName}`;
+	try {
+		writeFileSync(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
+		if (existsSync(targetPath) && lstatSync(targetPath).isSymbolicLink()) {
+			try { unlinkSync(tmpPath); } catch { /* best effort */ }
+			return `Refusing to write: ${targetPath} became a symlink between checks.`;
+		}
+		renameSync(tmpPath, targetPath);
+		return null;
+	} catch (err) {
+		try { unlinkSync(tmpPath); } catch { /* best effort */ }
+		return `Atomic write failed: ${err instanceof Error ? err.message : String(err)}`;
 	}
 }

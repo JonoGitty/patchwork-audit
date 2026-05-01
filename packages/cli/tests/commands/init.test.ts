@@ -55,7 +55,9 @@ describe("init --pretool flags", () => {
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
-		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS=600");
+		// Env values are POSIX single-quoted by the installer to neutralise
+		// shell-metacharacter injection through interpolated paths/values.
+		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS='600'");
 	});
 
 	it("E: validates bad --pretool-warn-ms with clear error", async () => {
@@ -146,8 +148,8 @@ describe("init --pretool flags", () => {
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
-		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_DEST=both");
-		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_FILE=/var/log/patchwork/pretool.jsonl");
+		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_DEST='both'");
+		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_FILE='/var/log/patchwork/pretool.jsonl'");
 		expect(cmd).toMatch(/patchwork.*hook pre-tool/);
 	});
 
@@ -176,8 +178,8 @@ describe("init --pretool flags", () => {
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
-		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES=1048576");
-		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES=10");
+		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_MAX_BYTES='1048576'");
+		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_MAX_FILES='10'");
 	});
 
 	it("F-rot: invalid --pretool-telemetry-max-bytes fails clearly", async () => {
@@ -212,7 +214,7 @@ describe("init --pretool flags", () => {
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
-		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_LOCK_MODE=rotate-only");
+		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_LOCK_MODE='rotate-only'");
 		expect(cmd).toMatch(/patchwork.*hook pre-tool/);
 	});
 
@@ -250,7 +252,7 @@ describe("init --strict-profile", () => {
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
 		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
-		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS=500");
+		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS='500'");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
 		expect(cmd).toMatch(/patchwork.*hook pre-tool/);
 		// Summary line printed
@@ -269,8 +271,8 @@ describe("init --strict-profile", () => {
 		const settingsPath = join(tmpDir, ".claude", "settings.json");
 		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 		const cmd = settings.hooks.PreToolUse[0].hooks[0].command;
-		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS=900");
-		expect(cmd).not.toContain("PATCHWORK_PRETOOL_WARN_MS=500");
+		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS='900'");
+		expect(cmd).not.toContain("PATCHWORK_PRETOOL_WARN_MS='500'");
 		// fail-closed and telemetry still present
 		expect(cmd).toContain("PATCHWORK_PRETOOL_FAIL_CLOSED=1");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
@@ -289,7 +291,7 @@ describe("init --strict-profile", () => {
 		// audit mode: no fail-closed prefix
 		expect(cmd).not.toContain("PATCHWORK_PRETOOL_FAIL_CLOSED");
 		// telemetry and warn still present
-		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS=500");
+		expect(cmd).toContain("PATCHWORK_PRETOOL_WARN_MS='500'");
 		expect(cmd).toContain("PATCHWORK_PRETOOL_TELEMETRY_JSON=1");
 	});
 
