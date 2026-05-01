@@ -73,8 +73,13 @@ export const AuditEventSchema = z.object({
 	agent: AgentType,
 	agent_version: z.string().optional(),
 
-	// Action
-	action: z.string(),
+	// Action — locked to the explicit allowlist in `AllActions`. The previous
+	// "any safe identifier" regex still let misspelled or unknown action names
+	// through (e.g. `file_redad` would parse, evading deny rules keyed on
+	// `file_read`). Adding a new action now requires a source-code change to
+	// `ActionCategory`, which is the right place to add policy/risk handling
+	// for it anyway.
+	action: z.enum(AllActions as [Action, ...Action[]]),
 	status: EventStatus.default("completed"),
 	duration_ms: z.number().optional(),
 

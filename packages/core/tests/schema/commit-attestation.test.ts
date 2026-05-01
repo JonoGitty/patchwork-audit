@@ -7,7 +7,11 @@ describe("CommitAttestationSchema", () => {
 		type: "commit-attestation",
 		generated_at: new Date().toISOString(),
 		tool_version: "0.5.0",
-		commit_sha: "abc1234",
+		// commit_sha now requires a real 40- or 64-hex git SHA; abbreviated git
+		// short hashes are rejected because they can collide and because they
+		// previously let attackers feed arbitrary strings into the attestation
+		// filename / git-notes argv.
+		commit_sha: "0123456789abcdef0123456789abcdef01234567",
 		branch: "main",
 		project_root: "/Users/test/project",
 		session_id: "ses_test123",
@@ -97,6 +101,46 @@ describe("CommitAttestationSchema", () => {
 	it("rejects missing risk_summary", () => {
 		const { risk_summary, ...rest } = validAttestation;
 		const result = CommitAttestationSchema.safeParse(rest);
+		expect(result.success).toBe(false);
+	});
+
+	it("rejects abbreviated commit_sha (short git SHAs)", () => {
+		const result = CommitAttestationSchema.safeParse({
+			...validAttestation,
+			commit_sha: "abc1234",
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it("rejects path-traversal style commit_sha", () => {
+		const result = CommitAttestationSchema.safeParse({
+			...validAttestation,
+			commit_sha: "../../../etc/passwd",
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it("accepts a 64-char SHA-256 commit_sha", () => {
+		const result = CommitAttestationSchema.safeParse({
+			...validAttestation,
+			commit_sha: "0".repeat(64),
+		});
+		expect(result.success).toBe(true);
+	});
+
+	it("rejects branch names containing control characters", () => {
+		const result = CommitAttestationSchema.safeParse({
+			...validAttestation,
+			branch: "main\nPatchwork-Approved: forged",
+		});
+		expect(result.success).toBe(false);
+	});
+
+	it("rejects empty branch", () => {
+		const result = CommitAttestationSchema.safeParse({
+			...validAttestation,
+			branch: "",
+		});
 		expect(result.success).toBe(false);
 	});
 });
