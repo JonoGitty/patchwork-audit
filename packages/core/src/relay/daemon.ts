@@ -18,13 +18,18 @@ import {
 	appendFileSync,
 	chmodSync,
 	chownSync,
+	closeSync,
+	constants as fsConstants,
 	existsSync,
+	lstatSync,
 	mkdirSync,
+	openSync,
 	readFileSync,
 	renameSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
+	writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
 import { AuditEventSchema } from "../schema/event.js";
@@ -86,6 +91,13 @@ export class RelayDaemon {
 	private server: Server | null = null;
 	private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 	private autoSealTimer: ReturnType<typeof setInterval> | null = null;
+	/**
+	 * Reentrancy guard for runAutoSealCycle. setInterval can fire again while
+	 * a previous cycle is still awaiting witness publication; without this
+	 * flag two cycles can interleave and emit out-of-order or duplicated
+	 * seals.
+	 */
+	private autoSealInProgress = false;
 	private readonly socketPath: string;
 	private readonly logPath: string;
 	private readonly daemonLogPath: string;
@@ -193,9 +205,16 @@ export class RelayDaemon {
 			});
 
 			this.server.listen(this.socketPath, () => {
-				// Make socket world-writable so any user can send events
+				// SECURITY: previously chmod 0777 — that lets any local user
+				// send `sign` requests and obtain signatures from the
+				// root-owned key (signing oracle). 0660 keeps the socket
+				// usable by group members (the agent UIDs you grant via your
+				// platform's group membership) without exposing it to the
+				// whole machine. Per-request authorization happens in
+				// handleSign() — we additionally restrict what the relay
+				// will sign to known Patchwork protocol payloads.
 				try {
-					chmodSync(this.socketPath, 0o777);
+					chmodSync(this.socketPath, 0o660);
 				} catch {
 					// May fail in non-root test environments
 				}
@@ -367,11 +386,35 @@ export class RelayDaemon {
 		const relayHash = computeEventHash(relayEvent);
 		(relayEvent as Record<string, unknown>)._relay_hash = relayHash;
 
-		// Append to root-owned log
+		// Append to root-owned log via O_APPEND|O_CREAT|O_NOFOLLOW so that
+		// a malicious symlink at this.logPath cannot redirect writes to an
+		// arbitrary file. lstat the existing path first to refuse symlinks
+		// up front (defense in depth: O_NOFOLLOW only fails if the FINAL
+		// path component is a symlink).
 		try {
 			const line = JSON.stringify(relayEvent) + "\n";
 			const isNew = !existsSync(this.logPath);
-			appendFileSync(this.logPath, line, "utf-8");
+			if (!isNew) {
+				try {
+					const ls = lstatSync(this.logPath);
+					if (ls.isSymbolicLink()) {
+						this.log(`WRITE ERROR: relay log is a symlink — refusing to follow`);
+						return { ok: false, error: "relay log path is a symlink" };
+					}
+				} catch {
+					// stat failed — let openSync fail with a clear error below
+				}
+			}
+			const fd = openSync(
+				this.logPath,
+				fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+				0o644,
+			);
+			try {
+				writeSync(fd, line);
+			} finally {
+				closeSync(fd);
+			}
 			if (isNew) {
 				try {
 					chmodSync(this.logPath, 0o644);
@@ -451,34 +494,55 @@ export class RelayDaemon {
 	/** Run a single auto-seal cycle. */
 	private async runAutoSealCycle(): Promise<void> {
 		if (!this.relayConfig) return;
+		// Reentrancy guard — setInterval can fire while a cycle is awaiting
+		// witness publishing. Skip overlapping cycles instead of doubling up.
+		if (this.autoSealInProgress) {
+			this.log("AUTO-SEAL: skipped — previous cycle still in progress");
+			return;
+		}
+		this.autoSealInProgress = true;
+		try {
+			const sealState: SealState = {
+				chainTip: this.state.chainTip,
+				eventCount: this.state.eventCount,
+				lastSealEventCount: this.state.lastSealEventCount,
+				lastSealAt: this.state.lastSealAt,
+			};
 
-		const sealState: SealState = {
-			chainTip: this.state.chainTip,
-			eventCount: this.state.eventCount,
-			lastSealEventCount: this.state.lastSealEventCount,
-			lastSealAt: this.state.lastSealAt,
-		};
+			const result = await performAutoSealCycle(
+				sealState,
+				this.relayConfig.auto_seal,
+				this.relayConfig.witness,
+				this.keyringPath,
+				this.sealsPath,
+				this.witnessesPath,
+			);
 
-		const result = await performAutoSealCycle(
-			sealState,
-			this.relayConfig.auto_seal,
-			this.relayConfig.witness,
-			this.keyringPath,
-			this.sealsPath,
-			this.witnessesPath,
-		);
+			if (result.sealed && result.seal) {
+				// FIX: bind state to the seal that was actually emitted, not
+				// to the live event count. Events appended while the witness
+				// publish was awaiting MUST NOT be marked as sealed —
+				// otherwise they're never covered by any seal.
+				this.state.lastSealEventCount = result.seal.chained_events;
+				this.state.lastSealAt = new Date(result.seal.sealed_at).getTime();
+				this.state.totalSeals++;
+				this.log(`AUTO-SEAL: ${result.seal.tip_hash.slice(0, 30)}... (${result.seal.chained_events} events, key=${result.seal.key_id})`);
 
-		if (result.sealed && result.seal) {
-			this.state.lastSealEventCount = this.state.eventCount;
-			this.state.lastSealAt = Date.now();
-			this.state.totalSeals++;
-			this.log(`AUTO-SEAL: ${result.seal.tip_hash.slice(0, 30)}... (${result.seal.chained_events} events, key=${result.seal.key_id})`);
+				// Drift warning: if events arrived during witness publishing,
+				// we know they're outstanding for the next cycle.
+				if (this.state.eventCount > result.seal.chained_events) {
+					const drift = this.state.eventCount - result.seal.chained_events;
+					this.log(`AUTO-SEAL: ${drift} event(s) appended during cycle — covered by next seal`);
+				}
 
-			if (result.witness) {
-				this.log(`WITNESS: ${result.witness.succeeded}/${result.witness.attempted} endpoints, quorum=${result.witness.quorum_met ? "MET" : "FAILED"}`);
+				if (result.witness) {
+					this.log(`WITNESS: ${result.witness.succeeded}/${result.witness.attempted} endpoints, quorum=${result.witness.quorum_met ? "MET" : "FAILED"}`);
+				}
+			} else {
+				this.log(`AUTO-SEAL: skipped — ${result.reason}`);
 			}
-		} else {
-			this.log(`AUTO-SEAL: skipped — ${result.reason}`);
+		} finally {
+			this.autoSealInProgress = false;
 		}
 	}
 
@@ -518,7 +582,175 @@ export class RelayDaemon {
 	// Layer 5: Signing proxy
 	// ---------------------------------------------------------------------------
 
-	/** Handle a sign request — signs data with the root-owned keyring. */
+	private static readonly SIGN_PAYLOAD_MAX_BYTES = 16 * 1024;
+
+	/** DSSE Pre-Authentication Encoding always begins with this literal. */
+	private static readonly DSSE_PAE_PREFIX = "DSSEv1 ";
+
+	/**
+	 * Decide whether the relay is willing to sign this payload, and return a
+	 * short tag describing what shape it is. Returning `null` means refuse.
+	 *
+	 * Hardening rationale (2026-05, second pass):
+	 *
+	 *   - Seals (`patchwork-seal:v1:...`) are NEVER signed on behalf of clients.
+	 *     The daemon produces seals from its own held chain state inside the
+	 *     auto-seal loop, never via this code path. Accepting a seal-shaped
+	 *     payload here would let any local socket user mint a root-key
+	 *     signature over a forged tip-hash + event-count + timestamp.
+	 *
+	 *   - Bespoke commit attestations are JSON objects produced by
+	 *     `buildAttestationPayload()` — sorted-key JSON beginning with `{`.
+	 *     We require it to parse as JSON, be an object, and self-declare
+	 *     `type === "commit-attestation"` and `schema_version === 1`. This
+	 *     stops the relay being a generic JSON-signing oracle.
+	 *
+	 *   - DSSE Pre-Authentication Encoding starts with the literal
+	 *     `DSSEv1 ` and has a strict envelope shape we validate before
+	 *     signing.
+	 *
+	 *   - Anything else is refused so the root-owned keyring can never be
+	 *     used to sign attacker-chosen text.
+	 */
+	/** in-toto Statement payloadType expected inside DSSE PAEs we'll sign. */
+	private static readonly INTOTO_PAYLOAD_TYPE = "application/vnd.in-toto+json";
+
+	private classifySignablePayload(data: string): "commit-attestation" | "dsse-pae" | null {
+		if (data.startsWith(RelayDaemon.DSSE_PAE_PREFIX)) {
+			return this.validateDssePae(data) ? "dsse-pae" : null;
+		}
+		if (data.startsWith("{")) {
+			let parsed: unknown;
+			try { parsed = JSON.parse(data); } catch { return null; }
+			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+			const obj = parsed as Record<string, unknown>;
+			if (obj.type !== "commit-attestation") return null;
+			if (obj.schema_version !== 1) return null;
+			return "commit-attestation";
+		}
+		return null;
+	}
+
+	/**
+	 * Strictly validate a DSSE Pre-Authentication Encoding string before
+	 * signing. The format (RFC-style):
+	 *
+	 *   `DSSEv1 <type-len> <payloadType> <payload-len> <payload>`
+	 *
+	 * with byte-counted lengths (UTF-8 byte counts, not character counts).
+	 *
+	 * Earlier passes only checked that the string roughly matched the PAE
+	 * shape via regex. That accepted forged PAEs whose declared lengths didn't
+	 * match the bytes that followed, and accepted any payloadType including
+	 * non-in-toto values — turning the relay into a generic root-key signing
+	 * oracle for anything DSSE-shaped.
+	 *
+	 * This implementation:
+	 *   - parses both length tokens as UTF-8 byte counts
+	 *   - confirms payloadType matches the in-toto Statement media type
+	 *   - confirms the payload section is exactly the declared byte length
+	 *   - decodes the payload as UTF-8 JSON and confirms it parses to an
+	 *     object with `_type === "https://in-toto.io/Statement/v1"` (so a
+	 *     hostile caller can't smuggle arbitrary canonical JSON through the
+	 *     DSSE wrapper).
+	 */
+	private validateDssePae(data: string): boolean {
+		const buf = Buffer.from(data, "utf8");
+		const prefixLen = Buffer.byteLength(RelayDaemon.DSSE_PAE_PREFIX, "utf8");
+		let pos = prefixLen;
+
+		const readDecimal = (): { n: number; nextPos: number } | null => {
+			let end = pos;
+			while (end < buf.length && buf[end] >= 0x30 && buf[end] <= 0x39) end++;
+			if (end === pos || end >= buf.length || buf[end] !== 0x20) return null;
+			const n = Number.parseInt(buf.slice(pos, end).toString("utf8"), 10);
+			if (!Number.isInteger(n) || n < 0 || n > RelayDaemon.SIGN_PAYLOAD_MAX_BYTES) return null;
+			return { n, nextPos: end + 1 };
+		};
+
+		// type-len
+		const typeLen = readDecimal();
+		if (!typeLen) return false;
+		pos = typeLen.nextPos;
+
+		// type bytes (must equal in-toto media type) followed by SP
+		if (pos + typeLen.n + 1 > buf.length) return false;
+		const typeBytes = buf.slice(pos, pos + typeLen.n).toString("utf8");
+		if (typeBytes !== RelayDaemon.INTOTO_PAYLOAD_TYPE) return false;
+		if (buf[pos + typeLen.n] !== 0x20) return false;
+		pos += typeLen.n + 1;
+
+		// payload-len
+		const payloadLen = readDecimal();
+		if (!payloadLen) return false;
+		pos = payloadLen.nextPos;
+
+		// Payload section must be exactly payloadLen bytes and exhaust the
+		// buffer (no trailing junk used to smuggle extra content past the
+		// length-bound check).
+		if (pos + payloadLen.n !== buf.length) return false;
+
+		const payloadStr = buf.slice(pos, pos + payloadLen.n).toString("utf8");
+		let stmt: unknown;
+		try { stmt = JSON.parse(payloadStr); } catch { return false; }
+		if (stmt === null || typeof stmt !== "object" || Array.isArray(stmt)) return false;
+		const obj = stmt as Record<string, unknown>;
+		if (obj._type !== "https://in-toto.io/Statement/v1") return false;
+
+		// Subject must be a non-empty array of well-formed entries.
+		if (!Array.isArray(obj.subject) || obj.subject.length === 0) return false;
+		for (const entry of obj.subject) {
+			if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return false;
+			const e = entry as Record<string, unknown>;
+			if (typeof e.name !== "string" || e.name.length === 0) return false;
+			if (e.digest === null || typeof e.digest !== "object" || Array.isArray(e.digest)) return false;
+			// Each digest entry must be `algo: <hex>` so a hostile attestation
+			// can't smuggle binary or path-shaped values through the relay.
+			let sawDigest = false;
+			for (const [algo, hex] of Object.entries(e.digest as Record<string, unknown>)) {
+				sawDigest = true;
+				if (typeof algo !== "string" || !/^[a-z0-9_-]{1,32}$/.test(algo)) return false;
+				if (typeof hex !== "string" || !/^[0-9a-f]{32,128}$/i.test(hex)) return false;
+			}
+			if (!sawDigest) return false;
+		}
+
+		// predicateType must be a non-empty URL-ish string and must come from
+		// the allowlist of types Patchwork itself emits. Adding a new
+		// predicateType requires a source-code change here, which is the right
+		// place to add the matching predicate-shape check.
+		if (typeof obj.predicateType !== "string" || obj.predicateType.length === 0) return false;
+		if (!RelayDaemon.ALLOWED_PREDICATE_TYPES.has(obj.predicateType)) return false;
+
+		// Predicate body must exist as an object so a trivial envelope is refused.
+		if (obj.predicate === null || typeof obj.predicate !== "object" || Array.isArray(obj.predicate)) return false;
+
+		return true;
+	}
+
+	/**
+	 * predicateType values Patchwork legitimately produces. Anything else MUST
+	 * NOT get a root-key signature via the relay — the right place to add a new
+	 * predicate type is here, and at the same time you should add the
+	 * predicate-shape check above so the daemon doesn't sign a trivial
+	 * envelope around an attacker-chosen predicate body.
+	 */
+	private static readonly ALLOWED_PREDICATE_TYPES = new Set<string>([
+		// Bespoke Patchwork commit-attestation wrapped as in-toto Statement —
+		// see PATCHWORK_PREDICATE_TYPE in attestation/intoto.ts.
+		"https://patchwork-audit.dev/ai-agent-session/v1",
+	]);
+
+	/**
+	 * Handle a sign request — signs data with the root-owned keyring.
+	 *
+	 * Hardening (2026-05): see classifySignablePayload() for what we accept and
+	 * why. The previous prefix-allowlist accepted seal-shaped payloads, which
+	 * let any local socket user mint a forged seal signature. This pass
+	 * removes seals from the accepted set entirely (the daemon signs its own
+	 * seals from held state) and validates that JSON/DSSE payloads have the
+	 * shape they claim.
+	 */
 	private handleSign(msg: RelayMessage): SignResponse {
 		const payload = msg.payload as { data?: string; key_id?: string } | undefined;
 
@@ -526,12 +758,31 @@ export class RelayDaemon {
 			return { ok: false, error: "Missing sign payload.data" };
 		}
 
+		// Bound the payload size — daemon should never sign large blobs.
+		if (payload.data.length > RelayDaemon.SIGN_PAYLOAD_MAX_BYTES) {
+			return {
+				ok: false,
+				error: `sign payload exceeds ${RelayDaemon.SIGN_PAYLOAD_MAX_BYTES} bytes`,
+			};
+		}
+
+		const kind = this.classifySignablePayload(payload.data);
+		if (kind === null) {
+			this.log(`SIGN REJECTED: payload is not a recognised commit-attestation JSON or DSSE PAE`);
+			return {
+				ok: false,
+				error: "sign payload must be a commit-attestation JSON or DSSE PAE — seals and arbitrary text are refused",
+			};
+		}
+
 		try {
 			let key: Buffer;
 			let keyId: string;
 
 			if (payload.key_id) {
-				// Sign with specific key
+				// Sign with specific key — loadKeyById validates the keyId
+				// shape so a traversal like `../../tmp/known` is rejected
+				// at the seal layer.
 				key = loadKeyById(this.keyringPath, payload.key_id);
 				keyId = payload.key_id;
 			} else {
@@ -544,7 +795,7 @@ export class RelayDaemon {
 			const signature = signSeal(payload.data, key);
 			const signedAt = new Date().toISOString();
 
-			this.log(`SIGN: key=${keyId}, data=${payload.data.slice(0, 40)}...`);
+			this.log(`SIGN: kind=${kind}, key=${keyId}, data=${payload.data.slice(0, 40)}...`);
 
 			return {
 				ok: true,
