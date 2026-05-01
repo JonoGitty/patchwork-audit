@@ -75,14 +75,14 @@ describe("SqliteStore", () => {
 	it("readRecent returns last N events", () => {
 		for (let i = 0; i < 10; i++) {
 			store.append(makeEvent({
-				action: `action_${i}` as any,
+				id: `evt_recent_${i}`,
 				timestamp: new Date(Date.now() + i * 1000).toISOString(),
 			}));
 		}
 		const recent = store.readRecent(3);
 		expect(recent).toHaveLength(3);
-		expect(recent[0].action).toBe("action_7");
-		expect(recent[2].action).toBe("action_9");
+		expect(recent[0].id).toBe("evt_recent_7");
+		expect(recent[2].id).toBe("evt_recent_9");
 	});
 
 	it("ignores duplicate IDs", () => {

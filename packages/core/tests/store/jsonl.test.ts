@@ -76,12 +76,14 @@ describe("JsonlStore", () => {
 
 	it("readRecent returns last N events", () => {
 		for (let i = 0; i < 10; i++) {
-			store.append(makeEvent({ action: `action_${i}` as any }));
+			// `action` is now constrained to AllActions, so we differentiate
+			// events by their id and verify ordering on that.
+			store.append(makeEvent({ id: `evt_recent_${i}` }));
 		}
 		const recent = store.readRecent(3);
 		expect(recent).toHaveLength(3);
-		expect(recent[0].action).toBe("action_7");
-		expect(recent[2].action).toBe("action_9");
+		expect(recent[0].id).toBe("evt_recent_7");
+		expect(recent[2].id).toBe("evt_recent_9");
 	});
 
 	describe("query", () => {
@@ -265,7 +267,7 @@ describe("JsonlStore", () => {
 	describe("file locking", () => {
 		it("handles sequential appends under lock", () => {
 			for (let i = 0; i < 20; i++) {
-				store.append(makeEvent({ action: `action_${i}` as any }));
+				store.append(makeEvent({ id: `evt_seq_${i}` }));
 			}
 			const events = store.readAll();
 			expect(events).toHaveLength(20);
@@ -311,7 +313,7 @@ describe("JsonlStore", () => {
 			const s = new JsonlStore(filePath);
 
 			for (let i = 0; i < 50; i++) {
-				s.append(makeEvent({ id: `evt_rapid_${i}`, action: `action_${i % 5}` as any }));
+				s.append(makeEvent({ id: `evt_rapid_${i}` }));
 			}
 
 			const events = s.readAll();

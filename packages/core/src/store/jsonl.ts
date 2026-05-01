@@ -221,6 +221,26 @@ export class JsonlStore implements Store {
 		return events;
 	}
 
+	/**
+	 * Like {@link readAll} but throws if any line failed to parse / validate.
+	 *
+	 * Use this in security-sensitive flows (UI/API rendering an audit trail,
+	 * verifier pipelines, monitoring) where you must NOT silently hide a
+	 * tampered or truncated event. The default `readAll()` keeps backward
+	 * compat by counting errors in `lastReadErrors`; many callers forget to
+	 * check that, so corrupt lines vanish from the displayed log.
+	 */
+	readAllStrict(): AuditEvent[] {
+		const { events, errors } = this.parseFile();
+		this.lastReadErrors = errors;
+		if (errors > 0) {
+			throw new Error(
+				`audit log has ${errors} corrupt/invalid line(s) at ${this.filePath} — refusing to return partial result. Run "patchwork verify" to inspect.`,
+			);
+		}
+		return events;
+	}
+
 	readRecent(limit: number): AuditEvent[] {
 		const all = this.readAll();
 		return all.slice(-limit);
@@ -519,11 +539,15 @@ function isLockStale(lockPath: string, thresholdMs: number): boolean {
 		}
 	}
 
-	// Same-host: check if the holder process is still alive
+	// Same-host: check if the holder process is still alive.
+	// If the holder is alive, the lock is NOT stale — even if its age has
+	// exceeded thresholdMs. Reclaiming a live-process lock based on age
+	// would let two writers enter the append critical section concurrently
+	// (both compute the same prev_hash and fork the chain). Stuck-process
+	// recovery for very long critical sections requires a heartbeat field
+	// instead of age-based reclamation.
 	if (meta.hostname === LOCK_HOSTNAME) {
-		if (!isProcessAlive(meta.pid)) {
-			return true; // Holder is dead — stale regardless of age
-		}
+		return !isProcessAlive(meta.pid);
 	}
 
 	// Guard against future timestamps (clock skew or tampered metadata).
@@ -538,7 +562,8 @@ function isLockStale(lockPath: string, thresholdMs: number): boolean {
 		}
 	}
 
-	// Age-based fallback (handles cross-host and alive-but-stuck processes)
+	// Cross-host only: age-based fallback. We can't verify PIDs on other
+	// machines, so this is the best signal available there.
 	return Date.now() - meta.created_at_ms > thresholdMs;
 }
 
