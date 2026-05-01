@@ -1,6 +1,6 @@
 {
   "name": "@patchwork/web",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "description": "Web dashboard for Patchwork audit trail",
   "type": "module",
   "main": "dist/index.js",
