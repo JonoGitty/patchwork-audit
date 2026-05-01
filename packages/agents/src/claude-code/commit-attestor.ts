@@ -22,7 +22,7 @@ import {
 	buildInTotoStatement,
 	buildDsseEnvelope,
 } from "@patchwork/core";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 
@@ -31,6 +31,22 @@ function commitIndexPath() { return join(commitAttestationsDir(), "index.jsonl")
 function attestorFailuresPath() { return join(commitAttestationsDir(), "_failures.jsonl"); }
 function keyringDir() { return join(getHomeDir(), ".patchwork", "keys", "seal"); }
 function legacyKeyPath() { return join(getHomeDir(), ".patchwork", "keys", "seal.key"); }
+
+/**
+ * Git commit shas — 40-hex (SHA-1, current default) or 64-hex (SHA-256, future).
+ * Anything else MUST NOT be passed as a path component or to `git notes`,
+ * because callers can construct typed `CommitAttestation` objects without
+ * round-tripping through the Zod schema validator.
+ */
+const COMMIT_SHA_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/i;
+
+function assertCommitSha(commitSha: string): void {
+	if (typeof commitSha !== "string" || !COMMIT_SHA_RE.test(commitSha)) {
+		throw new Error(
+			`commit_sha must match /^[0-9a-f]{40,64}$/ (got ${JSON.stringify(commitSha).slice(0, 80)})`,
+		);
+	}
+}
 
 export interface CommitAttestationParams {
 	commitSha: string;
@@ -58,14 +74,23 @@ export async function generateCommitAttestation(params: CommitAttestationParams)
 		// Store read failed — generate degraded attestation
 	}
 
-	// Find events since last commit attestation in this session
-	const lastCommitIdx = findLastCommitEventIndex(sessionEvents);
+	// Find events since the *previous* commit in this session.
+	//
+	// The PostToolUse hook records the just-completed `git commit` to the audit
+	// log before invoking us, so the trailing event in `sessionEvents` is the
+	// current commit. If we don't exclude it, `findLastCommitEventIndex` returns
+	// the current commit's index, the slice below is empty, and any high-risk
+	// denials between the previous and current commit are silently dropped from
+	// `denials_high_risk_since_last_commit` — turning an attestation that should
+	// fail into one that passes.
+	const priorEvents = sessionEvents.length > 0 ? sessionEvents.slice(0, -1) : sessionEvents;
+	const lastCommitIdx = findLastCommitEventIndex(priorEvents);
 	const eventsSinceLastCommit = lastCommitIdx === -1
-		? sessionEvents.length
-		: sessionEvents.length - lastCommitIdx - 1;
+		? priorEvents.length
+		: priorEvents.length - lastCommitIdx - 1;
 	const sinceLastCommitEvents = lastCommitIdx === -1
-		? sessionEvents
-		: sessionEvents.slice(lastCommitIdx + 1);
+		? priorEvents
+		: priorEvents.slice(lastCommitIdx + 1);
 
 	// Verify per-event hash integrity. Session events are a *filter* over the
 	// global append-only chain; events from other sessions are interleaved
@@ -152,6 +177,7 @@ export async function generateCommitAttestation(params: CommitAttestationParams)
  * Write a commit attestation to disk.
  */
 export function writeCommitAttestation(attestation: CommitAttestation): string {
+	assertCommitSha(attestation.commit_sha);
 	if (!existsSync(commitAttestationsDir())) {
 		mkdirSync(commitAttestationsDir(), { recursive: true, mode: 0o700 });
 	}
@@ -177,6 +203,7 @@ export function writeCommitAttestation(attestation: CommitAttestation): string {
  * Add a git note with the attestation summary under refs/notes/patchwork.
  */
 export function addGitNote(attestation: CommitAttestation, cwd: string): void {
+	assertCommitSha(attestation.commit_sha);
 	const risk = attestation.risk_summary;
 	const highRiskSinceCommit = risk.denials_high_risk_since_last_commit ?? 0;
 	const noteBody = [
@@ -192,8 +219,13 @@ export function addGitNote(attestation: CommitAttestation, cwd: string): void {
 			: []),
 	].join("\n");
 
-	execSync(
-		`git notes --ref=patchwork add -f -m ${shellQuote(noteBody)} ${attestation.commit_sha}`,
+	// execFileSync (no shell): note body and commit sha are passed as argv
+	// elements, so neither metacharacters in the body nor a maliciously-shaped
+	// commit_sha (already rejected by assertCommitSha, defence in depth) can
+	// trigger shell interpretation.
+	execFileSync(
+		"git",
+		["notes", "--ref=patchwork", "add", "-f", "-m", noteBody, attestation.commit_sha],
 		{ cwd, timeout: 5000, stdio: "ignore" },
 	);
 }
@@ -236,6 +268,7 @@ export async function buildIntotoEnvelope(
  * Path: ~/.patchwork/commit-attestations/<sha>.intoto.json
  */
 export function writeIntotoEnvelope(commitSha: string, envelope: DsseEnvelope): string {
+	assertCommitSha(commitSha);
 	if (!existsSync(commitAttestationsDir())) {
 		mkdirSync(commitAttestationsDir(), { recursive: true, mode: 0o700 });
 	}
@@ -249,9 +282,11 @@ export function writeIntotoEnvelope(commitSha: string, envelope: DsseEnvelope): 
  * parallel to (and not replacing) the existing refs/notes/patchwork note.
  */
 export function addIntotoGitNote(commitSha: string, envelope: DsseEnvelope, cwd: string): void {
+	assertCommitSha(commitSha);
 	const noteBody = JSON.stringify(envelope);
-	execSync(
-		`git notes --ref=patchwork-intoto add -f -m ${shellQuote(noteBody)} ${commitSha}`,
+	execFileSync(
+		"git",
+		["notes", "--ref=patchwork-intoto", "add", "-f", "-m", noteBody, commitSha],
 		{ cwd, timeout: 5000, stdio: "ignore" },
 	);
 }
@@ -260,6 +295,7 @@ export function addIntotoGitNote(commitSha: string, envelope: DsseEnvelope, cwd:
  * Read an existing in-toto/DSSE envelope from disk.
  */
 export function readIntotoEnvelope(commitSha: string): DsseEnvelope | null {
+	assertCommitSha(commitSha);
 	const filePath = join(commitAttestationsDir(), `${commitSha}.intoto.json`);
 	if (!existsSync(filePath)) return null;
 	try {
@@ -307,6 +343,7 @@ export function writeAttestationFailure(params: {
  * Read an existing commit attestation from disk.
  */
 export function readCommitAttestation(commitSha: string): CommitAttestation | null {
+	assertCommitSha(commitSha);
 	const filePath = join(commitAttestationsDir(), `${commitSha}.json`);
 	if (!existsSync(filePath)) return null;
 	try {
@@ -356,8 +393,4 @@ function findLastCommitEventIndex(events: AuditEvent[]): number {
 		}
 	}
 	return -1;
-}
-
-function shellQuote(s: string): string {
-	return "'" + s.replace(/'/g, "'\\''") + "'";
 }

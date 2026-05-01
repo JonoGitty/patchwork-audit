@@ -70,7 +70,7 @@ describe("generateCommitAttestation", () => {
 		appendTestEvent({ action: "command_execute", risk: { level: "medium", flags: [] } });
 
 		const attestation = await generateCommitAttestation({
-			commitSha: "abc1234",
+			commitSha: "a".repeat(40),
 			branch: "main",
 			sessionId,
 			projectRoot: "/tmp/project",
@@ -80,7 +80,7 @@ describe("generateCommitAttestation", () => {
 
 		expect(attestation.schema_version).toBe(1);
 		expect(attestation.type).toBe("commit-attestation");
-		expect(attestation.commit_sha).toBe("abc1234");
+		expect(attestation.commit_sha).toBe("a".repeat(40));
 		expect(attestation.branch).toBe("main");
 		expect(attestation.session_id).toBe(sessionId);
 		expect(attestation.session_events_count).toBe(2);
@@ -245,7 +245,7 @@ describe("writeCommitAttestation / readCommitAttestation", () => {
 			type: "commit-attestation" as const,
 			generated_at: new Date().toISOString(),
 			tool_version: "0.5.0-test",
-			commit_sha: "abc1234",
+			commit_sha: "a".repeat(40),
 			branch: "main",
 			project_root: "/tmp/project",
 			session_id: "ses_test",
@@ -270,7 +270,7 @@ describe("writeCommitAttestation / readCommitAttestation", () => {
 		expect(existsSync(indexPath)).toBe(true);
 		const indexContent = readFileSync(indexPath, "utf-8");
 		const indexEntry = JSON.parse(indexContent.trim());
-		expect(indexEntry.commit_sha).toBe("abc1234");
+		expect(indexEntry.commit_sha).toBe("a".repeat(40));
 		expect(indexEntry.pass).toBe(true);
 	});
 
@@ -280,7 +280,7 @@ describe("writeCommitAttestation / readCommitAttestation", () => {
 			type: "commit-attestation" as const,
 			generated_at: new Date().toISOString(),
 			tool_version: "0.5.0-test",
-			commit_sha: "xyz7890",
+			commit_sha: "b".repeat(40),
 			branch: "feature",
 			project_root: "/tmp/project",
 			session_id: "ses_test2",
@@ -298,14 +298,21 @@ describe("writeCommitAttestation / readCommitAttestation", () => {
 		};
 
 		writeCommitAttestation(attestation);
-		const read = readCommitAttestation("xyz7890");
+		const read = readCommitAttestation("b".repeat(40));
 		expect(read).not.toBeNull();
-		expect(read!.commit_sha).toBe("xyz7890");
+		expect(read!.commit_sha).toBe("b".repeat(40));
 		expect(read!.branch).toBe("feature");
 	});
 
 	it("returns null for nonexistent SHA", () => {
-		expect(readCommitAttestation("nonexistent")).toBeNull();
+		// Well-formed but unused 40-hex sha — we want to exercise the file-missing
+		// branch, not the new commit_sha format guard.
+		expect(readCommitAttestation("c".repeat(40))).toBeNull();
+	});
+
+	it("rejects malformed commit SHAs before touching the filesystem", () => {
+		expect(() => readCommitAttestation("../etc/passwd")).toThrow("commit_sha must match");
+		expect(() => readCommitAttestation("abc1234")).toThrow("commit_sha must match");
 	});
 });
 
@@ -332,7 +339,7 @@ describe("writeAttestationFailure", () => {
 
 	it("records an Error with stack", () => {
 		writeAttestationFailure({
-			commitSha: "abc1234",
+			commitSha: "a".repeat(40),
 			branch: "main",
 			sessionId: "ses_x",
 			stage: "generate",
@@ -341,7 +348,7 @@ describe("writeAttestationFailure", () => {
 
 		const lines = readFailures();
 		expect(lines).toHaveLength(1);
-		expect(lines[0].commit_sha).toBe("abc1234");
+		expect(lines[0].commit_sha).toBe("a".repeat(40));
 		expect(lines[0].branch).toBe("main");
 		expect(lines[0].session_id).toBe("ses_x");
 		expect(lines[0].stage).toBe("generate");
