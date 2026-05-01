@@ -40,20 +40,41 @@ export interface SignatureResult {
 
 /**
  * Request a signature from the relay daemon.
- * Falls back to local keyring if relay is unavailable.
+ *
+ * Failure modes:
+ *   - default: relay unavailable → fall back to local keyring (legacy behaviour
+ *     for solo developers without a daemon installed). The result's
+ *     `source` is `"local"` so downstream verifiers can see the
+ *     downgrade and treat it as untrusted-root.
+ *   - `requireRelay: true` (or env `PATCHWORK_REQUIRE_RELAY=1`): never fall back.
+ *     Throws `RelayUnavailableError` if the relay is missing or refuses the
+ *     request. Use this for compliance contexts where attestations must be
+ *     produced by the root-owned keyring or not produced at all — otherwise
+ *     an attacker who blocks the socket downgrades to the user keyring.
  *
  * @param data - The payload to sign (e.g., seal payload string)
- * @param options - Override socket path or keyring (for testing)
+ * @param options - Override socket path, keyring, or require relay
  */
+export class RelayUnavailableError extends Error {
+	constructor(reason: string) {
+		super(`relay-required signing failed: ${reason}`);
+		this.name = "RelayUnavailableError";
+	}
+}
+
 export async function requestSignature(
 	data: string,
 	options?: {
 		socketPath?: string;
 		localKeyringPath?: string;
 		keyId?: string;
+		/** Refuse to fall back to local keyring on relay failure. */
+		requireRelay?: boolean;
 	},
 ): Promise<SignatureResult> {
 	const sockPath = options?.socketPath ?? RELAY_SOCKET_PATH;
+	const requireRelay = options?.requireRelay
+		?? process.env.PATCHWORK_REQUIRE_RELAY === "1";
 
 	// Try relay first
 	if (existsSync(sockPath)) {
@@ -67,12 +88,30 @@ export async function requestSignature(
 					source: "relay",
 				};
 			}
-		} catch {
-			// Relay failed — fall through to local
+			if (requireRelay) {
+				throw new RelayUnavailableError(`relay refused: ${resp.error ?? "unknown error"}`);
+			}
+		} catch (err) {
+			if (requireRelay) {
+				if (err instanceof RelayUnavailableError) throw err;
+				const msg = err instanceof Error ? err.message : String(err);
+				throw new RelayUnavailableError(`relay error: ${msg}`);
+			}
+			// Best-effort: fall through to local
 		}
+	} else if (requireRelay) {
+		throw new RelayUnavailableError(`relay socket not present at ${sockPath}`);
 	}
 
-	// Fallback: sign locally
+	// Fallback: sign locally. Loud in the logs because verifiers who care
+	// about the root-keyring trust model should reject `source: "local"`.
+	if (process.env.PATCHWORK_DEBUG === "1") {
+		console.warn(
+			`patchwork: signing locally (relay at ${sockPath} unavailable). ` +
+			`Verifiers expecting root-keyring signatures will reject this attestation. ` +
+			`Set PATCHWORK_REQUIRE_RELAY=1 to refuse the downgrade.`,
+		);
+	}
 	const localKeyring = options?.localKeyringPath ?? getLocalKeyringPath();
 	const { keyId, key } = ensureKeyring(localKeyring);
 	const signature = signSeal(data, key);
