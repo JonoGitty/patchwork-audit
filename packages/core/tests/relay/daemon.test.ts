@@ -60,6 +60,10 @@ describe("RelayDaemon", () => {
 			daemonLogPath,
 			pidPath,
 			heartbeatIntervalMs: 60_000, // Long interval so heartbeats don't interfere with tests
+			// Per-test keyring so the sign endpoint can ensureKeyring without
+			// touching the system root keyring (which the test runner can't
+			// write to anyway).
+			keyringPath: join(tmpDir, "keys", "seal"),
 		});
 		await daemon.start();
 	});
@@ -288,5 +292,127 @@ describe("RelayDaemon", () => {
 
 		expect(resp.ok).toBe(false);
 		expect(resp.error).toContain("hash mismatch");
+	});
+
+	// Regression coverage for the V12+V13 sign-payload validator. The relay's
+	// classifySignablePayload + validatePatchworkAiAgentPredicate are private,
+	// so we exercise them through the public `sign` socket API. The proxy
+	// also accepts these payloads via a different path, but we want a low-level
+	// test that hits the daemon directly.
+	describe("sign endpoint payload validator", () => {
+		const SHA = "0".repeat(40);
+
+		function statement(overrides: Record<string, unknown> = {}) {
+			return {
+				_type: "https://in-toto.io/Statement/v1",
+				subject: [{
+					name: `git+main:${SHA}`,
+					digest: { gitCommit: SHA },
+				}],
+				predicateType: "https://patchwork-audit.dev/ai-agent-session/v1",
+				predicate: {
+					schema_version: 1,
+					generated_at: "2026-05-01T00:00:00.000Z",
+					tool_version: "0.6.10",
+					project_root: "/tmp/proj",
+					session_id: "ses_x",
+					session_events_count: 0,
+					session_events_since_last_commit: 0,
+					chain_tip_hash: null,
+					chain_valid: true,
+					chain_chained_events: 0,
+					risk_summary: { critical: 0, high: 0, medium: 0, low: 0, none: 0, denials: 0 },
+					policy_source: "default",
+					pass: true,
+					failure_reasons: [],
+				},
+				...overrides,
+			};
+		}
+
+		function pae(stmt: object): string {
+			const payloadType = "application/vnd.in-toto+json";
+			const payload = JSON.stringify(stmt);
+			return `DSSEv1 ${payloadType.length} ${payloadType} ${Buffer.byteLength(payload, "utf8")} ${payload}`;
+		}
+
+		async function trySign(data: string) {
+			return sendMessage(socketPath, {
+				protocol_version: RELAY_PROTOCOL_VERSION,
+				type: "sign",
+				timestamp: new Date().toISOString(),
+				payload: { data },
+			});
+		}
+
+		it("accepts a well-formed Patchwork DSSE PAE", async () => {
+			const resp = await trySign(pae(statement()));
+			expect(resp.ok).toBe(true);
+		});
+
+		it("refuses a DSSE PAE with an unknown predicate key (closed schema)", async () => {
+			const stmt = statement();
+			(stmt.predicate as Record<string, unknown>).legal_disclaimer = "fine print";
+			const resp = await trySign(pae(stmt));
+			expect(resp.ok).toBe(false);
+		});
+
+		it("refuses a DSSE PAE with an unknown risk_summary key", async () => {
+			const stmt = statement();
+			(stmt.predicate.risk_summary as Record<string, unknown>).extra = 99;
+			const resp = await trySign(pae(stmt));
+			expect(resp.ok).toBe(false);
+		});
+
+		it("refuses a subject name not in the git+<branch>:<sha> form", async () => {
+			const stmt = statement();
+			stmt.subject = [{ name: `evil:${SHA}`, digest: { gitCommit: SHA } }];
+			const resp = await trySign(pae(stmt));
+			expect(resp.ok).toBe(false);
+		});
+
+		it("refuses when subject name SHA disagrees with digest gitCommit", async () => {
+			const otherSha = "1".repeat(40);
+			const stmt = statement();
+			stmt.subject = [{ name: `git+main:${SHA}`, digest: { gitCommit: otherSha } }];
+			const resp = await trySign(pae(stmt));
+			expect(resp.ok).toBe(false);
+		});
+
+		it("refuses arbitrary text", async () => {
+			const resp = await trySign("hello world");
+			expect(resp.ok).toBe(false);
+		});
+
+		it("refuses seal-shaped payloads (clients never sign seals)", async () => {
+			const sealPayload = `patchwork-seal:v1:sha256:${"a".repeat(64)}:10:2026-04-02T00:00:00.000Z`;
+			const resp = await trySign(sealPayload);
+			expect(resp.ok).toBe(false);
+		});
+
+		it("refuses DSSE PAEs whose declared payload length doesn't match", async () => {
+			const stmt = statement();
+			const payloadType = "application/vnd.in-toto+json";
+			const payload = JSON.stringify(stmt);
+			// Lie about payload length.
+			const data = `DSSEv1 ${payloadType.length} ${payloadType} ${payload.length + 5} ${payload}`;
+			const resp = await trySign(data);
+			expect(resp.ok).toBe(false);
+		});
+
+		it("refuses DSSE PAEs with the wrong payloadType", async () => {
+			const stmt = statement();
+			const payloadType = "application/json"; // not in-toto
+			const payload = JSON.stringify(stmt);
+			const data = `DSSEv1 ${payloadType.length} ${payloadType} ${Buffer.byteLength(payload, "utf8")} ${payload}`;
+			const resp = await trySign(data);
+			expect(resp.ok).toBe(false);
+		});
+
+		it("refuses DSSE PAEs whose statement has predicateType not in the allowlist", async () => {
+			const stmt = statement({ predicateType: "https://example.com/notpatchwork" });
+			const resp = await trySign(pae(stmt));
+			expect(resp.ok).toBe(false);
+		});
 	});
 });

@@ -706,39 +706,145 @@ export class RelayDaemon {
 			if (e.digest === null || typeof e.digest !== "object" || Array.isArray(e.digest)) return false;
 			// Each digest entry must be `algo: <hex>` so a hostile attestation
 			// can't smuggle binary or path-shaped values through the relay.
+			// Algorithm names accept both lowercase (sha256, sha512) and camelCase
+			// (gitCommit) — Patchwork emits the latter for its in-toto Statements.
 			let sawDigest = false;
 			for (const [algo, hex] of Object.entries(e.digest as Record<string, unknown>)) {
 				sawDigest = true;
-				if (typeof algo !== "string" || !/^[a-z0-9_-]{1,32}$/.test(algo)) return false;
+				if (typeof algo !== "string" || !/^[A-Za-z0-9_-]{1,32}$/.test(algo)) return false;
 				if (typeof hex !== "string" || !/^[0-9a-f]{32,128}$/i.test(hex)) return false;
 			}
 			if (!sawDigest) return false;
 		}
 
 		// predicateType must be a non-empty URL-ish string and must come from
-		// the allowlist of types Patchwork itself emits. Adding a new
-		// predicateType requires a source-code change here, which is the right
-		// place to add the matching predicate-shape check.
+		// the allowlist of types Patchwork itself emits.
 		if (typeof obj.predicateType !== "string" || obj.predicateType.length === 0) return false;
 		if (!RelayDaemon.ALLOWED_PREDICATE_TYPES.has(obj.predicateType)) return false;
 
 		// Predicate body must exist as an object so a trivial envelope is refused.
 		if (obj.predicate === null || typeof obj.predicate !== "object" || Array.isArray(obj.predicate)) return false;
 
+		// Per-predicateType deep schema check + subject/predicate consistency.
+		// Without this, the relay would still root-sign any
+		// `predicate: {anything: "goes"}` body once the wrapper looks right.
+		if (obj.predicateType === RelayDaemon.PATCHWORK_AI_AGENT_PREDICATE_TYPE) {
+			if (!RelayDaemon.validatePatchworkAiAgentPredicate(obj.predicate as Record<string, unknown>)) return false;
+			// Subject's gitCommit digest must equal the commit SHA that the
+			// subject name references. The expected subject format is
+			//     git+<branch>:<sha>
+			// where `<sha>` is 40- or 64-hex (matches CommitAttestationSchema).
+			// We require the full regex match — endsWith would let an attacker
+			// embed an attacker-chosen `<sha>` in a `name` whose prefix was
+			// also attacker-chosen.
+			const firstSubject = obj.subject[0] as Record<string, unknown>;
+			const digest = firstSubject.digest as Record<string, unknown>;
+			const gitCommit = digest.gitCommit;
+			const name = firstSubject.name;
+			if (typeof gitCommit !== "string" || typeof name !== "string") return false;
+			if (!RelayDaemon.PATCHWORK_SUBJECT_NAME_RE.test(name)) return false;
+			if (!RelayDaemon.GIT_SHA_RE.test(gitCommit)) return false;
+			// Ensure the SHA in the name string matches the digest's gitCommit
+			// (guards against a `name` that happens to match the regex but
+			// embeds a different SHA than what's bound in the digest).
+			if (!name.endsWith(`:${gitCommit}`)) return false;
+		}
+
 		return true;
 	}
+
+	/** Subject names emitted by buildInTotoStatement: `git+<branch>:<40|64-hex>`. */
+	private static readonly PATCHWORK_SUBJECT_NAME_RE =
+		/^git\+[A-Za-z0-9._\-/]{1,256}:[0-9a-f]{40}$|^git\+[A-Za-z0-9._\-/]{1,256}:[0-9a-f]{64}$/;
+
+	private static readonly GIT_SHA_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+
+	/** Mirrors PATCHWORK_PREDICATE_TYPE in attestation/intoto.ts. */
+	private static readonly PATCHWORK_AI_AGENT_PREDICATE_TYPE =
+		"https://patchwork-audit.dev/ai-agent-session/v1";
 
 	/**
 	 * predicateType values Patchwork legitimately produces. Anything else MUST
 	 * NOT get a root-key signature via the relay — the right place to add a new
-	 * predicate type is here, and at the same time you should add the
-	 * predicate-shape check above so the daemon doesn't sign a trivial
-	 * envelope around an attacker-chosen predicate body.
+	 * predicate type is here, and at the same time you should add the matching
+	 * deep-validation function and call it from validateDssePae() above.
 	 */
 	private static readonly ALLOWED_PREDICATE_TYPES = new Set<string>([
-		// Bespoke Patchwork commit-attestation wrapped as in-toto Statement —
-		// see PATCHWORK_PREDICATE_TYPE in attestation/intoto.ts.
 		"https://patchwork-audit.dev/ai-agent-session/v1",
+	]);
+
+	/**
+	 * Closed-schema check for the Patchwork AI-agent-session predicate body.
+	 * Mirrors `PatchworkAiAgentPredicate` in attestation/intoto.ts; updating
+	 * one REQUIRES updating the other.
+	 *
+	 * Closed-schema means: any property not in PATCHWORK_PREDICATE_KEYS (or
+	 * any risk_summary property not in PATCHWORK_RISK_KEYS) causes the
+	 * payload to be refused. Without this, an attacker could append extra
+	 * fields (e.g. a fake `legal_disclaimer` or a tampered nested
+	 * `denials_high_risk_since_last_commit`) and have the relay sign a
+	 * predicate body that downstream verifiers might trust as authoritative.
+	 */
+	private static validatePatchworkAiAgentPredicate(p: Record<string, unknown>): boolean {
+		const isStr = (v: unknown, max = 4096) =>
+			typeof v === "string" && v.length > 0 && v.length <= max;
+		const isOptStr = (v: unknown, max = 4096) =>
+			v === null || isStr(v, max);
+		const isNonNegInt = (v: unknown) =>
+			typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 1e9;
+
+		// Closed-schema: reject any key not in the allowlist.
+		for (const k of Object.keys(p)) {
+			if (!RelayDaemon.PATCHWORK_PREDICATE_KEYS.has(k)) return false;
+		}
+
+		if (p.schema_version !== 1) return false;
+		if (!isStr(p.generated_at, 64)) return false;
+		if (!isStr(p.tool_version, 64)) return false;
+		if (!isStr(p.project_root)) return false;
+		if (!isStr(p.session_id, 256)) return false;
+		if (!isNonNegInt(p.session_events_count)) return false;
+		if (!isNonNegInt(p.session_events_since_last_commit)) return false;
+		if (!isOptStr(p.chain_tip_hash, 256)) return false;
+		if (typeof p.chain_valid !== "boolean") return false;
+		if (!isNonNegInt(p.chain_chained_events)) return false;
+		if (typeof p.pass !== "boolean") return false;
+		if (!isStr(p.policy_source)) return false;
+
+		if (p.risk_summary === null || typeof p.risk_summary !== "object" || Array.isArray(p.risk_summary)) return false;
+		const rs = p.risk_summary as Record<string, unknown>;
+		// Closed-schema on risk_summary too.
+		for (const k of Object.keys(rs)) {
+			if (!RelayDaemon.PATCHWORK_RISK_KEYS.has(k)) return false;
+		}
+		for (const k of ["critical", "high", "medium", "low", "none", "denials"] as const) {
+			if (!isNonNegInt(rs[k])) return false;
+		}
+
+		if (!Array.isArray(p.failure_reasons)) return false;
+		if (p.failure_reasons.length > 64) return false;
+		for (const r of p.failure_reasons) {
+			if (!isStr(r, 256)) return false;
+		}
+
+		return true;
+	}
+
+	/** Closed-schema key allowlist for Patchwork AI-agent-session predicate. */
+	private static readonly PATCHWORK_PREDICATE_KEYS = new Set<string>([
+		"schema_version", "generated_at", "tool_version", "project_root",
+		"session_id", "session_events_count", "session_events_since_last_commit",
+		"chain_tip_hash", "chain_valid", "chain_chained_events",
+		"risk_summary", "policy_source", "pass", "failure_reasons",
+	]);
+
+	/** Closed-schema key allowlist for the nested risk_summary object. */
+	private static readonly PATCHWORK_RISK_KEYS = new Set<string>([
+		"critical", "high", "medium", "low", "none", "denials",
+		// `denials_high_risk_since_last_commit` is intentionally excluded:
+		// the bespoke CommitAttestationSchema marks it optional, but for the
+		// in-toto path we don't allow it through (callers haven't been
+		// emitting it inside the in-toto predicate).
 	]);
 
 	/**
