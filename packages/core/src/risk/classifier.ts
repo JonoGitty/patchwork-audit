@@ -1,5 +1,5 @@
 import type { Action, Risk, Target } from "../schema/event.js";
-import { SENSITIVE_GLOBS, matchesGlob } from "./sensitive.js";
+import { SENSITIVE_GLOBS, expandPathCandidates, matchesGlob } from "./sensitive.js";
 
 /**
  * Patterns that indicate dangerous commands.
@@ -99,8 +99,19 @@ export function classifyRisk(action: string, target?: Target): Risk {
 	if (target?.path || target?.abs_path) {
 		const filePath = target.path || target.abs_path || "";
 
-		// Check sensitive file patterns
-		if (SENSITIVE_GLOBS.some((glob) => matchesGlob(filePath, glob))) {
+		// Evaluate sensitivity against ALL plausible candidates (raw, lexical
+		// abs, and the realpath if the file exists). This closes the
+		// symlink-bypass: `ln -s ~/.ssh/id_rsa README.md` then `Read README.md`
+		// — without realpath the classifier only sees `README.md` and never
+		// flags `sensitive_path`. ANY candidate match is enough to flag.
+		const candidates = new Set<string>();
+		if (target.path) for (const c of expandPathCandidates(target.path)) candidates.add(c);
+		if (target.abs_path) for (const c of expandPathCandidates(target.abs_path)) candidates.add(c);
+
+		const isSensitive = Array.from(candidates).some((c) =>
+			SENSITIVE_GLOBS.some((glob) => matchesGlob(c, glob)),
+		);
+		if (isSensitive) {
 			flags.push("sensitive_path");
 			if (action === "file_read") {
 				level = raiseLevel(level, "high");
@@ -109,8 +120,11 @@ export function classifyRisk(action: string, target?: Target): Risk {
 			}
 		}
 
-		// Check config file patterns
-		if (CONFIG_FILE_PATTERNS.some((p) => filePath.includes(p))) {
+		// Check config file patterns (any candidate)
+		const isConfig = Array.from(candidates).some((c) =>
+			CONFIG_FILE_PATTERNS.some((p) => c.includes(p)),
+		);
+		if (isConfig) {
 			flags.push("config_file");
 			if (action !== "file_read") {
 				level = raiseLevel(level, "high");
