@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import YAML from "yaml";
 import { PolicySchema, type Policy } from "./engine.js";
@@ -20,9 +20,42 @@ const DEFAULT_SYSTEM_POLICY_PATH = process.platform === "darwin"
 		? join(process.env.PROGRAMDATA || "C:\\ProgramData", "Patchwork", "policy.yml")
 		: "/etc/patchwork/policy.yml";
 
-/** Resolved system policy path. Override via PATCHWORK_SYSTEM_POLICY_PATH env var for testing. */
+/**
+ * Resolved system policy path.
+ *
+ * `PATCHWORK_SYSTEM_POLICY_PATH` is honoured ONLY in test environments
+ * (`NODE_ENV=test`) or when the override target is owned by uid 0 and not
+ * world/group writable. Otherwise the env var is ignored — an attacker who
+ * controls the Patchwork process environment must not be able to swap in a
+ * permissive "system" policy and bypass user/project enforcement.
+ */
 export function getSystemPolicyPath(): string {
-	return process.env.PATCHWORK_SYSTEM_POLICY_PATH || DEFAULT_SYSTEM_POLICY_PATH;
+	const override = process.env.PATCHWORK_SYSTEM_POLICY_PATH;
+	if (override) {
+		if (process.env.NODE_ENV === "test") return override;
+		if (isRootOwnedAndProtected(override)) return override;
+		// Override is set but not safe — silently fall back to the platform default.
+		// (We don't throw because the relay/agent processes call this on every
+		// hook and must not crash if the env was set by accident.)
+	}
+	return DEFAULT_SYSTEM_POLICY_PATH;
+}
+
+/**
+ * True only if the path exists, is owned by uid 0 (root), and is not
+ * group/world-writable. This matches the trust model of `/etc/...` system
+ * configuration — a non-root user cannot inject a permissive override.
+ */
+function isRootOwnedAndProtected(path: string): boolean {
+	try {
+		const st = statSync(path);
+		if (st.uid !== 0) return false;
+		// Reject if group or other has write permission (modes &020 or &002)
+		if ((st.mode & 0o022) !== 0) return false;
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /** Exported for display in settings/status. */

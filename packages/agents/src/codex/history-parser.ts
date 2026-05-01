@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+	type Action,
 	type AuditEvent,
 	classifyRisk,
 	generateEventId,
@@ -135,7 +136,7 @@ function convertCodexEntry(entry: CodexHistoryEntry): AuditEvent[] {
 	return events;
 }
 
-function mapCodexToolCall(call: CodexToolCall): { action: string; target: AuditEvent["target"] } | null {
+function mapCodexToolCall(call: CodexToolCall): { action: Action; target: AuditEvent["target"] } | null {
 	const name = (call.name || call.type || "").toLowerCase();
 	const input = call.input || {};
 

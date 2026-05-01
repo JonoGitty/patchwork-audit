@@ -1,4 +1,5 @@
 import {
+	type Action,
 	type AuditEvent,
 	type Store,
 	type Target,
@@ -308,6 +309,29 @@ function handlePreToolUse(store: Store, input: ClaudeCodeHookInput): ClaudeCodeH
 		type: mapped.target?.type || "file",
 		...mapped.target,
 	};
+
+	// Fail closed on malformed tool input. Policy rules can't reliably reject
+	// undefined targets (a path-glob can't match an undefined path), so a hook
+	// payload like `{file_path: {x: 1}}` would otherwise slip through any
+	// path-based deny list. Deny up front and log the malformed event so the
+	// audit trail captures the attempted bypass.
+	if (mapped.malformed) {
+		const event = buildEvent(input, {
+			action: mapped.action,
+			status: "denied",
+			target,
+			provenance: { hook_event: "PreToolUse", tool_name: toolName },
+		});
+		store.append(event);
+		fireWebhookAlert(event);
+		return {
+			hookSpecificOutput: {
+				hookEventName: "PreToolUse",
+				permissionDecision: "deny",
+				permissionDecisionReason: `[Patchwork] malformed tool input: ${mapped.malformed.reason}`,
+			},
+		};
+	}
 
 	const risk = classifyRisk(mapped.action, target);
 
@@ -670,7 +694,7 @@ function processTarget(target: Target | undefined, cwd: string): Target | undefi
 }
 
 interface PartialEvent {
-	action: string;
+	action: Action;
 	status?: AuditEvent["status"];
 	target?: Partial<Target>;
 	content?: AuditEvent["content"];
