@@ -1,3 +1,29 @@
+// Core (v0.6.11 — taint-aware policy enforcement substrate)
+export {
+	ToolEventSchema,
+	TaintSnapshotSchema,
+	ToolPhase,
+	SafetyMode,
+	ParseConfidence,
+	TaintKind,
+	type ToolEvent,
+	type TaintSnapshot,
+	type TaintSource,
+	type ParsedCommand,
+} from "./core/tool-event.js";
+export {
+	lookupToolRegistry,
+	listToolRegistry,
+	getMcpPrefixEntry,
+	type ToolRegistryEntry,
+} from "./core/tool-registry.js";
+export {
+	normalizeToolEvent,
+	POLICY_VERSION,
+	type NormalizeInput,
+	type NormalizeResult,
+} from "./core/normalize-tool-event.js";
+
 // Schema
 export {
 	AuditEventSchema,
