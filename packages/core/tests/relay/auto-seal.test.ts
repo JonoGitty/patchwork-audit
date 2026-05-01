@@ -11,9 +11,18 @@ import {
 } from "../../src/relay/auto-seal.js";
 import type { AutoSealConfig, WitnessConfig } from "../../src/relay/config.js";
 
+// Canonical fake tip hashes — `computeSealPayload` now requires the exact
+// `sha256:<64-hex>` shape so it can interpolate them unambiguously into the
+// colon-delimited seal payload.
+const TIP_DEFAULT = "sha256:" + "1".repeat(64);
+const TIP_AAA = "sha256:" + "a".repeat(64);
+const TIP_BBB = "sha256:" + "b".repeat(64);
+const TIP_FIRST = "sha256:" + "f".repeat(64);
+const TIP_SECOND = "sha256:" + "2".repeat(64);
+
 function makeSealState(overrides: Partial<SealState> = {}): SealState {
 	return {
-		chainTip: "sha256:abc123",
+		chainTip: TIP_DEFAULT,
 		eventCount: 10,
 		lastSealEventCount: 0,
 		lastSealAt: null,
@@ -78,7 +87,7 @@ describe("Auto-Seal", () => {
 			const state = makeSealState();
 			const seal = performSeal(state, keyringPath, sealsPath);
 
-			expect(seal.tip_hash).toBe("sha256:abc123");
+			expect(seal.tip_hash).toBe(TIP_DEFAULT);
 			expect(seal.chained_events).toBe(10);
 			expect(seal.signature).toMatch(/^hmac-sha256:/);
 			expect(seal.key_id).toBeDefined();
@@ -92,17 +101,17 @@ describe("Auto-Seal", () => {
 			expect(existsSync(sealsPath)).toBe(true);
 			const content = readFileSync(sealsPath, "utf-8").trim();
 			const parsed = JSON.parse(content);
-			expect(parsed.tip_hash).toBe("sha256:abc123");
+			expect(parsed.tip_hash).toBe(TIP_DEFAULT);
 		});
 
 		it("appends multiple seals", () => {
-			performSeal(makeSealState({ chainTip: "sha256:aaa", eventCount: 5 }), keyringPath, sealsPath);
-			performSeal(makeSealState({ chainTip: "sha256:bbb", eventCount: 10 }), keyringPath, sealsPath);
+			performSeal(makeSealState({ chainTip: TIP_AAA, eventCount: 5 }), keyringPath, sealsPath);
+			performSeal(makeSealState({ chainTip: TIP_BBB, eventCount: 10 }), keyringPath, sealsPath);
 
 			const lines = readFileSync(sealsPath, "utf-8").trim().split("\n");
 			expect(lines).toHaveLength(2);
-			expect(JSON.parse(lines[0]).tip_hash).toBe("sha256:aaa");
-			expect(JSON.parse(lines[1]).tip_hash).toBe("sha256:bbb");
+			expect(JSON.parse(lines[0]).tip_hash).toBe(TIP_AAA);
+			expect(JSON.parse(lines[1]).tip_hash).toBe(TIP_BBB);
 		});
 
 		it("throws when no chain tip", () => {
@@ -111,8 +120,8 @@ describe("Auto-Seal", () => {
 		});
 
 		it("uses same key across seals", () => {
-			const s1 = performSeal(makeSealState({ chainTip: "sha256:aaa" }), keyringPath, sealsPath);
-			const s2 = performSeal(makeSealState({ chainTip: "sha256:bbb" }), keyringPath, sealsPath);
+			const s1 = performSeal(makeSealState({ chainTip: TIP_AAA }), keyringPath, sealsPath);
+			const s2 = performSeal(makeSealState({ chainTip: TIP_BBB }), keyringPath, sealsPath);
 			expect(s1.key_id).toBe(s2.key_id);
 		});
 	});
@@ -123,12 +132,12 @@ describe("Auto-Seal", () => {
 		});
 
 		it("returns the last seal", () => {
-			performSeal(makeSealState({ chainTip: "sha256:first", eventCount: 5 }), keyringPath, sealsPath);
-			performSeal(makeSealState({ chainTip: "sha256:second", eventCount: 10 }), keyringPath, sealsPath);
+			performSeal(makeSealState({ chainTip: TIP_FIRST, eventCount: 5 }), keyringPath, sealsPath);
+			performSeal(makeSealState({ chainTip: TIP_SECOND, eventCount: 10 }), keyringPath, sealsPath);
 
 			const last = readLastSeal(sealsPath);
 			expect(last).not.toBeNull();
-			expect(last!.tip_hash).toBe("sha256:second");
+			expect(last!.tip_hash).toBe(TIP_SECOND);
 			expect(last!.chained_events).toBe(10);
 		});
 	});

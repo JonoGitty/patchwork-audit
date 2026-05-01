@@ -69,3 +69,35 @@ export function verifyAttestation(
 	if (expected.length !== signature.length) return false;
 	return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
 }
+
+/**
+ * Full-attestation verifier — verifies BOTH the signature AND that the stored
+ * `payload_hash` matches the canonical payload. Use this in preference to
+ * raw `verifyAttestation()` when the artifact stores a `payload_hash` field.
+ *
+ * Without this check, an attacker can mutate `payload_hash` (which is excluded
+ * from the signed payload by design — see EXCLUDED_FIELDS) without
+ * invalidating the signature. Downstream systems that key on or display
+ * `payload_hash` would then trust an attacker-chosen value while the
+ * signature still verifies.
+ *
+ * The artifact MUST carry a string `payload_hash`. A missing or non-string
+ * value is treated as a verification failure, not a "skip the check" — the
+ * earlier conditional silently degraded to plain `verifyAttestation()` when
+ * an attacker simply deleted the field.
+ *
+ * Returns false if `payload_hash` is missing/wrong type, mismatches, or the
+ * signature doesn't verify. Returns true only if all three check out.
+ */
+export function verifyAttestationArtifact(
+	artifact: Record<string, unknown>,
+	signature: string,
+	key: Buffer,
+): boolean {
+	const storedHash = artifact.payload_hash;
+	if (typeof storedHash !== "string") return false;
+	const payload = buildAttestationPayload(artifact);
+	const expectedHash = hashAttestationPayload(payload);
+	if (storedHash !== expectedHash) return false;
+	return verifyAttestation(payload, signature, key);
+}

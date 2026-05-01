@@ -77,7 +77,14 @@ export function validateWitnessResponse(
 		// Validate that it's a valid ISO datetime
 		const ts = Date.parse(resp.witnessed_at);
 		if (Number.isNaN(ts)) {
-			return { error: `Invalid witnessed_at: "${resp.witnessed_at}" is not a valid ISO datetime` };
+			// Strip control characters (incl. ANSI escapes / NULs / CR-LF) before
+			// reflecting the untrusted value into the error string. Otherwise a
+			// hostile witness can inject terminal escape sequences or log-line
+			// breaks into anything that surfaces this error (CI annotations,
+			// stderr, dashboards).
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-char strip
+			const safe = resp.witnessed_at.replace(/[\x00-\x1f\x7f-\x9f]/g, "?");
+			return { error: `Invalid witnessed_at: ${JSON.stringify(safe)} is not a valid ISO datetime` };
 		}
 		witnessedAt = resp.witnessed_at;
 	} else if (fallbackWitnessedAt !== undefined) {

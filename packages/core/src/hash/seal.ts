@@ -26,15 +26,36 @@ export interface SealRecord {
 	key_id?: string;
 }
 
+/** Match `sha256:<64-hex>` (rejects ambiguous payloads with embedded colons). */
+const TIP_HASH_RE = /^sha256:[0-9a-f]{64}$/;
+/** Match RFC 3339 / ISO 8601 timestamps as JS produces with toISOString(). */
+const SEALED_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+/** Match a keyring key id derived by deriveSealKeyId() — first 16 hex chars. */
+const KEY_ID_RE = /^[0-9a-f]{16,64}$/;
+
 /**
  * Compute the deterministic seal payload from chain state.
  * This is the exact string that gets HMAC-signed.
+ *
+ * Inputs are validated so the colon-delimited format remains unambiguous —
+ * a payload like `sha256:abc:7:x` cannot be passed as `tipHash` and collide
+ * with `(tipHash="sha256:abc", sealedAt="x")`. Keep this contract: any change
+ * to the format must bump the version tag.
  */
 export function computeSealPayload(
 	tipHash: string,
 	chainedEvents: number,
 	sealedAt: string,
 ): string {
+	if (!TIP_HASH_RE.test(tipHash)) {
+		throw new Error(`computeSealPayload: tipHash must match ${TIP_HASH_RE} (got ${JSON.stringify(tipHash)})`);
+	}
+	if (!Number.isInteger(chainedEvents) || chainedEvents < 0) {
+		throw new Error(`computeSealPayload: chainedEvents must be a non-negative integer (got ${chainedEvents})`);
+	}
+	if (!SEALED_AT_RE.test(sealedAt)) {
+		throw new Error(`computeSealPayload: sealedAt must be RFC 3339 (got ${JSON.stringify(sealedAt)})`);
+	}
 	return `patchwork-seal:v1:${tipHash}:${chainedEvents}:${sealedAt}`;
 }
 
@@ -125,6 +146,13 @@ export function ensureKeyring(keyringDir: string): { keyId: string; key: Buffer 
 	if (existsSync(activePath)) {
 		reconcileMode(activePath, KEY_MODE);
 		const keyId = readFileSync(activePath, "utf-8").trim();
+		// Reject anything that doesn't look like one of our derived hex IDs
+		// before joining it into a path — defence in depth in case the keyring
+		// directory permissions are loosened or the file is restored from a
+		// hostile backup.
+		if (!KEY_ID_RE.test(keyId)) {
+			throw new Error(`Active key id in ${activePath} is malformed: ${JSON.stringify(keyId)}`);
+		}
 		const keyPath = join(keyringDir, `${keyId}.key`);
 		if (!existsSync(keyPath)) {
 			throw new Error(`Active key ${keyId} not found in keyring at ${keyPath}`);
@@ -140,8 +168,16 @@ export function ensureKeyring(keyringDir: string): { keyId: string; key: Buffer 
  * Load a key by its ID from the keyring directory.
  * Throws if the key file does not exist.
  * Reconciles file permissions on read.
+ *
+ * The keyId is validated as hex before being joined into the path so a
+ * malicious seal/attestation cannot escape the keyring with a value like
+ * `../../tmp/known` and force verification against an attacker-controlled
+ * key.
  */
 export function loadKeyById(keyringDir: string, keyId: string): Buffer {
+	if (!KEY_ID_RE.test(keyId)) {
+		throw new Error(`loadKeyById: keyId must match ${KEY_ID_RE} (got ${JSON.stringify(keyId)})`);
+	}
 	const keyPath = join(keyringDir, `${keyId}.key`);
 	if (!existsSync(keyPath)) {
 		throw new Error(`Key ${keyId} not found in keyring at ${keyPath}`);

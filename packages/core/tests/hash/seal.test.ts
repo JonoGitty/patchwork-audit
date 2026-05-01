@@ -27,29 +27,36 @@ import {
 // Windows does not enforce POSIX file permissions (chmod 0o600/0o700 is a no-op)
 const isWindows = process.platform === "win32";
 
+// Canonical fake tip hashes — must be the exact `sha256:<64-hex>` shape that
+// computeSealPayload accepts. Short stubs like `sha256:abc` are now rejected
+// because they are ambiguous when interpolated into the colon-delimited payload.
+const TIP_A = "sha256:" + "a".repeat(64);
+const TIP_B = "sha256:" + "b".repeat(64);
+const TIP_OTHER = "sha256:" + "c".repeat(64);
+
 describe("computeSealPayload", () => {
 	it("returns a deterministic versioned string", () => {
-		const payload = computeSealPayload("sha256:abc", 42, "2026-01-01T00:00:00.000Z");
-		expect(payload).toBe("patchwork-seal:v1:sha256:abc:42:2026-01-01T00:00:00.000Z");
+		const payload = computeSealPayload(TIP_A, 42, "2026-01-01T00:00:00.000Z");
+		expect(payload).toBe(`patchwork-seal:v1:${TIP_A}:42:2026-01-01T00:00:00.000Z`);
 	});
 
 	it("is deterministic across calls", () => {
-		const a = computeSealPayload("sha256:tip", 10, "2026-06-01T12:00:00.000Z");
-		const b = computeSealPayload("sha256:tip", 10, "2026-06-01T12:00:00.000Z");
+		const a = computeSealPayload(TIP_B, 10, "2026-06-01T12:00:00.000Z");
+		const b = computeSealPayload(TIP_B, 10, "2026-06-01T12:00:00.000Z");
 		expect(a).toBe(b);
 	});
 
 	it("changes when any input changes", () => {
-		const base = computeSealPayload("sha256:tip", 10, "2026-01-01T00:00:00.000Z");
-		expect(computeSealPayload("sha256:other", 10, "2026-01-01T00:00:00.000Z")).not.toBe(base);
-		expect(computeSealPayload("sha256:tip", 11, "2026-01-01T00:00:00.000Z")).not.toBe(base);
-		expect(computeSealPayload("sha256:tip", 10, "2026-01-01T00:00:01.000Z")).not.toBe(base);
+		const base = computeSealPayload(TIP_B, 10, "2026-01-01T00:00:00.000Z");
+		expect(computeSealPayload(TIP_OTHER, 10, "2026-01-01T00:00:00.000Z")).not.toBe(base);
+		expect(computeSealPayload(TIP_B, 11, "2026-01-01T00:00:00.000Z")).not.toBe(base);
+		expect(computeSealPayload(TIP_B, 10, "2026-01-01T00:00:01.000Z")).not.toBe(base);
 	});
 });
 
 describe("signSeal / verifySeal", () => {
 	const key = randomBytes(32);
-	const payload = "patchwork-seal:v1:sha256:abc:5:2026-01-01T00:00:00.000Z";
+	const payload = `patchwork-seal:v1:${TIP_A}:5:2026-01-01T00:00:00.000Z`;
 
 	it("produces hmac-sha256-prefixed signature", () => {
 		const sig = signSeal(payload, key);
@@ -255,9 +262,19 @@ describe("ensureKeyring", () => {
 	it("throws when ACTIVE points to a missing key file", () => {
 		const keyringDir = join(tmpDir, "seal");
 		mkdirSync(keyringDir, { recursive: true, mode: 0o700 });
-		writeFileSync(join(keyringDir, "ACTIVE"), "nonexistent_id\n", { mode: 0o600 });
+		// Well-formed key id (passes regex) so we exercise the missing-file
+		// branch, not the new format-validation guard.
+		writeFileSync(join(keyringDir, "ACTIVE"), "0123456789abcdef\n", { mode: 0o600 });
 
 		expect(() => ensureKeyring(keyringDir)).toThrow("not found in keyring");
+	});
+
+	it("rejects ACTIVE pointers that aren't hex key IDs", () => {
+		const keyringDir = join(tmpDir, "seal");
+		mkdirSync(keyringDir, { recursive: true, mode: 0o700 });
+		writeFileSync(join(keyringDir, "ACTIVE"), "../etc/passwd\n", { mode: 0o600 });
+
+		expect(() => ensureKeyring(keyringDir)).toThrow("malformed");
 	});
 
 	it.skipIf(isWindows)("reconciles insecure keyring dir permissions", () => {
@@ -293,7 +310,20 @@ describe("loadKeyById", () => {
 		const keyringDir = join(tmpDir, "seal");
 		mkdirSync(keyringDir, { recursive: true, mode: 0o700 });
 
-		expect(() => loadKeyById(keyringDir, "nonexistent123")).toThrow("not found in keyring");
+		// Use a well-formed but unused key id so we exercise the missing-file
+		// branch, not the new format-validation guard.
+		expect(() => loadKeyById(keyringDir, "0123456789abcdef")).toThrow("not found in keyring");
+	});
+
+	it("rejects malformed key IDs before touching the filesystem", () => {
+		const keyringDir = join(tmpDir, "seal");
+		mkdirSync(keyringDir, { recursive: true, mode: 0o700 });
+
+		// Path traversal / shell metachars / wrong length must be caught by the
+		// regex guard, not silently joined into the keyring path.
+		expect(() => loadKeyById(keyringDir, "../etc/passwd")).toThrow("keyId must match");
+		expect(() => loadKeyById(keyringDir, "nonexistent_id")).toThrow("keyId must match");
+		expect(() => loadKeyById(keyringDir, "")).toThrow("keyId must match");
 	});
 
 	it.skipIf(isWindows)("reconciles insecure key file permissions", () => {
