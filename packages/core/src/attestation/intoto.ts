@@ -191,17 +191,49 @@ export async function buildDsseEnvelope(
 }
 
 /**
+ * Reject envelopes whose `payload` field is not canonical base64.
+ *
+ * Node's `Buffer.from(s, "base64")` is permissive: it silently ignores most
+ * invalid characters and accepts non-canonical padding. That makes DSSE
+ * envelopes malleable — two textually different `payload` fields can decode
+ * to the same bytes, so the same signature verifies against both. Anything
+ * downstream that hashes or stores the envelope (transparency logs, cache
+ * keys, audit comparisons) would treat them as distinct artefacts.
+ *
+ * Canonical base64 here means: only `[A-Za-z0-9+/]` chars + 0..2 trailing `=`,
+ * and re-encoding the decoded bytes round-trips to the original string.
+ */
+function decodeCanonicalBase64Payload(payload: string): Buffer {
+	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload)) {
+		throw new Error("DSSE payload is not canonical base64 (illegal characters)");
+	}
+	const decoded = Buffer.from(payload, "base64");
+	if (decoded.toString("base64") !== payload) {
+		throw new Error("DSSE payload is not canonical base64 (non-roundtrip)");
+	}
+	return decoded;
+}
+
+/**
  * Verify a DSSE envelope's signature(s). Returns true if AT LEAST ONE
  * signature verifies — DSSE envelopes can carry multiple signatures (e.g.
  * threshold signing) and any one valid signature is sufficient unless the
  * caller wires stricter policy on top.
+ *
+ * Rejects malformed/non-canonical base64 payloads up front (envelope
+ * malleability defence).
  */
 export async function verifyDsseEnvelope(
 	envelope: DsseEnvelope,
 	verifyFn: DsseVerifyFn,
 ): Promise<boolean> {
 	if (!envelope.signatures || envelope.signatures.length === 0) return false;
-	const payloadBytes = Buffer.from(envelope.payload, "base64");
+	let payloadBytes: Buffer;
+	try {
+		payloadBytes = decodeCanonicalBase64Payload(envelope.payload);
+	} catch {
+		return false;
+	}
 	const pae = dssePAE(envelope.payloadType, payloadBytes);
 	for (const sig of envelope.signatures) {
 		try {
@@ -215,7 +247,9 @@ export async function verifyDsseEnvelope(
 
 /**
  * Decode the in-toto Statement out of a DSSE envelope. Throws if the payload
- * is not the expected payloadType (defends against typed-payload confusion).
+ * is not the expected payloadType (defends against typed-payload confusion)
+ * or if the payload base64 is not canonical (defends against envelope
+ * malleability).
  */
 export function decodeStatement<P = unknown>(envelope: DsseEnvelope): InTotoStatement<P> {
 	if (envelope.payloadType !== DSSE_PAYLOAD_TYPE) {
@@ -223,7 +257,7 @@ export function decodeStatement<P = unknown>(envelope: DsseEnvelope): InTotoStat
 			`unexpected DSSE payloadType: ${envelope.payloadType} (expected ${DSSE_PAYLOAD_TYPE})`,
 		);
 	}
-	const json = Buffer.from(envelope.payload, "base64").toString("utf8");
+	const json = decodeCanonicalBase64Payload(envelope.payload).toString("utf8");
 	return JSON.parse(json) as InTotoStatement<P>;
 }
 
@@ -231,8 +265,11 @@ export function decodeStatement<P = unknown>(envelope: DsseEnvelope): InTotoStat
  * Compute the SHA-256 digest of a DSSE envelope's payload (in-toto Statement
  * bytes). Useful as a stable identifier for the attestation across systems —
  * Rekor uses the same digest as the Merkle leaf hash for in-toto entries.
+ *
+ * Throws on non-canonical base64 so two textually different envelopes can
+ * never produce the same digest.
  */
 export function digestStatement(envelope: DsseEnvelope): string {
-	const payloadBytes = Buffer.from(envelope.payload, "base64");
+	const payloadBytes = decodeCanonicalBase64Payload(envelope.payload);
 	return `sha256:${createHash("sha256").update(payloadBytes).digest("hex")}`;
 }
