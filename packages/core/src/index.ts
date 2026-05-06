@@ -24,6 +24,21 @@ export {
 	type NormalizeResult,
 } from "./core/normalize-tool-event.js";
 
+// Sinks (v0.6.11 commit 2 — Claude-native sink taxonomy)
+export {
+	classifyToolEvent,
+	highestSeverity,
+	PERSISTENCE_PATTERNS,
+	SECRET_PATTERNS,
+	expandHomePattern,
+	SINK_CLASSES,
+	type PersistencePattern,
+	type SecretPattern,
+	type SinkClass,
+	type SinkSeverity,
+	type SinkMatch,
+} from "./sinks/index.js";
+
 // Schema
 export {
 	AuditEventSchema,
