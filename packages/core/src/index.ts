@@ -24,6 +24,22 @@ export {
 	type NormalizeResult,
 } from "./core/normalize-tool-event.js";
 
+// URL canonicalization + allowlist (v0.6.11 commit 5 — single decision fn)
+export {
+	canonicalizeUrl,
+	evaluateAllowlist,
+	decideUrlPolicy,
+	type CanonicalUrl,
+	type CanonicalReject,
+	type CanonicalResult,
+	type CanonicalFlags,
+	type RejectReason,
+	type AllowlistEntry,
+	type AllowlistEvalOptions,
+	type AllowlistDecision,
+	type UrlPolicyDecision,
+} from "./url/index.js";
+
 // Taint engine (v0.6.11 commit 3 — multi-kind in-memory taint state)
 export {
 	createSnapshot,
