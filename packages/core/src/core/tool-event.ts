@@ -31,10 +31,33 @@ export const TaintKind = z.enum([
 ]);
 export type TaintKind = z.infer<typeof TaintKind>;
 
+/**
+ * `TaintKind` is declared above; we re-state the literal union here as a Zod
+ * schema for the optional `cleared.scope` field on a `TaintSource`. Keeping
+ * it inline (rather than re-importing TaintKind) avoids a circular schema
+ * definition and keeps the source-of-truth in this file.
+ */
+const TaintKindEnumSchema = TaintKind;
+
+/**
+ * `cleared` records out-of-band declassification. The taint engine in
+ * `src/taint/` sets this when the user runs `patchwork clear-taint`
+ * (commit 9). Sources are NEVER removed from the snapshot — they are
+ * marked cleared so the audit trail remains intact and a stale
+ * declassification can be diffed against the current chain. Query helpers
+ * filter cleared sources out of "active" results by default.
+ */
+const TaintClearedSchema = z.object({
+	ts: z.number(),
+	method: z.enum(["out_of_band", "config_trusted"]),
+	scope: z.array(TaintKindEnumSchema),
+});
+
 const TaintSourceSchema = z.object({
 	ts: z.number(),
 	ref: z.string(),
 	content_hash: z.string(),
+	cleared: TaintClearedSchema.optional(),
 });
 export type TaintSource = z.infer<typeof TaintSourceSchema>;
 

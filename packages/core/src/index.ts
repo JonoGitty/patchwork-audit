@@ -24,6 +24,27 @@ export {
 	type NormalizeResult,
 } from "./core/normalize-tool-event.js";
 
+// Taint engine (v0.6.11 commit 3 — multi-kind in-memory taint state)
+export {
+	createSnapshot,
+	registerTaint,
+	registerGeneratedFile,
+	clearTaint,
+	forgetGeneratedFile,
+	hasAnyTaint,
+	hasKind,
+	getActiveSources,
+	getAllSources,
+	isFileGenerated,
+	getGeneratedFileSources,
+	isPathUntrustedRepo,
+	ALL_TAINT_KINDS,
+	RAISES_FOR_TOOL,
+	FORCE_UNTRUSTED_PATTERNS,
+	type ClearTaintOptions,
+	type TrustClassifierOptions,
+} from "./taint/index.js";
+
 // Sinks (v0.6.11 commit 2 — Claude-native sink taxonomy)
 export {
 	classifyToolEvent,
