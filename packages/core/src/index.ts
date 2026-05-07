@@ -24,6 +24,28 @@ export {
 	type NormalizeResult,
 } from "./core/normalize-tool-event.js";
 
+// Shell recognizer (v0.6.11 commit 4 — conservative parser, ParseUnknown safe)
+export {
+	parseShellCommand,
+	tokenize,
+	indicatorsForLeaf,
+	indicatorForRedirect,
+	combineChildrenIndicators,
+	INTERPRETER_NAMES,
+	FETCH_TOOL_NAMES,
+	COMPOUND_PREFIXES,
+	INLINE_EVAL_FLAGS,
+	type Token,
+	type TokenKind,
+	type Redirect,
+	type RedirectKind,
+	type ParsedCommand as ShellParsedCommand,
+	type ParsedOp,
+	type SinkIndicator,
+	type SinkIndicatorKind,
+	type ParseConfidence as ShellParseConfidence,
+} from "./shell/index.js";
+
 // URL canonicalization + allowlist (v0.6.11 commit 5 — single decision fn)
 export {
 	canonicalizeUrl,
