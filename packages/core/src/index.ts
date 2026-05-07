@@ -24,6 +24,24 @@ export {
 	type NormalizeResult,
 } from "./core/normalize-tool-event.js";
 
+// Git remote resolution (v0.6.11 commit 6 — configured-remote URL extraction)
+export {
+	parseGitConfig,
+	getConfigValue,
+	getConfigValues,
+	mergeGitConfig,
+	configFromFlat,
+	resolveGitRemote,
+	parseGitArgv,
+	extractMutationsFromArgv,
+	type GitConfig,
+	type ResolveInput,
+	type ResolveResult,
+	type ResolveSource,
+	type AppliedRewrite,
+	type ParsedGitArgv,
+} from "./git/index.js";
+
 // Shell recognizer (v0.6.11 commit 4 — conservative parser, ParseUnknown safe)
 export {
 	parseShellCommand,
