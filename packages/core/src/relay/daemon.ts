@@ -31,6 +31,7 @@ import {
 	writeFileSync,
 	writeSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname } from "node:path";
 import { AuditEventSchema } from "../schema/event.js";
 import { computeEventHash } from "../hash/chain.js";
@@ -204,6 +205,14 @@ export class RelayDaemon {
 				this.log(`SERVER ERROR: ${err.message}`);
 			});
 
+			// Load config BEFORE listen so socket_group is available at
+			// the chmod/chgrp step below. Previously this ran after
+			// listen, which meant the initial 0660 chmod always landed
+			// on the daemon's default group (root:wheel on darwin) —
+			// fine for root and wheel, EACCES for everyone else.
+			const { config, source } = loadRelayConfig(this.configPath);
+			this.relayConfig = config;
+
 			this.server.listen(this.socketPath, () => {
 				// SECURITY: previously chmod 0777 — that lets any local user
 				// send `sign` requests and obtain signatures from the
@@ -219,6 +228,38 @@ export class RelayDaemon {
 					// May fail in non-root test environments
 				}
 
+				// If the config names a `socket_group`, chgrp the socket
+				// so hook processes running as that group can connect.
+				// Without this, the daemon's default group (`wheel` on
+				// darwin) silently locks out every non-wheel user, and
+				// the relay-divergence marker fills with `connect EACCES`
+				// errors that look like a connectivity bug.
+				//
+				// The config-loaded value is regex-validated in
+				// `loadRelayConfig` so it can only contain
+				// `[A-Za-z_][A-Za-z0-9_-]{0,31}` — no shell metacharacters
+				// reach the `chgrp` argv even with array-form spawnSync.
+				const sg = this.relayConfig?.socket_group;
+				if (sg) {
+					try {
+						const r = spawnSync(
+							"/usr/bin/chgrp",
+							[sg, this.socketPath],
+							{ encoding: "utf-8" },
+						);
+						if (r.status !== 0) {
+							this.log(
+								`WARNING: chgrp ${sg} ${this.socketPath} failed: ${r.stderr?.trim() || `status ${r.status}`}`,
+							);
+						} else {
+							this.log(`Socket group set to ${sg}`);
+						}
+					} catch (err) {
+						const msg = err instanceof Error ? err.message : String(err);
+						this.log(`WARNING: chgrp failed: ${msg}`);
+					}
+				}
+
 				// Write PID file
 				try {
 					writeFileSync(this.pidPath, String(process.pid), { mode: 0o644 });
@@ -227,10 +268,6 @@ export class RelayDaemon {
 				}
 
 				this.log(`Relay daemon listening on ${this.socketPath} (pid=${process.pid})`);
-
-				// Load config
-				const { config, source } = loadRelayConfig(this.configPath);
-				this.relayConfig = config;
 				this.log(`Config loaded from ${source}`);
 
 				// Recover seal state
