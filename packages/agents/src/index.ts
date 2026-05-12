@@ -35,6 +35,15 @@ export {
 	getTaintSnapshotPath,
 } from "./claude-code/taint-store.js";
 
+// Trust store (v0.6.11 commit 9 / R2-003)
+export {
+	getTrustFilePath,
+	loadTrustStore,
+	saveTrustStore,
+	getTrustedPathsForRepo,
+	type TrustStore,
+} from "./claude-code/trust-store.js";
+
 // Approval store (v0.6.11 commit 9)
 export {
 	canonicalKey,

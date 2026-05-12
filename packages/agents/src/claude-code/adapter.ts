@@ -37,6 +37,7 @@ import {
 	withSessionLock,
 	writeTaintSnapshot,
 } from "./taint-store.js";
+import { getTrustedPathsForRepo } from "./trust-store.js";
 import {
 	decidePreToolUse,
 	type PreToolDecision,
@@ -494,8 +495,14 @@ function handlePreToolUse(store: Store, input: ClaudeCodeHookInput): ClaudeCodeH
 			taintDecision.verdict === "approval_required"
 				? "[Patchwork] approval required"
 				: "[Patchwork] denied";
+		// R2-001: do NOT include a copy-pasteable approve command in
+		// the deny reason. If the agent can read its own denial, it
+		// can run `patchwork approve <id>` itself — defeating the
+		// human gate. Instead, instruct the agent to ASK the user to
+		// run it. The `patchwork approve` CLI is also TTY-gated so
+		// even if the agent runs it, the CLI itself refuses.
 		const approveHint = pendingId
-			? `\n  Run: patchwork approve ${pendingId}`
+			? `\n  Ask the human user to run \`patchwork approve ${pendingId}\` in their own terminal, then retry.`
 			: "";
 		return {
 			hookSpecificOutput: {
@@ -951,42 +958,14 @@ function mergeTrustedPaths(
 	systemTrusted: readonly string[],
 	cwd: string,
 ): readonly string[] {
+	// R2-003: trust overlay now comes from the USER-LEVEL store at
+	// `~/.patchwork/trusted-repos.yml`, NOT from the repo. A hostile
+	// project cannot commit its own trust config — only the user, at
+	// an interactive terminal via `patchwork trust-repo-config`, can.
+	const userTrusted = getTrustedPathsForRepo(cwd);
 	const merged = new Set(systemTrusted);
-	const projectPath = join(cwd, ".patchwork", "policy.yml");
-	if (existsSync(projectPath)) {
-		try {
-			const raw = readFileSync(projectPath, "utf-8");
-			const parsed = loadActivePolicyYamlSafe(raw);
-			if (parsed && Array.isArray(parsed.trusted_paths)) {
-				for (const p of parsed.trusted_paths) {
-					if (typeof p === "string") merged.add(p);
-				}
-			}
-		} catch {
-			// Don't let a malformed project policy crash hooks — just
-			// fall back to whatever the system policy contains.
-		}
-	}
+	for (const p of userTrusted) merged.add(p);
 	return [...merged];
-}
-
-/** Tiny YAML-or-JSON reader limited to what we need from policy.yml's
- *  trusted_paths field. Avoids pulling the full Policy schema validation
- *  in the hook hot path. */
-function loadActivePolicyYamlSafe(raw: string): { trusted_paths?: unknown } | null {
-	try {
-		// Try JSON first (zero deps), then defer to yaml only if needed.
-		return JSON.parse(raw);
-	} catch {
-		// not JSON — fall through
-	}
-	try {
-		// Lazy require to avoid making `yaml` a hot-path import.
-		const yamlMod = require("yaml") as typeof import("yaml");
-		return yamlMod.parse(raw) as { trusted_paths?: unknown };
-	} catch {
-		return null;
-	}
 }
 
 /**

@@ -6,6 +6,7 @@ import {
 	writeApprovedToken,
 	DEFAULT_APPROVAL_TTL_MS,
 } from "@patchwork/agents";
+import { requireHumanContext } from "../lib/require-human-context.js";
 
 /**
  * `patchwork approve` — out-of-band approval for actions the PreToolUse
@@ -30,6 +31,7 @@ export const approveCommand = new Command("approve")
 		"5",
 	)
 	.action((requestId: string | undefined, opts: { ttl: string }) => {
+		requireHumanContext("approve");
 		if (!requestId) {
 			const pending = listPendingRequests();
 			if (pending.length === 0) {

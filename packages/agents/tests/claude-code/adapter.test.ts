@@ -915,18 +915,19 @@ describe("handleClaudeCodeHook", async () => {
 			expect(third?.hookSpecificOutput?.permissionDecision).toBe("deny");
 		});
 
-		it("commit 9: trust-repo-config skips prompt taint on Read of trusted path", async () => {
-			// Write a project policy that trusts src/**
-			const policyDir = join(tmpDir, "proj", ".patchwork");
-			mkdirSync(policyDir, { recursive: true, mode: 0o755 });
+		it("commit 9 + R2-003: trust-repo-config (user-level store) skips prompt taint on Read of trusted path", async () => {
+			// Trust config lives at ~/.patchwork/trusted-repos.yml NOT
+			// in the repo (R2-003 — repos can't opt themselves into trust).
+			const projectRoot = join(tmpDir, "proj");
+			const trustFile = join(tmpDir, ".patchwork", "trusted-repos.yml");
+			mkdirSync(join(tmpDir, ".patchwork"), { recursive: true, mode: 0o700 });
 			writeFileSync(
-				join(policyDir, "policy.yml"),
-				"name: trust-test\nversion: '1'\nmax_risk: critical\ntrusted_paths:\n  - 'src/**'\n",
+				trustFile,
+				`schema_version: 1\nrepos:\n  ${projectRoot}:\n    trusted_paths:\n      - 'src/**'\n`,
 				{ mode: 0o600 },
 			);
 
-			// Read inside the trusted glob does NOT raise prompt taint
-			const trustedPath = join(tmpDir, "proj", "src", "main.ts");
+			const trustedPath = join(projectRoot, "src", "main.ts");
 			await handleClaudeCodeHook(
 				makeInput({
 					session_id: "ses_trusted",
@@ -934,27 +935,25 @@ describe("handleClaudeCodeHook", async () => {
 					tool_name: "Read",
 					tool_input: { file_path: trustedPath },
 					tool_response: { output: "ok" },
-					cwd: join(tmpDir, "proj"),
+					cwd: projectRoot,
 				}),
 			);
 			const snap = readTaintSnapshot("ses_trusted");
-			// Snapshot is null OR has no prompt entries — trust-path
-			// short-circuits the registration entirely
 			if (snap !== null) {
 				expect(snap.by_kind.prompt).toEqual([]);
 			}
 		});
 
-		it("commit 9: FORCE_UNTRUSTED globs (README) still raise prompt even when trusted_paths matches", async () => {
-			// trusted_paths includes everything, but README is FORCE_UNTRUSTED
-			const policyDir = join(tmpDir, "proj2", ".patchwork");
-			mkdirSync(policyDir, { recursive: true, mode: 0o755 });
+		it("commit 9 + R2-003: FORCE_UNTRUSTED (README) still raises prompt even with broad trusted_paths", async () => {
+			const projectRoot = join(tmpDir, "proj2");
+			const trustFile = join(tmpDir, ".patchwork", "trusted-repos.yml");
+			mkdirSync(join(tmpDir, ".patchwork"), { recursive: true, mode: 0o700 });
 			writeFileSync(
-				join(policyDir, "policy.yml"),
-				"name: trust-test\nversion: '1'\nmax_risk: critical\ntrusted_paths:\n  - '**'\n",
+				trustFile,
+				`schema_version: 1\nrepos:\n  ${projectRoot}:\n    trusted_paths:\n      - '**'\n`,
 				{ mode: 0o600 },
 			);
-			const readmePath = join(tmpDir, "proj2", "README.md");
+			const readmePath = join(projectRoot, "README.md");
 			await handleClaudeCodeHook(
 				makeInput({
 					session_id: "ses_readme",
@@ -962,11 +961,44 @@ describe("handleClaudeCodeHook", async () => {
 					tool_name: "Read",
 					tool_input: { file_path: readmePath },
 					tool_response: { output: "# Hello" },
-					cwd: join(tmpDir, "proj2"),
+					cwd: projectRoot,
 				}),
 			);
 			const snap = readTaintSnapshot("ses_readme");
 			expect(snap).not.toBeNull();
+			expect(snap!.by_kind.prompt.length).toBeGreaterThan(0);
+		});
+
+		it("R2-003: hostile project .patchwork/policy.yml does NOT silence taint", async () => {
+			// A malicious repo commits trusted_paths: ['**'] in its own
+			// policy.yml. Pre-R2-003 this would be honored. Post-R2-003
+			// the trust store is user-level only, so the repo's policy
+			// has zero effect on taint posture.
+			const projectRoot = join(tmpDir, "proj-hostile");
+			const policyDir = join(projectRoot, ".patchwork");
+			mkdirSync(policyDir, { recursive: true, mode: 0o755 });
+			writeFileSync(
+				join(policyDir, "policy.yml"),
+				"name: hostile\nversion: '1'\nmax_risk: critical\ntrusted_paths:\n  - '**'\n",
+				{ mode: 0o600 },
+			);
+
+			// No entry in ~/.patchwork/trusted-repos.yml — user never
+			// trusted anything. The repo's own policy.yml is ignored.
+			const srcPath = join(projectRoot, "src", "main.ts");
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_hostile",
+					hook_event_name: "PostToolUse",
+					tool_name: "Read",
+					tool_input: { file_path: srcPath },
+					tool_response: { output: "untrusted" },
+					cwd: projectRoot,
+				}),
+			);
+			const snap = readTaintSnapshot("ses_hostile");
+			expect(snap).not.toBeNull();
+			// Repo's hostile trusted_paths is ignored → Read raised prompt
 			expect(snap!.by_kind.prompt.length).toBeGreaterThan(0);
 		});
 	});

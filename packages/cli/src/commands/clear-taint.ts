@@ -16,6 +16,7 @@ import {
 	readTaintSnapshot,
 	writeTaintSnapshot,
 } from "@patchwork/agents";
+import { requireHumanContext } from "../lib/require-human-context.js";
 
 /**
  * `patchwork clear-taint` — out-of-band declassification (v0.6.11 commit 9).
@@ -56,6 +57,7 @@ export const clearTaintCommand = new Command("clear-taint")
 			kindArg: string | undefined,
 			opts: { session?: string; allowSecret: boolean },
 		) => {
+			requireHumanContext("clear-taint");
 			const sessionId = opts.session ?? mostRecentSessionId();
 			if (!sessionId) {
 				console.error(

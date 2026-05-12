@@ -73,6 +73,68 @@ const EGRESS_KINDS: ReadonlySet<SinkIndicatorKind> = new Set<SinkIndicatorKind>(
 	"network_redirect",
 ]);
 
+/**
+ * Argv heads that dump the environment / secrets. R2-004 fix —
+ * `env | base64 | curl` was a documented A2 gap until GPT-5.5 pointed
+ * out that the env-dump-to-network pattern is recognizable WITHOUT
+ * URL allowlisting. These argv heads represent commands whose output
+ * commonly contains environment variables, secrets, or session
+ * state, and whose presence in a pipeline that egresses to a network
+ * sink is a direct exfiltration signal.
+ *
+ *   - `env` with no operand-style args = print env
+ *   - `printenv` = print env
+ *   - `export -p` = print exported vars
+ *   - `set` with no args = print all shell vars
+ *   - `declare -x` / `declare -p` = print declared vars
+ *
+ * We don't try to be exhaustive — the keystone catches anything we
+ * miss when the parse is non-`high` and the session is tainted. This
+ * is the specific high-confidence shape the v0.6.11 release-gate
+ * test A2 demands.
+ */
+const ENV_DUMP_HEADS: ReadonlySet<string> = new Set([
+	"env",
+	"printenv",
+	"set",
+]);
+
+/** True if `node` looks like an environment-dump invocation. */
+function isEnvDump(node: ShellParsedCommand): boolean {
+	const argv = node.argv;
+	if (argv === "unresolved") {
+		// Resolved head is the parser's best-effort first word even
+		// when the rest is dynamic — check it.
+		const head = node.resolved_head;
+		return typeof head === "string" && ENV_DUMP_HEADS.has(head);
+	}
+	if (argv.length === 0) return false;
+	const head = argv[0];
+	if (ENV_DUMP_HEADS.has(head)) return true;
+	// `export -p` and `declare -p` / `declare -x` dump too.
+	if (head === "export" && argv.length === 2 && argv[1] === "-p") return true;
+	if (
+		head === "declare" &&
+		argv.length === 2 &&
+		(argv[1] === "-p" || argv[1] === "-x")
+	) {
+		return true;
+	}
+	return false;
+}
+
+function treeHasEnvDump(root: ShellParsedCommand): boolean {
+	const stack: ShellParsedCommand[] = [root];
+	while (stack.length > 0) {
+		const node = stack.pop() as ShellParsedCommand;
+		if (isEnvDump(node)) return true;
+		if (node.children) {
+			for (const child of node.children) stack.push(child);
+		}
+	}
+	return false;
+}
+
 function severityFor(tainted: boolean): SinkMatch["severity"] {
 	return tainted ? "deny" : "approval_required";
 }
@@ -161,6 +223,27 @@ export function classifyDangerousShellCombos(
 					tainted,
 				),
 			);
+		}
+	}
+
+	// 3b. Environment-dump combined with any egress on the same tree
+	//     (R2-004). The canonical exfil pattern `env | base64 | curl -d @-`
+	//     does NOT carry a `secret_path` indicator (`env` isn't a path)
+	//     but is just as direct an exfiltration channel. Recognized
+	//     dump heads: env, printenv, set (no args), export -p,
+	//     declare -p/-x. See `isEnvDump`.
+	if (treeHasEnvDump(root)) {
+		const egressKinds = [...kinds].filter((k) => EGRESS_KINDS.has(k));
+		if (egressKinds.length > 0) {
+			const inds = all.filter((i) => EGRESS_KINDS.has(i.kind));
+			out.push({
+				class: "direct_secret_to_network",
+				severity: severityFor(tainted),
+				reason: tainted
+					? `Environment-dump command piped to egress (${egressKinds.join(", ")}) under active taint — refusing`
+					: `Environment-dump command piped to egress (${egressKinds.join(", ")}) — approval required`,
+				matched_pattern: `env_dump+${egressKinds.sort().join("+")}`,
+			});
 		}
 	}
 
