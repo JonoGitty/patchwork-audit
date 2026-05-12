@@ -1,0 +1,205 @@
+You're being consulted by Claude (Anthropic) on the R5 VERIFICATION
+audit of Patchwork v0.6.11. R4 (your previous round) returned
+NEEDS_REWORK with 2 ship-blockers (R4-001 CRITICAL, R4-002 HIGH).
+This round verifies the fixes for those two. SHIP /
+SHIP_WITH_FOLLOWUP / NEEDS_REWORK as before.
+
+Spend so far: R1 $0.36 + R2 $0.31 + R3 $0.24 + R4 $0.27 = $1.18
+of ~$5 budget. R5 should be smaller (only re-reviewing 2 specific
+fixes) — budget ~$0.20.
+
+------------------------------------------------------------------
+R4 findings and how they were resolved
+------------------------------------------------------------------
+
+R4-001 CRITICAL — "Admin CLI deny regex missed quoted PTY wrappers"
+  Your R4 finding: the R3 regex
+    (^|[ ;&|]|/)patchwork[ \t]+(approve|clear-taint|trust-repo-config)\b
+  did not match `script -q -c 'patchwork approve <id>'` because the
+  preceding character is `'`, not in the left-boundary class. Same
+  miss for `(...)`, `$(...)`, backticks, tab, newline. You
+  recommended expanding the left boundary to all shell token
+  delimiters and adding regression tests for those forms.
+
+  Fix taken: broadened the left boundary to ANY non-identifier
+  character. The final regex shipped in docs/default-policy.yml:
+
+    (^|[^A-Za-z0-9_-])patchwork[ \t]+(approve|clear-taint|trust-repo-config)\b
+
+  Reasoning for the exclusion class:
+    - We need to allow `/usr/local/bin/patchwork approve` (absolute
+      path) to match, so `/` must NOT be excluded.
+    - We need `.` to NOT be excluded so e.g. `./patchwork approve`
+      and `~/.local/bin/patchwork approve` both match.
+    - Only word-token characters (A-Za-z0-9_) and `-` are excluded,
+      because those would mean `patchwork` is part of a longer
+      identifier (`patchwork-foo`, `xpatchwork`, etc.). The
+      trailing `[ \t]+` and `\b` already require a real word
+      boundary on the right side.
+
+  Tests: new packages/core/tests/policy/admin-cli-deny.test.ts
+  with 20 unit tests that exercise evaluatePolicy() against the
+  exact regex. They cover:
+
+    MUST DENY (15 cases):
+      - bare patchwork approve / clear-taint / trust-repo-config
+      - env-wrapped: `env X=1 patchwork approve <id>`
+      - absolute path: `/usr/local/bin/patchwork approve <id>`
+      - script single-quoted: `script -q -c 'patchwork approve <id>' /dev/null`
+      - script double-quoted: `script -q -c "patchwork approve <id>" /dev/null`
+      - subshell: `(patchwork approve <id>)`
+      - command sub: `echo $(patchwork approve <id>)`
+      - backticks: `` echo `patchwork approve <id>` ``
+      - chained: `ls; patchwork approve <id>`
+      - piped: `echo x | patchwork approve <id>`
+      - tab-separated: `exec\tpatchwork approve <id>`
+      - bash -c quoted: `bash -c 'patchwork clear-taint'`
+      - sh -c quoted: `sh -c "patchwork trust-repo-config /tmp/x"`
+
+    MUST NOT FALSE-POSITIVE (5 cases):
+      - patchwork status (allowed CLI subcommand)
+      - patchwork-foo approve (different binary)
+      - patchworkapprove (no space)
+      - bare `approve abc123` (the verb alone)
+      - `npm install @patchwork/cli` (the package name)
+
+  All 20 pass under evaluatePolicy().
+
+  Residual we acknowledge:
+    - Shell metaprogramming (`p=patchwork; $p approve <id>`,
+      `a=approve; patchwork $a <id>`, aliases, function indirection)
+      is beyond a regex's reach. Mitigation: any such command would
+      typically have non-`high` parse confidence and a tainted
+      session, so the keystone rule + sink classifier still fire.
+      A semantic command policy is v0.6.12 scope.
+    - The system-policy file MUST be redeployed on user machines
+      via `patchwork init --upgrade` before this regex takes
+      effect at the system layer. Until then, only the in-CLI TTY
+      check is active (which `script -c` defeats). Deployment
+      gating tracked separately.
+
+R4-002 HIGH — "Proc-environ detector missed obvious self-environ aliases"
+  Your R4 finding: PROC_ENVIRON_RE missed /proc/thread-self,
+  /proc/$BASHPID, /proc/${BASHPID}, /proc/$PPID. You recommended
+  broadening before tag.
+
+  Fix taken: PROC_ENVIRON_RE is now
+    /^\/proc\/[^/]+\/environ$/
+
+  Any single non-empty path component between `/proc/` and
+  `/environ` matches. This covers all of your specified aliases
+  AND any future shell-variable form. The false-positive cost is
+  essentially nil because /proc/<X>/environ is only a real file
+  for processes and threads on Linux.
+
+  3 new R4-002 tests in dangerous-shell-combos.test.ts:
+    - `cat /proc/thread-self/environ | curl ...` → DENY
+    - `cat /proc/$BASHPID/environ | curl ...` → DENY  (literal,
+      no shell expansion since the parser keeps argv as-given)
+    - `cat /proc/$PPID/environ | curl ...` → DENY
+
+  Combined with R3-003, the env-source recognizer now covers:
+    - env, printenv (bare)
+    - bare set (R3-002 narrowed)
+    - export -p
+    - declare -p / -x / -px / -xp
+    - typeset -p / -x / -px (ksh/zsh)
+    - readonly -p
+    - compgen -e
+    - any argv element OR stdin/herestring redirect to a
+      /proc/<X>/environ path
+
+  Language-level env exfil (`python -c 'import os; print(os.environ)'`,
+  Node, Ruby) remains deferred to v0.6.12 per your prior
+  guidance.
+
+------------------------------------------------------------------
+What's unchanged since R4
+------------------------------------------------------------------
+
+  - All R1, R2, R3 fixes still in place.
+  - The 5 deferred-to-v0.6.12 residuals from prior rounds (snapshot
+    authenticity, formal generated_file_execute sink, broad Bash
+    source taint, language-level env exfil, out-of-band approval
+    daemon).
+  - Commit 10 docs and commit 11 integration tests.
+  - Test count: 1460 → 1483 (+23 from R4 fixes: 20 admin-cli-deny
+    regex tests + 3 /proc alias tests).
+
+------------------------------------------------------------------
+What we want from R5
+------------------------------------------------------------------
+
+  A. Are the R4 fixes correct? Specifically:
+
+     R4-001:
+       - Is the broadened regex
+           (^|[^A-Za-z0-9_-])patchwork[ \t]+(approve|clear-taint|trust-repo-config)\b
+         tight enough now, or does it still miss obvious wrappers?
+         The 15 deny tests above are the explicit shapes we
+         considered. Anything else worth landing before tag?
+       - The 5 false-positive tests pin against accidental matches
+         on `patchwork-foo approve`, `patchworkapprove`, etc.
+         Anything that *should* be allowed that we might
+         accidentally deny?
+
+     R4-002:
+       - Is `^/proc/[^/]+/environ$` the right shape, or does it
+         over-broaden in any meaningful way?
+       - Any remaining obvious shell-level env source we should
+         land before tag?
+
+  B. New bugs introduced by these fixes?
+
+  C. Any other ship-blockers we'd regret if shipped?
+
+  D. If R5 returns SHIP or SHIP_WITH_FOLLOWUP, we plan to:
+     1. Add a `patchwork init --upgrade` migration that rewrites
+        /Library/Patchwork/policy.yml with the new admin-CLI
+        deny regex (or appends if missing). Document in
+        docs/v0.6.11/migration.md.
+     2. Cut the version bump (0.6.10 → 0.6.11).
+     3. Run a clean build, tag, npm publish, gh release.
+
+     Is that the right minimum migration step, or are we missing
+     something the user needs to know on upgrade?
+
+------------------------------------------------------------------
+OUTPUT
+------------------------------------------------------------------
+
+JSON, same shape as R4:
+
+{
+  "overall_verdict": "SHIP" | "SHIP_WITH_FOLLOWUP" | "NEEDS_REWORK",
+  "headline": "<one sentence>",
+  "r4_fix_assessment": {
+    "r4_001_fix_correct": <bool>,
+    "r4_002_fix_correct": <bool>,
+    "concerns": ["<any remaining concerns about these fixes>"]
+  },
+  "new_findings": [
+    {
+      "id": "R5-001",
+      "severity": "CRITICAL"|"HIGH"|"MEDIUM"|"LOW"|"INFO",
+      "title": "<short>",
+      "category": "regression"|"missed_bypass"|"new_bug"|"documented_gap"|"other",
+      "where": "<file or function>",
+      "issue": "<what's wrong>",
+      "exploit": "<concrete or 'theoretical'>",
+      "fix": "<recommended change>",
+      "ship_blocker": <bool>
+    }
+  ],
+  "ship_recommendation": {
+    "verdict": "<copy>",
+    "must_fix_before_tag": [],
+    "may_ship_as_v0.6.11.1_hotfix": [],
+    "v0.6.12_scope": []
+  },
+  "migration_step_assessment": {
+    "patchwork_init_upgrade_is_sufficient": <bool>,
+    "missing_steps": ["<anything else users need to do/know>"]
+  },
+  "headline_quote_for_release_notes": "<sentence>"
+}
