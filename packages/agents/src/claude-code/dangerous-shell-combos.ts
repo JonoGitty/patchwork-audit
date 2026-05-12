@@ -109,7 +109,19 @@ const ENV_DUMP_BARE_HEADS: ReadonlySet<string> = new Set([
 	"printenv",
 ]);
 
-const PROC_ENVIRON_RE = /^\/proc\/(self|\$\$|\d+)\/environ$/;
+// R4-002: broadened from /^\/proc\/(self|\$\$|\d+)\/environ$/ to match
+// any single path component between /proc/ and /environ. Covers:
+//   /proc/self/environ           — current process
+//   /proc/thread-self/environ    — current thread (Linux)
+//   /proc/$$/environ             — current shell pid
+//   /proc/12345/environ          — explicit pid
+//   /proc/$BASHPID/environ       — bash subshell pid (literal unexpanded)
+//   /proc/${BASHPID}/environ     — same, braced form
+//   /proc/$PPID/environ          — parent pid
+// The cost of broadening is essentially nil: /proc/<X>/environ where X
+// is not a process or thread identifier does not exist as a real file
+// on Linux, so false positives are not a practical concern.
+const PROC_ENVIRON_RE = /^\/proc\/[^/]+\/environ$/;
 
 /** True if `s` is `-p`, `-x`, `-px`, `-xp` (declare/typeset dump flags). */
 function isDeclareDumpFlag(s: string): boolean {

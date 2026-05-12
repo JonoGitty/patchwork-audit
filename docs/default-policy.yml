@@ -147,7 +147,14 @@ commands:
     # boundary is here: refuse the Bash invocation before the subprocess
     # even spawns. Regex catches `env ... patchwork approve`,
     # `script -c 'patchwork ...'`, and other wrapper shapes.
-    - regex: "(^|[ ;&|]|/)patchwork[ \\t]+(approve|clear-taint|trust-repo-config)\\b"
+    # R4-001: broaden left boundary to any non-identifier character so
+    # quoted PTY wrappers (`script -q -c 'patchwork approve <id>'`),
+    # subshells (`(patchwork approve <id>)`), command substitution
+    # (`$(patchwork approve <id>)`), backticks, tabs, and newlines
+    # all match. `[^A-Za-z0-9_./-]` admits anything that can precede
+    # a command word; `\b` on the trailing side prevents matching
+    # `patchwork-foo approve` accidentally.
+    - regex: "(^|[^A-Za-z0-9_-])patchwork[ \\t]+(approve|clear-taint|trust-repo-config)\\b"
       action: deny
       reason: "Administrative CLI — must be run by the human user in their own terminal"
   allow:
