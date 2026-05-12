@@ -16,10 +16,13 @@ export default defineConfig({
 			{ text: "Concepts", link: "/concepts/how-it-works" },
 			{ text: "Reference", link: "/reference/cli" },
 			{
-				text: "v0.6.9",
+				text: "v0.6.11",
 				items: [
+					{ text: "What's new in v0.6.11", link: "/v0.6.11/" },
+					{ text: "Threat Model", link: "/v0.6.11/threat-model" },
+					{ text: "Migration Guide", link: "/v0.6.11/migration" },
 					{
-						text: "Changelog",
+						text: "Changelog (GitHub)",
 						link: "https://github.com/JonoGitty/patchwork-audit/releases",
 					},
 					{
@@ -94,6 +97,14 @@ export default defineConfig({
 							text: "Advisory: Hook Bypass (Fixed)",
 							link: "/security/cve-2026-hook-bypass",
 						},
+					],
+				},
+				{
+					text: "v0.6.11 Release",
+					items: [
+						{ text: "What's New", link: "/v0.6.11/" },
+						{ text: "Threat Model (v0.6.11)", link: "/v0.6.11/threat-model" },
+						{ text: "Migration from v0.6.10", link: "/v0.6.11/migration" },
 					],
 				},
 			],
