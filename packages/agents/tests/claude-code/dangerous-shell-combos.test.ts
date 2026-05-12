@@ -286,6 +286,54 @@ describe("classifyDangerousShellCombos (R1-005)", () => {
 				matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
 			).toBe(false);
 		});
+
+		// R6-001: shell command modifiers must be peeled before basename check.
+		describe("R6-001: command/exec modifiers are peeled", () => {
+			const modifierCases = [
+				["command", "command patchwork approve abc"],
+				["exec", "exec patchwork approve abc"],
+				["exec -a NAME", "exec -a fakename patchwork approve abc"],
+				["command -p", "command -p patchwork approve abc"],
+				["command -v", "command -v patchwork approve abc"],
+				["nested command exec", "command exec patchwork approve abc"],
+				[
+					"quoted exe + command modifier",
+					"command 'patchwork' approve abc",
+				],
+				[
+					"command + path",
+					"command /usr/local/bin/patchwork approve abc",
+				],
+			];
+
+			for (const [label, cmd] of modifierCases) {
+				it(`denies: ${label} — \`${cmd}\``, () => {
+					const parsed = parseShellCommand(cmd);
+					const matches = classifyDangerousShellCombos(parsed, false);
+					const m = matches.find(
+						(x) => x.matched_pattern === "admin_cli_invocation",
+					);
+					expect(m, `expected match for ${cmd}`).toBeDefined();
+					expect(m!.severity).toBe("deny");
+				});
+			}
+
+			it("does NOT match `command ls` (non-patchwork exe)", () => {
+				const parsed = parseShellCommand("command ls -la");
+				const matches = classifyDangerousShellCombos(parsed, true);
+				expect(
+					matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+				).toBe(false);
+			});
+
+			it("does NOT match `exec patchwork status` (peeled, non-admin verb)", () => {
+				const parsed = parseShellCommand("exec patchwork status");
+				const matches = classifyDangerousShellCombos(parsed, true);
+				expect(
+					matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+				).toBe(false);
+			});
+		});
 	});
 
 	// R4-002: cover obvious /proc/<X>/environ aliases the R3 regex missed.

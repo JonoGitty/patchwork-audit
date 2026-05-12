@@ -101,9 +101,51 @@ const ADMIN_CLI_VERBS: ReadonlySet<string> = new Set([
 	"trust-repo-config",
 ]);
 
+/**
+ * R6-001: Peel residual flag args of shell command modifiers
+ * `command` / `exec`.
+ *
+ * The core parser already unwraps the modifier *word* itself (see
+ * unwrapCompoundPrefixes in packages/core/src/shell/parse.ts) but it
+ * doesn't strip the modifier's own flag args, so e.g.
+ *   `exec -a fakename patchwork approve abc`
+ * arrives here with argv = ["-a", "fakename", "patchwork", "approve", "abc"]
+ * and resolved_head = "exec". We use resolved_head to know the original
+ * modifier and peel its flag arguments off the front of argv.
+ *
+ *   exec -a NAME   → 2 tokens
+ *   command -p     → 1 token
+ *   command -v     → 1 token (prints path; not a real exec, but harmless to deny)
+ *   command -V     → 1 token (same)
+ *
+ * After peeling, argv[0] is the effective executable token the shell
+ * would actually run, and the basename/verb check works normally.
+ */
+const MODIFIER_HEADS: ReadonlySet<string> = new Set(["command", "exec"]);
+
 function basenameOf(p: string): string {
 	const i = p.lastIndexOf("/");
 	return i < 0 ? p : p.substring(i + 1);
+}
+
+function peelModifierFlags(
+	argv: readonly string[],
+	originalHead: string | undefined,
+): readonly string[] {
+	if (!originalHead || !MODIFIER_HEADS.has(originalHead)) return argv;
+	let i = 0;
+	while (i < argv.length && argv[i].startsWith("-")) {
+		if (originalHead === "exec" && argv[i] === "-a" && i + 1 < argv.length) {
+			i += 2;
+			continue;
+		}
+		// Single short flag (command's -p/-v/-V, or any other flag the
+		// modifier might accept) — skip one token. Conservative but
+		// safe: false positives are bounded by the basename + verb
+		// checks below, which still must both match.
+		i += 1;
+	}
+	return argv.slice(i);
 }
 
 /**
@@ -113,6 +155,8 @@ function basenameOf(p: string): string {
  *   - any path: `./patchwork`, `/usr/local/bin/patchwork`, `~/.local/bin/patchwork`
  *   - quoted forms after parser quote-stripping: `'patchwork' approve ...`,
  *     `"patchwork" approve ...`, `p'atch'work approve ...`
+ *   - shell command modifiers (R6-001): `command patchwork approve`,
+ *     `exec patchwork approve`, `exec -a foo patchwork approve`
  *
  * Also returns true when argv is unresolved but resolved_head's
  * basename is `patchwork` — the parser's best-effort first word covers
@@ -125,9 +169,10 @@ function isAdminCliInvocation(node: ShellParsedCommand): boolean {
 		if (typeof head !== "string") return false;
 		return basenameOf(head) === "patchwork";
 	}
-	if (argv.length < 2) return false;
-	if (basenameOf(argv[0]) !== "patchwork") return false;
-	return ADMIN_CLI_VERBS.has(argv[1]);
+	const peeled = peelModifierFlags(argv, node.resolved_head);
+	if (peeled.length < 2) return false;
+	if (basenameOf(peeled[0]) !== "patchwork") return false;
+	return ADMIN_CLI_VERBS.has(peeled[1]);
 }
 
 function treeHasAdminCliInvocation(root: ShellParsedCommand): boolean {
