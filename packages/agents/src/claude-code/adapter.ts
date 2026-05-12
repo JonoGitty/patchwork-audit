@@ -3,6 +3,8 @@ import {
 	type AuditEvent,
 	type Store,
 	type Target,
+	type TaintKind,
+	type TaintSource,
 	CURRENT_SCHEMA_VERSION,
 	classifyRisk,
 	evaluatePolicy,
@@ -14,7 +16,16 @@ import {
 	loadActivePolicy,
 	getHomeDir,
 	sendToRelayAsync,
+	ALL_TAINT_KINDS,
+	RAISES_FOR_TOOL,
+	getActiveSources,
+	registerGeneratedFile,
+	registerTaint,
 } from "@patchwork/core";
+import {
+	loadOrInitSnapshot,
+	writeTaintSnapshot,
+} from "./taint-store.js";
 import { isAbsolute, relative, dirname, join } from "node:path";
 import {
 	existsSync,
@@ -416,6 +427,20 @@ async function handlePostToolUse(
 	store.append(event);
 	fireWebhookAlert(event);
 
+	// --- Taint snapshot update (v0.6.11 commit 7) ----------------------------
+	// Fold any taint sources this PostToolUse introduces into the session
+	// snapshot at ~/.patchwork/taint/<session_id>.json. Wrapped in try/catch
+	// per the source-fail-open contract: a storage bug here can only fail to
+	// *record* taint. The PreToolUse enforcer (commit 8) treats missing or
+	// corrupt snapshots as all-kinds-active and forces approval, so dropping
+	// a write only ever pushes the next decision to a stricter path.
+	try {
+		updateTaintSnapshotForPostTool(input, toolName, target);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`[patchwork] taint snapshot update failed: ${msg}\n`);
+	}
+
 	// --- Commit attestation: detect git commit and generate inline compliance proof ---
 	if (
 		toolName === "Bash" &&
@@ -553,6 +578,137 @@ function getAgentVersion(): string {
 	} catch {
 		return "unknown";
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Taint snapshot wiring (v0.6.11 commit 7)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve which `TaintKind`s a given Claude Code tool name raises. The
+ * `mcp__<server>__<tool>` family collapses to the `"mcp:"` key in
+ * `RAISES_FOR_TOOL`; everything else is a direct lookup.
+ */
+function taintKindsForTool(toolName: string): readonly TaintKind[] {
+	if (toolName.startsWith("mcp__")) {
+		return RAISES_FOR_TOOL["mcp:"] ?? [];
+	}
+	return RAISES_FOR_TOOL[toolName] ?? [];
+}
+
+/**
+ * Pick the most-meaningful identifier for a tool's taint source `ref`:
+ * a file path, then URL, then command, then tool_name, falling back to
+ * the tool name itself. The ref appears in the audit trail and in
+ * `getActiveSources()` output — readers don't need it to be unique, just
+ * descriptive enough for forensic review.
+ */
+function pickSourceRef(toolName: string, target: Target | undefined): string {
+	return (
+		target?.path ||
+		target?.abs_path ||
+		target?.url ||
+		target?.command ||
+		target?.tool_name ||
+		toolName
+	);
+}
+
+/**
+ * Update the per-session taint snapshot for a PostToolUse event.
+ *
+ * Per design §3.3 / `RAISES_FOR_TOOL`:
+ *   - `WebFetch` / `WebSearch` raise `prompt` + `network_content`.
+ *   - `mcp__*` tools raise `mcp` + `prompt`.
+ *   - `Read` raises `prompt` (over-raise until commit 9 wires
+ *     trusted_paths config — the default trust posture is "untrusted"
+ *     so every Read currently warrants the raise anyway). Read's
+ *     `secret` kind is deferred to commit 8, which will gate it on a
+ *     `secret_read` match from `classifyToolEvent` rather than firing
+ *     on every Read.
+ *   - `Write` / `Edit` / `MultiEdit` / `NotebookEdit` register the
+ *     output path as `generated_file` with the currently-active taint
+ *     sources captured as upstream provenance.
+ *   - `Bash` is deliberately empty in `RAISES_FOR_TOOL` — its taint
+ *     contribution requires shell-parser composition (`curl`/`wget`
+ *     in a pipeline → `network_content`) and is wired in commit 8.
+ *
+ * This helper throws on storage I/O failure; the caller wraps it in a
+ * try/catch per the source-fail-open contract (see header on
+ * `taint-store.ts`).
+ */
+function updateTaintSnapshotForPostTool(
+	input: ClaudeCodeHookInput,
+	toolName: string,
+	target: Target,
+): void {
+	const allKinds = taintKindsForTool(toolName);
+	if (allKinds.length === 0) return;
+
+	// commit 7 narrowing: `Read` raises `prompt` only here. The `secret`
+	// kind on Read requires a `secret_read` match from `classifyToolEvent`
+	// in `@patchwork/core/sinks`, which is composed in commit 8 alongside
+	// the rest of the PreToolUse sink classifier wiring. Recording every
+	// Read as a secret source would make `clearTaint("secret")` reject
+	// without `--allow-secret-clear` after any read, which is wrong.
+	const kinds =
+		toolName === "Read"
+			? allKinds.filter((k) => k !== "secret")
+			: allKinds;
+	if (kinds.length === 0) return;
+
+	const sessionId = input.session_id || generateSessionId();
+	let snapshot = loadOrInitSnapshot(sessionId);
+	let changed = false;
+
+	const ts = Date.now();
+	const ref = pickSourceRef(toolName, target);
+
+	// Hash the tool's response body when present, so the source record
+	// pins the *content* that flowed in — not just the call. When there
+	// is no response body (e.g. a Write returning a status string),
+	// fall back to a tool-name-derived hash so the schema's required
+	// content_hash field is always populated.
+	const responseText =
+		input.tool_response?.output ||
+		input.tool_response?.content ||
+		input.tool_response?.stdout ||
+		"";
+	const content_hash =
+		typeof responseText === "string" && responseText.length > 0
+			? hashContent(responseText)
+			: hashContent(`tool:${toolName}:${ts}`);
+
+	for (const kind of kinds) {
+		if (kind === "generated_file") {
+			// generated_file taint is path-anchored. The upstream set is
+			// every currently-active source across all kinds — that's
+			// what `registerGeneratedFile` records as the provenance
+			// list for this write. A write with no upstream taint is a
+			// no-op: clean output stays clean.
+			const path = target.abs_path || target.path;
+			if (!path) continue;
+			const upstream: TaintSource[] = ALL_TAINT_KINDS.flatMap((k) =>
+				getActiveSources(snapshot, k),
+			);
+			if (upstream.length === 0) continue;
+			snapshot = registerGeneratedFile(snapshot, path, upstream);
+			changed = true;
+		} else {
+			snapshot = registerTaint(snapshot, kind, {
+				ts,
+				ref,
+				content_hash,
+			});
+			changed = true;
+		}
+	}
+
+	// Skip the write when nothing actually changed — avoids churn for
+	// tools whose only kind is `generated_file` and that run before any
+	// upstream taint has been recorded.
+	if (!changed) return;
+	writeTaintSnapshot(snapshot);
 }
 
 function handleSubagentStart(store: Store, input: ClaudeCodeHookInput): null {
