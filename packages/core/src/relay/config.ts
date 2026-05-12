@@ -44,6 +44,26 @@ export interface WitnessConfig {
 export interface RelayConfig {
 	auto_seal: AutoSealConfig;
 	witness: WitnessConfig;
+	/**
+	 * Optional group name to chgrp the relay socket to after creation.
+	 *
+	 * The daemon listens as root and chmods the socket 0660, so by
+	 * default only root + the daemon's default group (`wheel` on
+	 * darwin) can connect. Hook processes run as the user — typically
+	 * in `staff` (darwin) or the primary login group, NOT `wheel` —
+	 * and so see `EACCES` on every connect, silently filling the
+	 * relay-divergence log instead of delivering events.
+	 *
+	 * Setting `socket_group: "staff"` makes the daemon chgrp the
+	 * socket to that group after listen, restoring connectivity
+	 * across daemon restarts. The daemon's own privilege boundary is
+	 * unchanged — clients can still only submit events and request
+	 * signatures, and `handleSign()` still vets every signing
+	 * request. When omitted, the default 0660 root:wheel ownership
+	 * is preserved (for deployments where hooks already run with
+	 * wheel membership).
+	 */
+	socket_group?: string;
 }
 
 /** Default configuration when no config file exists. */
@@ -95,6 +115,15 @@ export function loadRelayConfig(configPath?: string): { config: RelayConfig; sou
 						)
 					: DEFAULT_RELAY_CONFIG.witness.endpoints,
 			},
+			// Only carry `socket_group` through when it looks like a real
+			// POSIX group name: `[A-Za-z_][A-Za-z0-9_-]*`, max 32 chars.
+			// Anything else is dropped silently so a typo or hostile
+			// config can't cause an unbounded `chgrp` to run.
+			socket_group:
+				typeof parsed.socket_group === "string" &&
+				/^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(parsed.socket_group)
+					? parsed.socket_group
+					: undefined,
 		};
 
 		// Validate ranges

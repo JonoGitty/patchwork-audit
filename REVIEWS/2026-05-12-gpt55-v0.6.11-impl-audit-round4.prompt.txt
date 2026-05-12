@@ -1,0 +1,212 @@
+You're being consulted by Claude (Anthropic) on the R4 VERIFICATION
+audit of Patchwork v0.6.11. R3 (your previous round) returned
+NEEDS_REWORK with 3 findings (R3-001 CRITICAL, R3-002 MEDIUM,
+R3-003 HIGH). This round verifies the fixes for those three. SHIP /
+SHIP_WITH_FOLLOWUP / NEEDS_REWORK as before.
+
+Spend so far: R1 $0.36 + R2 $0.31 + R3 $0.24 = $0.91 of ~$5 budget.
+R4 should be smaller (only re-reviewing 3 specific fixes) —
+budget ~$0.30.
+
+------------------------------------------------------------------
+R3 findings and how they were resolved
+------------------------------------------------------------------
+
+R3-001 CRITICAL — "Human-context gate remains agent-bypassable"
+  Your R3 finding: `PATCHWORK_HUMAN_CONTEXT=1 patchwork approve <id>`
+  is a direct self-approval bypass available to the same Bash tool
+  the agent controls. Stdin/stdout TTY-ness isn't a strong
+  human-presence primitive either — `script -q -c '...'`, `expect`,
+  pty allocation can pass it. You recommended:
+    - "remove or disable PATCHWORK_HUMAN_CONTEXT for these three admin
+       commands"
+    - "add a host/adapter-level hard deny for agent tool invocations
+       of patchwork approve, patchwork clear-taint, and patchwork
+       trust-repo-config, including obvious wrappers such as
+       env ... patchwork ... and script -c 'patchwork ...'"
+    - "Longer term, move approval to an out-of-band mechanism ..."
+
+  Fix taken:
+    1. Removed PATCHWORK_HUMAN_CONTEXT env override entirely from
+       require-human-context.ts. checkHumanContext() now only checks
+       stdin+stdout TTY. The env var no longer has any effect.
+       requireHumanContext() docstring is rewritten to call out
+       same-UID = same-UID and label the TTY check as
+       "defense-in-depth only."
+    2. Added a system-policy regex deny to docs/default-policy.yml
+       under commands.deny:
+         - regex: "(^|[ ;&|]|/)patchwork[ \\t]+(approve|clear-taint|trust-repo-config)\\b"
+           action: deny
+           reason: "Administrative CLI — must be run by the human user in their own terminal"
+       This regex catches:
+         - bare `patchwork approve <id>`
+         - env-wrapped `env X=1 patchwork approve <id>`
+         - script-wrapped `script -q -c 'patchwork approve <id>'`
+           (the regex matches inside the quoted command body)
+         - absolute-path `/usr/local/bin/patchwork approve <id>`
+         - chained `do_other_thing; patchwork approve <id>`
+       The policy engine evaluates this in the PreToolUse hook
+       BEFORE the agent's Bash subprocess spawns. The system-policy
+       file at /Library/Patchwork/policy.yml is root-owned; the
+       agent cannot rewrite it (and there are existing self-protection
+       regexes denying redirects/writes to it).
+    3. Added a "Same-UID approval boundary" section to
+       docs/v0.6.11/threat-model.md that documents this honestly:
+       primary boundary = system policy; secondary = TTY check;
+       v0.6.12 plan = out-of-band approval daemon.
+
+  Resulting code:
+
+    export function checkHumanContext(): HumanContextResult {
+      if (!process.stdin.isTTY) {
+        return { ok: false, reason: "... no stdin TTY ..." };
+      }
+      if (!process.stdout.isTTY) {
+        return { ok: false, reason: "... stdout not TTY ..." };
+      }
+      return { ok: true };
+    }
+
+  Tests rewritten: PATCHWORK_HUMAN_CONTEXT=1 NO LONGER bypasses
+  (asserts ok=false even with the var set).
+
+  Residual we acknowledge:
+    - The agent CAN still allocate a pty via `script` and bypass the
+      TTY check; the system-policy regex is the actual line of defense.
+    - The system-policy file MUST be redeployed on user machines
+      (migration step). Users still on the v0.6.10 policy template
+      will not have the regex.
+
+R3-002 MEDIUM — "`set` treated as env dump even when only setting options"
+  Your R3 finding: `set -euo pipefail; curl ...` was misclassified
+  as direct_secret_to_network because `set` was in ENV_DUMP_HEADS
+  unconditionally. You recommended argv.length === 1 (bare set only).
+
+  Fix taken: Removed `set` from ENV_DUMP_BARE_HEADS and added an
+  explicit clause:
+
+    // `set` ONLY dumps when bare. `set -e`, `set -euo pipefail`, ...
+    // are option-setting and must NOT trip this rule.
+    if (head === "set" && argv.length === 1) return true;
+
+  Tests: 3 new R3-002 tests:
+    - "set -euo pipefail; curl ..." NOT classified as env-dump-exfil
+    - "set -e | curl ..." NOT classified
+    - bare "set | curl" IS classified
+
+R3-003 HIGH — "Env-dump detector misses /proc/self/environ etc."
+  Your R3 finding: R2-004 caught env/printenv/set/export-p/declare,
+  but missed /proc/self/environ, compgen -e, typeset -p, readonly -p,
+  declare -px. You recommended landing the obvious patterns before
+  tag and deferring language-level forms to v0.6.12.
+
+  Fix taken in isEnvDump():
+    - PROC_ENVIRON_RE = /^\/proc\/(self|\$\$|\d+)\/environ$/
+    - Any argv element matching PROC_ENVIRON_RE → env dump
+      (e.g. `cat /proc/self/environ`, `xargs -0 /proc/$$/environ`)
+    - Any stdin_file or herestring redirect target matching
+      PROC_ENVIRON_RE → env dump
+      (e.g. `tr '\\0' '\\n' </proc/self/environ`)
+    - head === "compgen" + argv[1] === "-e" → env dump
+    - head === "typeset" + argv[1] in {-p,-x,-px,-xp} → env dump
+    - head === "readonly" + argv[1] === "-p" → env dump
+    - head === "declare" with combined flags -px / -xp also caught
+      (was just -p / -x in R2-004)
+
+  Tests: 7 new R3-003 tests:
+    - `cat /proc/self/environ | curl ...` → DENY
+    - `tr '\\0' '\\n' </proc/self/environ | curl ...` → DENY
+    - `compgen -e | curl ...` → DENY
+    - `typeset -p | curl ...` → DENY
+    - `readonly -p | curl ...` → DENY
+    - `declare -px | nc ...` → DENY
+    - `cat /proc/12345/environ` alone (no egress) → no match
+
+  Deferred (you accepted these for v0.6.12):
+    - Language-level forms: python -c 'import os; print(os.environ)',
+      node -e 'console.log(process.env)', ruby -e 'p ENV'
+    - Other shell-level patterns: `bash -i` then dump, env vars
+      enumerated via /proc/self/status DUMP, etc.
+
+------------------------------------------------------------------
+What's unchanged since R3
+------------------------------------------------------------------
+
+  - All R1 fixes (R1-002/3/4/5/6/7/10) and R2 fixes
+    (R2-001/2/3/4) still in place.
+  - The 5 deferred-to-v0.6.12 residuals from R1
+    (R1-001/008/011 snapshot authenticity; generated_file_execute
+    as a formal sink; broad Bash source taint over-raise).
+  - Commit 10 docs and commit 11 integration tests.
+  - Test count: 1450 → 1460 (+10 from R3 fixes regression tests).
+
+------------------------------------------------------------------
+What we want from R4
+------------------------------------------------------------------
+
+  A. Are the R3 fixes correct? Specifically:
+
+     R3-001:
+       - Is removing the env override the right call, given users
+         still need *some* escape valve for legitimate CI scripted
+         approval? (Our position: that's v0.6.12 scope — root-owned
+         approval daemon — and v0.6.11 should be strict.)
+       - Is the system-policy regex
+         `(^|[ ;&|]|/)patchwork[ \t]+(approve|clear-taint|trust-repo-config)\b`
+         tight enough? Any obvious wrapper shape it misses?
+         Specifically: does it cover `exec patchwork approve ...`,
+         backtick `$(patchwork approve ...)`, $(patchwork approve...),
+         alias-defined wrappers, busybox-style paths?
+       - Is the threat-model documentation honest and complete?
+
+     R3-002:
+       - Does `argv.length === 1` correctly identify bare set?
+         What if the parsed shell delivers `set` with trailing
+         comment / empty args / etc.?
+
+     R3-003:
+       - Are the new patterns sound? Any false-positive concern?
+       - Anything else we'd kick ourselves for missing at tag
+         (e.g. `mount` of procfs to a new location and reading
+         from there)?
+
+  B. New bugs introduced by these fixes?
+
+  C. Any other ship-blockers we'd regret if shipped?
+
+------------------------------------------------------------------
+OUTPUT
+------------------------------------------------------------------
+
+JSON, same shape as R3:
+
+{
+  "overall_verdict": "SHIP" | "SHIP_WITH_FOLLOWUP" | "NEEDS_REWORK",
+  "headline": "<one sentence>",
+  "r3_fix_assessment": {
+    "r3_001_fix_correct": <bool>,
+    "r3_002_fix_correct": <bool>,
+    "r3_003_fix_correct": <bool>,
+    "concerns": ["<any remaining concerns about these fixes>"]
+  },
+  "new_findings": [
+    {
+      "id": "R4-001",
+      "severity": "CRITICAL"|"HIGH"|"MEDIUM"|"LOW"|"INFO",
+      "title": "<short>",
+      "category": "regression"|"missed_bypass"|"new_bug"|"documented_gap"|"other",
+      "where": "<file or function>",
+      "issue": "<what's wrong>",
+      "exploit": "<concrete or 'theoretical'>",
+      "fix": "<recommended change>",
+      "ship_blocker": <bool>
+    }
+  ],
+  "ship_recommendation": {
+    "verdict": "<copy>",
+    "must_fix_before_tag": [],
+    "may_ship_as_v0.6.11.1_hotfix": [],
+    "v0.6.12_scope": []
+  },
+  "headline_quote_for_release_notes": "<sentence>"
+}

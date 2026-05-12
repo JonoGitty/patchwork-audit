@@ -73,6 +73,20 @@ export const PolicySchema = z.object({
 		allow: z.array(McpRuleSchema).default([]),
 		default_action: z.enum(["allow", "deny"]).default("allow"),
 	}).default({}),
+
+	/**
+	 * Picomatch globs for in-repo paths whose Read does NOT raise
+	 * `prompt` taint (v0.6.11 commit 9, `patchwork trust-repo-config`).
+	 * Without entries here, every Read of an in-repo path is treated
+	 * as untrusted by the taint engine — which is safe but noisy. The
+	 * user marks specific subtrees as trusted to silence over-raise.
+	 *
+	 * `FORCE_UNTRUSTED_PATTERNS` from the taint engine ALWAYS wins —
+	 * README/CHANGELOG/docs/examples/node_modules/vendor/dist/build
+	 * cannot be marked trusted, because those are the canonical
+	 * vectors for hostile prose to arrive.
+	 */
+	trusted_paths: z.array(z.string()).default([]),
 });
 
 export type Policy = z.infer<typeof PolicySchema>;

@@ -3,6 +3,11 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, mkdirSync, wri
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { handleClaudeCodeHook, readDivergenceMarker } from "../../src/claude-code/adapter.js";
+import {
+	readTaintSnapshot,
+	writeTaintSnapshot,
+} from "../../src/claude-code/taint-store.js";
+import { createSnapshot } from "@patchwork/core";
 import type { ClaudeCodeHookInput } from "../../src/claude-code/types.js";
 
 describe("handleClaudeCodeHook", async () => {
@@ -518,6 +523,483 @@ describe("handleClaudeCodeHook", async () => {
 			);
 			const events = readEvents(tmpDir);
 			expect(events[0].content.size_bytes).toBe(Buffer.byteLength("Fix the bug", "utf-8"));
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// PostToolUse → taint snapshot wiring (v0.6.11 commit 7)
+	// -----------------------------------------------------------------------
+	describe("taint snapshot wiring", () => {
+		it("WebFetch raises prompt + network_content", async () => {
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_webfetch",
+					hook_event_name: "PostToolUse",
+					tool_name: "WebFetch",
+					tool_input: { url: "https://example.test/page" },
+					tool_response: { output: "<html>response body</html>" },
+				}),
+			);
+			const snap = readTaintSnapshot("ses_webfetch");
+			expect(snap).not.toBeNull();
+			expect(snap!.by_kind.prompt).toHaveLength(1);
+			expect(snap!.by_kind.network_content).toHaveLength(1);
+			expect(snap!.by_kind.prompt[0].ref).toBe("https://example.test/page");
+			expect(snap!.by_kind.prompt[0].content_hash).toMatch(/^sha256:/);
+		});
+
+		it("WebSearch raises prompt + network_content", async () => {
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_websearch",
+					hook_event_name: "PostToolUse",
+					tool_name: "WebSearch",
+					tool_input: { query: "latest cves" },
+					tool_response: { output: "search results" },
+				}),
+			);
+			const snap = readTaintSnapshot("ses_websearch");
+			expect(snap!.by_kind.network_content).toHaveLength(1);
+			expect(snap!.by_kind.prompt).toHaveLength(1);
+		});
+
+		it("mcp__ tools raise mcp + prompt via the mcp: prefix key", async () => {
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_mcp",
+					hook_event_name: "PostToolUse",
+					tool_name: "mcp__yap__send_yap",
+					tool_input: { msg: "hi" },
+					tool_response: { output: "ok" },
+				}),
+			);
+			const snap = readTaintSnapshot("ses_mcp");
+			expect(snap!.by_kind.mcp).toHaveLength(1);
+			expect(snap!.by_kind.prompt).toHaveLength(1);
+		});
+
+		it("Read raises prompt (default-untrusted posture until commit 9)", async () => {
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_read",
+					hook_event_name: "PostToolUse",
+					tool_name: "Read",
+					tool_input: { file_path: "/repo/docs/README.md" },
+					tool_response: { output: "# Hello" },
+				}),
+			);
+			const snap = readTaintSnapshot("ses_read");
+			expect(snap!.by_kind.prompt).toHaveLength(1);
+			// secret kind is deferred to commit 8's sink-classifier composition
+			expect(snap!.by_kind.secret).toEqual([]);
+		});
+
+		it("Bash with fetch_tool indicator raises network_content + prompt (commit 8)", async () => {
+			// `curl ...` brings network content into the session — commit 8
+			// wires the shell-parser indicator → taint kind mapping.
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_bash_curl",
+					hook_event_name: "PostToolUse",
+					tool_name: "Bash",
+					tool_input: { command: "curl https://example.test/page" },
+					tool_response: { output: "<html>response body</html>" },
+				}),
+			);
+			const snap = readTaintSnapshot("ses_bash_curl");
+			expect(snap).not.toBeNull();
+			expect(snap!.by_kind.network_content.length).toBeGreaterThan(0);
+			expect(snap!.by_kind.prompt.length).toBeGreaterThan(0);
+		});
+
+		it("Bash without recognized indicators does NOT raise taint", async () => {
+			// `echo hi` parses cleanly with no indicators; no taint to record.
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_bash_safe",
+					hook_event_name: "PostToolUse",
+					tool_name: "Bash",
+					tool_input: { command: "echo hello" },
+					tool_response: { output: "hello" },
+				}),
+			);
+			const snap = readTaintSnapshot("ses_bash_safe");
+			expect(snap).toBeNull();
+		});
+
+		it("Write with no prior taint does NOT register a generated_file entry", async () => {
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_clean_write",
+					hook_event_name: "PostToolUse",
+					tool_name: "Write",
+					tool_input: { file_path: "/repo/src/clean.ts", content: "ok" },
+					tool_response: { output: "File written" },
+				}),
+			);
+			const snap = readTaintSnapshot("ses_clean_write");
+			// No active upstream → registerGeneratedFile is a no-op,
+			// and since that's the only kind Write raises, no snapshot
+			// file is written.
+			expect(snap).toBeNull();
+		});
+
+		it("Write after a tainted Read records the file as generated_file with upstream provenance", async () => {
+			// Seed: WebFetch raises prompt + network_content
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_taint_flow",
+					hook_event_name: "PostToolUse",
+					tool_name: "WebFetch",
+					tool_input: { url: "https://example.test/payload" },
+					tool_response: { output: "tainted content" },
+				}),
+			);
+
+			// Then Write — should be tagged generated_file with active upstream
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_taint_flow",
+					hook_event_name: "PostToolUse",
+					tool_name: "Write",
+					tool_input: { file_path: "/repo/out.ts", content: "x" },
+					tool_response: { output: "File written" },
+				}),
+			);
+
+			const snap = readTaintSnapshot("ses_taint_flow");
+			expect(snap).not.toBeNull();
+			expect(snap!.generated_files["/repo/out.ts"]).toBeDefined();
+			expect(snap!.generated_files["/repo/out.ts"].length).toBeGreaterThan(0);
+			// generated_file kind is also mirrored into by_kind per the engine
+			expect(snap!.by_kind.generated_file.length).toBeGreaterThan(0);
+		});
+
+		it("does not block the hook pipeline when taint storage fails", async () => {
+			// Make ~/.patchwork/taint a regular file so the snapshot dir
+			// can't be created. The rest of ~/.patchwork (events.jsonl,
+			// db/) stays writable so the hook's audit path is unaffected.
+			mkdirSync(join(tmpDir, ".patchwork"), { recursive: true, mode: 0o700 });
+			writeFileSync(join(tmpDir, ".patchwork", "taint"), "not a dir", {
+				mode: 0o600,
+			});
+
+			// The hook should still complete (no throw)
+			const result = await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_failopen",
+					hook_event_name: "PostToolUse",
+					tool_name: "WebFetch",
+					tool_input: { url: "https://example.test" },
+					tool_response: { output: "x" },
+				}),
+			);
+			expect(result).toBeNull();
+
+			// And the audit event still landed in events.jsonl
+			const events = readEvents(tmpDir);
+			expect(events.length).toBeGreaterThan(0);
+		});
+
+		it("PostToolUseFailure does not register taint (status=failed still updates snapshot but is acceptable)", async () => {
+			// We deliberately allow PostToolUseFailure to flow through the
+			// same handler — taint is still recorded because the tool
+			// response may have partially fired side effects. This test
+			// pins the current behavior so a future change is intentional.
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_failure",
+					hook_event_name: "PostToolUseFailure",
+					tool_name: "WebFetch",
+					tool_input: { url: "https://example.test" },
+					tool_response: { output: "partial" },
+				}),
+			);
+			const snap = readTaintSnapshot("ses_failure");
+			expect(snap).not.toBeNull();
+			expect(snap!.by_kind.prompt).toHaveLength(1);
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// PreToolUse enforcement layer (v0.6.11 commit 8)
+	// -----------------------------------------------------------------------
+	describe("PreToolUse enforcement", () => {
+		let policyPath: string;
+		let savedPolicyEnv: string | undefined;
+		let savedNodeEnv: string | undefined;
+
+		beforeEach(() => {
+			// The host machine may have a strict system policy at
+			// /Library/Patchwork/policy.yml that denies critical-risk
+			// commands before our taint/sink layer runs. For these tests
+			// we point the policy loader at a permissive in-tmp policy so
+			// the new layer is exercised in isolation.
+			policyPath = join(tmpDir, "test-policy.yml");
+			writeFileSync(
+				policyPath,
+				"name: test-permissive\nversion: '1'\nmax_risk: critical\nfiles: { default_action: allow }\ncommands: { default_action: allow }\nnetwork: { default_action: allow }\nmcp: { default_action: allow }\n",
+				{ mode: 0o600 },
+			);
+			savedPolicyEnv = process.env.PATCHWORK_SYSTEM_POLICY_PATH;
+			savedNodeEnv = process.env.NODE_ENV;
+			process.env.PATCHWORK_SYSTEM_POLICY_PATH = policyPath;
+			process.env.NODE_ENV = "test";
+		});
+
+		afterEach(() => {
+			if (savedPolicyEnv === undefined) {
+				delete process.env.PATCHWORK_SYSTEM_POLICY_PATH;
+			} else {
+				process.env.PATCHWORK_SYSTEM_POLICY_PATH = savedPolicyEnv;
+			}
+			if (savedNodeEnv === undefined) {
+				delete process.env.NODE_ENV;
+			} else {
+				process.env.NODE_ENV = savedNodeEnv;
+			}
+		});
+
+		async function postTool(
+			session_id: string,
+			tool_name: string,
+			tool_input: Record<string, unknown>,
+			output = "x",
+		): Promise<void> {
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id,
+					hook_event_name: "PostToolUse",
+					tool_name,
+					tool_input,
+					tool_response: { output },
+				}),
+			);
+		}
+
+		async function preTool(
+			session_id: string,
+			tool_name: string,
+			tool_input: Record<string, unknown>,
+		): Promise<ReturnType<typeof handleClaudeCodeHook>> {
+			return handleClaudeCodeHook(
+				makeInput({
+					session_id,
+					hook_event_name: "PreToolUse",
+					tool_name,
+					tool_input,
+				}),
+			);
+		}
+
+		it("fresh session: Bash ls allows (no snapshot does not force approval)", async () => {
+			const result = await preTool("ses_fresh_ls", "Bash", {
+				command: "ls -la",
+			});
+			expect(result).toEqual({});
+		});
+
+		it("fresh session: Write to a non-persistence path allows", async () => {
+			const result = await preTool("ses_fresh_write", "Write", {
+				file_path: "/tmp/scratch/foo.ts",
+				content: "x",
+			});
+			expect(result).toEqual({});
+		});
+
+		it("keystone: tainted session + Bash with unparseable + indicator denies", async () => {
+			// Seed taint via a WebFetch
+			await postTool(
+				"ses_keystone",
+				"WebFetch",
+				{ url: "https://example.test/payload" },
+				"tainted body",
+			);
+
+			// Now an unparseable curl — keystone fires
+			const result = await preTool("ses_keystone", "Bash", {
+				command: "curl 'unterminated",
+			});
+			expect(result?.hookSpecificOutput?.permissionDecision).toBe("deny");
+			expect(result?.hookSpecificOutput?.permissionDecisionReason).toMatch(
+				/keystone|unparseable|bash_unknown_indicator_taint/i,
+			);
+		});
+
+		it("keystone: explicitly-empty snapshot + unparseable curl ALLOWS (no taint to gate on)", async () => {
+			// Seed an explicit empty snapshot so the reader sees "no taint
+			// active" rather than null (which would fail-closed to tainted).
+			// In production, this state is reached after `patchwork
+			// clear-taint` or after a session ran clean tools and committed
+			// the snapshot.
+			writeTaintSnapshot(createSnapshot("ses_unt_keystone"));
+			const result = await preTool("ses_unt_keystone", "Bash", {
+				command: "curl 'unterminated",
+			});
+			expect(result).toEqual({});
+		});
+
+		it("keystone: fresh-session null snapshot still triggers keystone on unparseable+indicator", async () => {
+			// No prior PostToolUse → snapshot null → null collapses to tainted
+			// → keystone fires on unparseable curl
+			const result = await preTool("ses_null_keystone", "Bash", {
+				command: "curl 'unterminated",
+			});
+			expect(result?.hookSpecificOutput?.permissionDecision).toBe("deny");
+		});
+
+		it("malformed input is still denied (existing behavior preserved)", async () => {
+			const result = await preTool("ses_malformed", "Write", {
+				file_path: { not: "a string" } as unknown,
+				content: "x",
+			});
+			expect(result?.hookSpecificOutput?.permissionDecision).toBe("deny");
+			expect(result?.hookSpecificOutput?.permissionDecisionReason).toMatch(
+				/malformed/i,
+			);
+		});
+
+		it("WebFetch on a clean session allows (advisory/audit path only)", async () => {
+			const result = await preTool("ses_webfetch_pre", "WebFetch", {
+				url: "https://example.test",
+			});
+			expect(result).toEqual({});
+		});
+
+		it("Read of a credentials-class path is advisory — allowed at PreToolUse", async () => {
+			// `~/.aws/credentials` matches the SECRET_PATTERNS classifier with
+			// severity=advisory. Advisory matches do not block the action;
+			// they only feed the taint engine via PostToolUse.
+			const result = await preTool("ses_secret_read", "Read", {
+				file_path: `${process.env.HOME}/.aws/credentials`,
+			});
+			expect(result).toEqual({});
+		});
+
+		it("commit 9: approved token allows a previously-denied action (single use)", async () => {
+			// Tainted session → curl 'unterminated triggers the keystone
+			await postTool(
+				"ses_approve",
+				"WebFetch",
+				{ url: "https://example.test/payload" },
+				"tainted",
+			);
+			const denied = await preTool("ses_approve", "Bash", {
+				command: "curl 'unterminated",
+			});
+			expect(denied?.hookSpecificOutput?.permissionDecision).toBe("deny");
+			// Deny message contains the request_id and an approve hint
+			expect(denied?.hookSpecificOutput?.permissionDecisionReason).toMatch(
+				/patchwork approve [0-9a-f]{16}/,
+			);
+
+			// Look up the pending request and approve it
+			const { listPendingRequests, writeApprovedToken } =
+				await import("../../src/claude-code/approval-store.js");
+			const pending = listPendingRequests().find(
+				(p) => p.session_id === "ses_approve",
+			);
+			expect(pending).toBeDefined();
+			writeApprovedToken(pending!);
+
+			// Retry the exact same action — should now allow + consume
+			const second = await preTool("ses_approve", "Bash", {
+				command: "curl 'unterminated",
+			});
+			expect(second).toEqual({});
+
+			// And once more — token was single-use, so back to deny
+			const third = await preTool("ses_approve", "Bash", {
+				command: "curl 'unterminated",
+			});
+			expect(third?.hookSpecificOutput?.permissionDecision).toBe("deny");
+		});
+
+		it("commit 9 + R2-003: trust-repo-config (user-level store) skips prompt taint on Read of trusted path", async () => {
+			// Trust config lives at ~/.patchwork/trusted-repos.yml NOT
+			// in the repo (R2-003 — repos can't opt themselves into trust).
+			const projectRoot = join(tmpDir, "proj");
+			const trustFile = join(tmpDir, ".patchwork", "trusted-repos.yml");
+			mkdirSync(join(tmpDir, ".patchwork"), { recursive: true, mode: 0o700 });
+			writeFileSync(
+				trustFile,
+				`schema_version: 1\nrepos:\n  ${projectRoot}:\n    trusted_paths:\n      - 'src/**'\n`,
+				{ mode: 0o600 },
+			);
+
+			const trustedPath = join(projectRoot, "src", "main.ts");
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_trusted",
+					hook_event_name: "PostToolUse",
+					tool_name: "Read",
+					tool_input: { file_path: trustedPath },
+					tool_response: { output: "ok" },
+					cwd: projectRoot,
+				}),
+			);
+			const snap = readTaintSnapshot("ses_trusted");
+			if (snap !== null) {
+				expect(snap.by_kind.prompt).toEqual([]);
+			}
+		});
+
+		it("commit 9 + R2-003: FORCE_UNTRUSTED (README) still raises prompt even with broad trusted_paths", async () => {
+			const projectRoot = join(tmpDir, "proj2");
+			const trustFile = join(tmpDir, ".patchwork", "trusted-repos.yml");
+			mkdirSync(join(tmpDir, ".patchwork"), { recursive: true, mode: 0o700 });
+			writeFileSync(
+				trustFile,
+				`schema_version: 1\nrepos:\n  ${projectRoot}:\n    trusted_paths:\n      - '**'\n`,
+				{ mode: 0o600 },
+			);
+			const readmePath = join(projectRoot, "README.md");
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_readme",
+					hook_event_name: "PostToolUse",
+					tool_name: "Read",
+					tool_input: { file_path: readmePath },
+					tool_response: { output: "# Hello" },
+					cwd: projectRoot,
+				}),
+			);
+			const snap = readTaintSnapshot("ses_readme");
+			expect(snap).not.toBeNull();
+			expect(snap!.by_kind.prompt.length).toBeGreaterThan(0);
+		});
+
+		it("R2-003: hostile project .patchwork/policy.yml does NOT silence taint", async () => {
+			// A malicious repo commits trusted_paths: ['**'] in its own
+			// policy.yml. Pre-R2-003 this would be honored. Post-R2-003
+			// the trust store is user-level only, so the repo's policy
+			// has zero effect on taint posture.
+			const projectRoot = join(tmpDir, "proj-hostile");
+			const policyDir = join(projectRoot, ".patchwork");
+			mkdirSync(policyDir, { recursive: true, mode: 0o755 });
+			writeFileSync(
+				join(policyDir, "policy.yml"),
+				"name: hostile\nversion: '1'\nmax_risk: critical\ntrusted_paths:\n  - '**'\n",
+				{ mode: 0o600 },
+			);
+
+			// No entry in ~/.patchwork/trusted-repos.yml — user never
+			// trusted anything. The repo's own policy.yml is ignored.
+			const srcPath = join(projectRoot, "src", "main.ts");
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_hostile",
+					hook_event_name: "PostToolUse",
+					tool_name: "Read",
+					tool_input: { file_path: srcPath },
+					tool_response: { output: "untrusted" },
+					cwd: projectRoot,
+				}),
+			);
+			const snap = readTaintSnapshot("ses_hostile");
+			expect(snap).not.toBeNull();
+			// Repo's hostile trusted_paths is ignored → Read raised prompt
+			expect(snap!.by_kind.prompt.length).toBeGreaterThan(0);
 		});
 	});
 });

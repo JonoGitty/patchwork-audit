@@ -1,3 +1,121 @@
+// Core (v0.6.11 — taint-aware policy enforcement substrate)
+export {
+	ToolEventSchema,
+	TaintSnapshotSchema,
+	ToolPhase,
+	SafetyMode,
+	ParseConfidence,
+	TaintKind,
+	type ToolEvent,
+	type TaintSnapshot,
+	type TaintSource,
+	type ParsedCommand,
+} from "./core/tool-event.js";
+export {
+	lookupToolRegistry,
+	listToolRegistry,
+	getMcpPrefixEntry,
+	type ToolRegistryEntry,
+} from "./core/tool-registry.js";
+export {
+	normalizeToolEvent,
+	POLICY_VERSION,
+	type NormalizeInput,
+	type NormalizeResult,
+} from "./core/normalize-tool-event.js";
+
+// Git remote resolution (v0.6.11 commit 6 — configured-remote URL extraction)
+export {
+	parseGitConfig,
+	getConfigValue,
+	getConfigValues,
+	mergeGitConfig,
+	configFromFlat,
+	resolveGitRemote,
+	parseGitArgv,
+	extractMutationsFromArgv,
+	type GitConfig,
+	type ResolveInput,
+	type ResolveResult,
+	type ResolveSource,
+	type AppliedRewrite,
+	type ParsedGitArgv,
+} from "./git/index.js";
+
+// Shell recognizer (v0.6.11 commit 4 — conservative parser, ParseUnknown safe)
+export {
+	parseShellCommand,
+	tokenize,
+	indicatorsForLeaf,
+	indicatorForRedirect,
+	combineChildrenIndicators,
+	INTERPRETER_NAMES,
+	FETCH_TOOL_NAMES,
+	COMPOUND_PREFIXES,
+	INLINE_EVAL_FLAGS,
+	type Token,
+	type TokenKind,
+	type Redirect,
+	type RedirectKind,
+	type ParsedCommand as ShellParsedCommand,
+	type ParsedOp,
+	type SinkIndicator,
+	type SinkIndicatorKind,
+	type ParseConfidence as ShellParseConfidence,
+} from "./shell/index.js";
+
+// URL canonicalization + allowlist (v0.6.11 commit 5 — single decision fn)
+export {
+	canonicalizeUrl,
+	evaluateAllowlist,
+	decideUrlPolicy,
+	type CanonicalUrl,
+	type CanonicalReject,
+	type CanonicalResult,
+	type CanonicalFlags,
+	type RejectReason,
+	type AllowlistEntry,
+	type AllowlistEvalOptions,
+	type AllowlistDecision,
+	type UrlPolicyDecision,
+} from "./url/index.js";
+
+// Taint engine (v0.6.11 commit 3 — multi-kind in-memory taint state)
+export {
+	createSnapshot,
+	registerTaint,
+	registerGeneratedFile,
+	clearTaint,
+	forgetGeneratedFile,
+	hasAnyTaint,
+	hasKind,
+	getActiveSources,
+	getAllSources,
+	isFileGenerated,
+	getGeneratedFileSources,
+	isPathUntrustedRepo,
+	ALL_TAINT_KINDS,
+	RAISES_FOR_TOOL,
+	FORCE_UNTRUSTED_PATTERNS,
+	type ClearTaintOptions,
+	type TrustClassifierOptions,
+} from "./taint/index.js";
+
+// Sinks (v0.6.11 commit 2 — Claude-native sink taxonomy)
+export {
+	classifyToolEvent,
+	highestSeverity,
+	PERSISTENCE_PATTERNS,
+	SECRET_PATTERNS,
+	expandHomePattern,
+	SINK_CLASSES,
+	type PersistencePattern,
+	type SecretPattern,
+	type SinkClass,
+	type SinkSeverity,
+	type SinkMatch,
+} from "./sinks/index.js";
+
 // Schema
 export {
 	AuditEventSchema,

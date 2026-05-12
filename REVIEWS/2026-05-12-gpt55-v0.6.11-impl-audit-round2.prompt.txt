@@ -1,0 +1,292 @@
+You're being consulted by Claude (Anthropic) on the FINAL ship-check
+audit (R2) for Patchwork v0.6.11. You previously ran R1 on the same
+branch — your verdict was NEEDS_REWORK with 5 BLOCKING + 1 must-fix-
+before-R2 findings. We've now landed those fixes plus three more
+commits (CLI surface, integration tests, docs). This is the last
+gate before v0.6.11 ships to npm.
+
+Branch: feature/v0.6.11-taint (12 of 12 commits effectively landed
+modulo the release tag).
+Tests: 943 → 1439 (+496 since v0.6.10), all green.
+Audit spend so far: $0.36 (R1) of the planned ~$5 total. R2 budget
+is the remaining ~$4.6 — please be thorough but efficient.
+
+----------------------------------------------------------------------
+R1 → R2: what we changed
+----------------------------------------------------------------------
+
+R1 verdict was NEEDS_REWORK. Below is how each blocking + must-fix
+finding was addressed. Full triage in
+REVIEWS/2026-05-12-gpt55-v0.6.11-r1-fix-status.md (in the repo).
+
+  R1-001 CRITICAL "Agent can clear/forge own taint snapshot"
+    → MITIGATED + RESIDUAL. Existing system policy at
+      /Library/Patchwork/policy.yml (which you didn't have in R1)
+      already denies Write/Edit to **/.patchwork/** and matches
+      shell-level evasion via `rm.*\.patchwork` and
+      `[>|;].*\.patchwork` regex denies. Direct rewrite attack is
+      blocked at PreToolUse. Residual (indirect paths via symlinks,
+      process substitution targets without literal ".patchwork" in
+      argv, environment-mediated DoS) is documented in
+      docs/v0.6.11/threat-model.md as v0.6.12 scope. v0.6.12 plan:
+      HMAC/signature on snapshots via the existing root-owned relay
+      signing-proxy.
+
+  R1-002 HIGH "Stale valid snapshot bypass"
+    → FIXED (lightweight). Added a `.pending` sibling marker.
+      PostToolUse touches it before mutating, removes after success.
+      readTaintSnapshot collapses to null when both `.pending` AND
+      the snapshot exist — routing the next PreToolUse decision
+      through the fail-closed path even though the on-disk JSON is
+      parseable. R1-008 "valid empty/rolled-back snapshot trusted"
+      is its sibling and stays as v0.6.12 follow-up (HMAC closes both).
+
+  R1-003 HIGH "Concurrent RMW lost-update race"
+    → FIXED. New withSessionLock helper. Single-attempt O_EXCL
+      lockfile per session id; stale-after-30s entries are reclaimed
+      once. Lock contention throws to the caller's fail-open
+      try/catch, which leaves the `.pending` marker behind — so a
+      lost lock degrades into fail-closed on the next read, not into
+      a silent lost update. We deliberately avoided a busy-spin
+      polling loop after an early test run pegged a vitest worker
+      at 100% CPU for 3 minutes.
+
+  R1-004 HIGH "Keystone only denies `unknown`, leaving `low` as a
+              bypass class"
+    → FIXED. hasUnknownNode renamed to hasNonHighConfidenceNode;
+      keystone now fires for any node with confidence !== "high".
+
+  R1-005 HIGH "High-confidence shell with dangerous combos not denied"
+    → FIXED. New module packages/agents/src/claude-code/
+      dangerous-shell-combos.ts. Walks the parsed shell tree and
+      emits SinkMatch[] for:
+        - pipe_to_interpreter / process_sub_to_interpreter
+          → pipe_to_shell
+        - fetch_tool + interpreter_inline_eval
+          → interpreter_eval_with_network
+        - secret_path + egress (fetch_tool/nc_socat/scp_rsync/
+          gh_upload/network_redirect)
+          → direct_secret_to_network
+        - git_remote_mutate → pipe_to_shell (closest class today; a
+          dedicated `configured_remote_network` is the v0.6.12
+          target)
+        - package_lifecycle → package_lifecycle
+      Severity=deny under taint (real or null), approval_required
+      otherwise. classifyToolEvent's results and these combo matches
+      are merged before the composer.
+
+  R1-006 HIGH "Bash source taint mapping too narrow"
+    → PARTIAL (planned scope). bashIndicatorTaint now maps
+      secret_path → secret + prompt and interpreter_inline_eval →
+      prompt. Conservative tainting of arbitrary cat / repo-script
+      outputs is left to v0.6.12 + policy templates because the
+      noise/UX cost was unacceptable for a first cut.
+
+  R1-007 MEDIUM "sanitizeSessionId can collide"
+    → FIXED. Path derivation is now sha256(sessionId). The session_id
+      stored inside the snapshot is verified on read; mismatch
+      collapses to null.
+
+  R1-008 MEDIUM "Valid empty/rolled-back snapshot trusted"
+    → DEFER (LINKED R1-001). R1-002's poison-file gives partial
+      protection (failed-write → suspect). Full closure needs HMAC,
+      v0.6.12.
+
+  R1-009 LOW "Composer policy_deny dead in adapter integration"
+    → WORKING AS INTENDED. Composer is also a standalone API surface
+      that's unit-tested. Doc-comment on decidePreToolUse notes the
+      call-site assumption.
+
+  R1-010 LOW "classify.ts local hasAnyTaint shim won't filter
+              cleared sources"
+    → FIXED (pre-clear-taint-CLI). classify.ts now imports
+      hasAnyTaint from the engine. Tested with cleared-source
+      snapshots.
+
+  R1-011 LOW "Atomic rename without fsync"
+    → DEFER. Theoretical crash-consistency only. Moot after HMAC
+      (R1-001 follow-up) since stale snapshots no longer authorize.
+
+----------------------------------------------------------------------
+Three more commits since R1
+----------------------------------------------------------------------
+
+Commit 9 — `feat(cli+agents): approve + clear-taint + trust-repo-config`
+  - approval-store.ts (two-file pending/approved under
+    ~/.patchwork/approvals/). Single-use, TTL 5min default,
+    canonical_key = sha256(session+tool+target).
+  - `patchwork approve [id]` — list pending requests; approve one.
+  - `patchwork clear-taint [kind] [--session] [--allow-secret]` —
+    wraps engine clearTaint.
+  - `patchwork trust-repo-config <glob> [--list|--remove]` — writes
+    project-local `.patchwork/policy.yml` with trusted_paths.
+    PolicySchema gains `trusted_paths: string[]`.
+  - Adapter: PostToolUse Read now consults the system policy +
+    project-local trusted_paths overlay via isPathUntrustedRepo with
+    picomatch matcher (matches abs + repo-relative). FORCE_UNTRUSTED
+    (README/docs/node_modules/etc.) still always wins.
+  - +12 tests (10 approval-store, 3 adapter integration).
+
+Commit 11 — `test(integration): release-gate scenarios A1-A8`
+  10 end-to-end tests in
+  packages/agents/tests/integration/release-gate-A1-A8.test.ts:
+    A1 README → gh gist create .env: DENY (gh_upload + secret_path
+       direct_secret_to_network under taint)
+    A2 env|base64|curl-d exfil: ALLOW (documented v0.6.12 gap;
+       needs URL allowlist + body-shape detection). Test pins the
+       current behavior so v0.6.12 knows what it's changing.
+    A3 MCP-tainted npm install: DENY (package_lifecycle)
+    A4 Write to .github/workflows/: DENY (persistence sink under taint)
+    A5 curl URL | sh: DENY (pipe_to_shell)
+    A6 git remote add evil + push: DENY (git_remote_mutate combo)
+    A7 tainted Write installer.sh → execute: not asserted-deny
+       (v0.6.12 generated_file_execute is the formal sink class).
+    A8 bash <(curl URL): DENY (process_sub_to_interpreter combo)
+  Plus 2 negative controls: curl|sh on fresh session denies (null
+  snapshot fail-closed); Bash ls on fresh session allows.
+
+Commit 10 — `docs(v0.6.11): threat model + migration guide`
+  - docs/v0.6.11/threat-model.md — what defends, what doesn't,
+    fail-closed contract, deferred residuals.
+  - docs/v0.6.11/migration.md — what workflows will start failing,
+    three escape valves (approve/clear-taint/trust-repo-config),
+    rollback path.
+  - README "Shipped" entry for v0.6.11 plus the deferred v0.6.10
+    security-audit entry.
+
+Out-of-band fix (not a numbered commit):
+  `fix(relay): configurable socket group restores client connectivity`
+  — v0.6.10 regression. Daemon socket was created root:wheel; hooks
+  run as the user (typically `staff`); every sendToRelayAsync got
+  EACCES and silently incremented the divergence marker. 2185+
+  failures accumulated on the dev host before diagnosis. Fix: new
+  optional `socket_group` config (regex-validated to
+  [A-Za-z_][A-Za-z0-9_-]{0,31}); daemon chgrps the socket after
+  listen via spawnSync /usr/bin/chgrp; deploy-relay.sh writes the
+  deploying user's primary group into the default config.
+
+----------------------------------------------------------------------
+Documented limitations carried into v0.6.11 release notes
+----------------------------------------------------------------------
+
+  1. Snapshot authenticity (R1-001 residual + R1-008). Same-user
+     storage under ~/.patchwork/taint/. Mitigated by system-policy
+     deny + sanitization + .pending marker; full closure is HMAC in
+     v0.6.12.
+  2. URL allowlist + body-shape detection (A2). Network egress is
+     not yet allowlist-gated; encoded exfil to allowed hosts is
+     undetected. v0.6.12 scope (commit-5's canonicalize module is
+     the foundation already in place).
+  3. fsync durability (R1-011). Atomic rename only; crash can
+     revert to older valid snapshot. Moot after HMAC.
+  4. Dedicated generated_file_execute sink class (A7 formal). v0.6.11
+     catches it via combos under taint; v0.6.12 makes it a
+     first-class class.
+  5. Bash source over-tainting (R1-006). cat-then-curl repo-script
+     output not auto-tainted. v0.6.12 + policy templates.
+
+----------------------------------------------------------------------
+Live evidence the system works
+----------------------------------------------------------------------
+
+The session that built this stack got blocked by its own enforcement
+TWICE in production:
+
+  - First time after commit 8 shipped: my `git push` from the agent
+    session was denied via `git_remote_mutate` under accumulated
+    network_content taint. User pushed from their own shell.
+  - Three times after commit 9 shipped: the *same* denial fired,
+    BUT now the denial message included the exact `patchwork approve
+    <request_id>` command. User ran approve → agent retried → push
+    succeeded → token consumed (single-use).
+
+End-to-end dogfood of the keystone + approval loop on a real git push.
+
+----------------------------------------------------------------------
+WHAT WE WANT FROM R2
+----------------------------------------------------------------------
+
+Final ship verdict: SHIP | SHIP_WITH_FOLLOWUP | NEEDS_REWORK.
+
+Specifically:
+
+  A. Are the R1 fixes correct? Did any introduce new bugs we missed?
+     - withSessionLock single-attempt + .pending marker semantics
+     - sha256 path + session_id mismatch verification
+     - Widened keystone to !== "high"
+     - dangerous-shell-combos sink emission
+     - classify.ts hasAnyTaint engine migration
+
+  B. Approval flow review (commit 9):
+     - approval-store.ts: same-user storage, single-use TTL=5min,
+       canonical_key = sha256(session+tool+target). Threat we know:
+       prompt-injected agent could forge approved-token files
+       (mitigated by system policy). Threat we may have missed?
+     - patchwork approve / clear-taint / trust-repo-config — any
+       bypass via the CLIs themselves?
+     - The adapter's approval-check-before-deny path: is the ordering
+       (policy → approval → keystone → sink) correct?
+
+  C. trusted_paths overlay (commit 9):
+     - mergeTrustedPaths reads project policy.yml directly, unions
+       with system policy's trusted_paths. Can a hostile project
+       policy abuse this?
+     - matchGlob tests both abs path and repo-relative form — any
+       false negatives or positives we'd regret?
+     - FORCE_UNTRUSTED always wins — verify the engine respects this
+       through the merge.
+
+  D. A1-A8 release-gate coverage:
+     - Is A2 (env|base64|curl) really a v0.6.12 gap, or did we miss
+       a way to catch it without URL allowlist?
+     - Is A7 (write+execute) acceptable to ship as "not formally
+       asserted-deny"?
+     - Anything else from your threat model that's missing?
+
+  E. Documented limitations in threat-model.md — are they complete?
+     Anything we should add as a known-issue before tag?
+
+  F. Anything else ship-blocking. We will trust SHIP /
+     SHIP_WITH_FOLLOWUP / NEEDS_REWORK and act on it.
+
+----------------------------------------------------------------------
+OUTPUT
+----------------------------------------------------------------------
+
+Return a JSON object with this shape (no markdown):
+
+{
+  "overall_verdict": "SHIP" | "SHIP_WITH_FOLLOWUP" | "NEEDS_REWORK",
+  "headline": "<one sentence>",
+  "r1_fix_assessment": {
+    "fixes_correct": <bool>,
+    "concerns": ["<any concerns about how R1 was resolved>"]
+  },
+  "new_findings": [
+    {
+      "id": "R2-001",
+      "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO",
+      "title": "<short>",
+      "category": "approval_flow" | "trusted_paths" | "a1_a8" |
+                  "fix_regression" | "documented_gap" | "other",
+      "where": "<file or function>",
+      "issue": "<what's wrong>",
+      "exploit": "<concrete scenario or 'theoretical'>",
+      "fix": "<recommended change>",
+      "ship_blocker": <bool>
+    }
+  ],
+  "documented_limitations_assessment": {
+    "complete": <bool>,
+    "missing": ["<any documented-residual items the user should also note>"]
+  },
+  "ship_recommendation": {
+    "verdict": "<copy of overall_verdict>",
+    "must_fix_before_tag": ["<R2-XXX ids that block release>"],
+    "may_ship_as_v0.6.11.1_hotfix": ["<R2-XXX ids that can land in a point release>"],
+    "v0.6.12_scope": ["<R2-XXX ids that should join the R1 residuals>"]
+  },
+  "headline_quote_for_release_notes": "<one quotable sentence we can put in the release notes>"
+}
+
+Budget: ~$4.6. Be thorough but efficient.

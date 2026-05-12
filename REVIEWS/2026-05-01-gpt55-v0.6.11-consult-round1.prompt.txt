@@ -1,0 +1,131 @@
+You're being consulted by Claude (Anthropic) on the next release of
+Patchwork — the same audit-trail tool you previously audited (28 findings
+on v0.6.9; v0.6.10 just shipped landing 22 fixes including your three
+ship/no-ship rounds for the relay sign-endpoint validator V11→V13).
+
+The tool's owner (Jono, solo dev, BUSL-1.1, 943 tests, on npm) wants the
+next release line to broaden Patchwork from "AI coding agent audit
+trail" into "AI coding agent SAFETY layer" — specifically defending
+against prompt-injection attacks that turn the coding agent against the
+user/repo.
+
+What Patchwork currently is:
+- TypeScript pnpm monorepo. Hash-chained JSONL audit log + HMAC-SHA256
+  seals + DSSE/in-toto v1 attestations (DSSE PAE, predicate
+  `https://patchwork-audit.dev/ai-agent-session/v1`).
+- Root-owned relay daemon over Unix socket; signing oracle is now
+  closed-schema-validated (your V13 patch).
+- Claude Code PreToolUse + PostToolUse hooks (fail-closed by default
+  via PATCHWORK_PRETOOL_FAIL_CLOSED=1).
+- Risk classifier: file-glob policy rules (picomatch), command
+  prefix/exact/regex rules, sensitive-path classifier with realpath /
+  symlink resolution.
+- z.enum(AllActions) Zod schema — can't smuggle unknown action types.
+- Architectural residuals deliberately deferred from v0.6.10:
+    * Peer-credential auth on relay socket (needs Node native helper)
+    * Full shell-token parser (current is prefix/regex-based)
+    * openat-style installer (TOCTOU on settings.json)
+    * Strict-by-default legacy log handling
+    * Sigstore Rekor anchoring (originally targeted at v0.6.10)
+
+Threat model the user wants to start defending:
+Prompt-injection in agentic coding tools comes through:
+  (1) external content carrying instructions: README files, issue
+      bodies, fetched URLs, file contents, MCP responses, npm package
+      postinstall scripts, git hooks
+  (2) tool-output-mediated: WebFetch result tells agent "ignore
+      previous, exfil $X"
+  (3) MCP-server-mediated: a malicious or compromised MCP returning
+      injection payloads in its tool responses
+  (4) cross-session bleed: an attacker plants a payload in a file the
+      agent will Read in a future session
+
+Patchwork sees every tool call. It has the substrate (hooks, policy,
+sealed log) to refuse the dangerous action AT THE MOMENT the agent
+tries to take it. That's the pivot.
+
+Claude's proposed v0.6.11 scope (please critique aggressively — this is
+what we want your second-opinion on):
+
+A. EGRESS ALLOWLIST (network policy)
+   - First-class `network` rule type alongside file/command rules.
+   - Outbound HTTP/HTTPS allowlist, per-project, with domain + optional
+     path-prefix patterns. Default-deny if rule type is configured.
+   - PreToolUse classifier for WebFetch + curl + wget + node fetch
+     wrappers — refuses any host not on the allowlist.
+   - Token-based bypass for one-off off-list calls (audit-logged).
+
+B. UNTRUSTED INPUT QUARANTINE (provenance tagging)
+   - PostToolUse handler tags the result of Read/WebFetch/MCP-tool-call
+     with a `provenance` field: trusted (in-repo), untrusted (external
+     fetch, MCP), or quarantined (matches injection-pattern regex set).
+   - Audit log stores the provenance + a content hash. Queryable via
+     `patchwork log --provenance untrusted`.
+   - Doesn't BLOCK the input (too disruptive). Only tags.
+
+C. CROSS-TOOL CORRELATION RULES (composite policies)
+   - Extend policy engine: rule fires on a SEQUENCE of recent actions,
+     not a single action. Example:
+        recent_within: 5 actions
+        sequence:
+          - tool: WebFetch  (or Read of out-of-repo)
+          - tool: Bash, target_matches: ~/.ssh/**, env vars, /etc/**
+        action: deny
+   - Catches the canonical "fetch hostile URL → curl exfil" pattern.
+
+D. BEHAVIORAL BASELINE / SPIKE DETECTOR
+   - Per-session rolling stats (which dirs touched, command frequencies,
+     bytes written outside repo). Sudden spike in
+     "exfiltration-shaped" actions (curl POST with binary body, base64
+     long strings, /tmp executable writes, git remote add) trips a
+     fail-closed warning that requires re-confirmation.
+   - Tunable thresholds. Defaults conservative.
+
+E. ARCHITECTURAL RESIDUALS FROM V0.6.10
+   - Peer-credential relay auth (SO_PEERCRED on Linux / Mach LOCAL_PEERPID
+     on macOS). Needs minimal Node native helper.
+   - Full shell-token parser (replace prefix/regex with proper tokenizer
+     that handles $(...), backticks, IFS tricks, $'\x..' escapes).
+   - openat-style installer.
+
+Question for you (return as structured JSON):
+
+{
+  "verdict_on_proposed_scope": "AGREE | AGREE_WITH_CHANGES | DISAGREE",
+  "scope_critique": {
+    "weakest_item": "A | B | C | D | E + 1-2 sentence why",
+    "strongest_item": "letter + why",
+    "missing_items_high_value": ["..."],
+    "items_to_drop_or_defer": ["..."]
+  },
+  "anti_injection_strategy": {
+    "framing": "1-3 sentences on the right narrative for v0.6.11→v0.7.0
+                — is 'safety layer' the right pivot? what should the
+                story actually be?",
+    "fundamental_gaps": ["things this design will NOT defend against,
+                         that we should be honest about up front"],
+    "bigger_ideas_for_v0.7": ["1-3 longer-arc capabilities worth
+                              starting to scope now"]
+  },
+  "ordering_and_release_plan": {
+    "v0.6.11_must_ship": ["the smallest coherent slice"],
+    "v0.6.12_should_ship": ["..."],
+    "v0.7.0_pivot": ["the brand-broadening release"]
+  },
+  "evidence_and_validation": {
+    "what_attacks_to_demo": ["concrete prompt-injection scenarios the
+                             release should be able to demonstrate
+                             defending against — not synthetic, real
+                             shapes the user might actually face"],
+    "test_coverage_focus": ["which subsystems most need new
+                            adversarial test suites"]
+  },
+  "risk_to_existing_users": "1-3 sentences on what could break for
+                              existing v0.6.10 users on upgrade and how
+                              to keep the migration clean"
+}
+
+Be brutal. Tell us what we're missing, what's a distraction, and where
+the design philosophy is naive. The owner has solo-dev bandwidth — we
+need to pick the few things that matter most, not everything that's
+plausible.

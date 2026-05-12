@@ -3,8 +3,13 @@ import {
 	type AuditEvent,
 	type Store,
 	type Target,
+	type TaintKind,
+	type TaintSource,
+	type TaintSnapshot,
+	type ToolEvent,
 	CURRENT_SCHEMA_VERSION,
 	classifyRisk,
+	classifyToolEvent,
 	evaluatePolicy,
 	generateEventId,
 	generateSessionId,
@@ -14,7 +19,35 @@ import {
 	loadActivePolicy,
 	getHomeDir,
 	sendToRelayAsync,
+	parseShellCommand,
+	ALL_TAINT_KINDS,
+	RAISES_FOR_TOOL,
+	getActiveSources,
+	hasAnyTaint,
+	isPathUntrustedRepo,
+	registerGeneratedFile,
+	registerTaint,
 } from "@patchwork/core";
+import picomatch from "picomatch";
+import {
+	clearPendingMarker,
+	loadOrInitSnapshot,
+	readTaintSnapshot,
+	setPendingMarker,
+	withSessionLock,
+	writeTaintSnapshot,
+} from "./taint-store.js";
+import { getTrustedPathsForRepo } from "./trust-store.js";
+import {
+	decidePreToolUse,
+	type PreToolDecision,
+} from "./pre-tool-decision.js";
+import { classifyDangerousShellCombos } from "./dangerous-shell-combos.js";
+import {
+	canonicalKey,
+	consumeApprovedToken,
+	writePendingRequest,
+} from "./approval-store.js";
 import { isAbsolute, relative, dirname, join } from "node:path";
 import {
 	existsSync,
@@ -366,7 +399,258 @@ function handlePreToolUse(store: Store, input: ClaudeCodeHookInput): ClaudeCodeH
 		};
 	}
 
+	// --- v0.6.11 commit 8: sink + taint enforcement layer ---------------
+	// Runs after the rule-based policy allows. Can only escalate to deny
+	// or approval_required; never relaxes a policy decision. Errors here
+	// fail closed — a bug in the enforcement layer must not silently
+	// allow.
+	let taintDecision: PreToolDecision;
+	try {
+		taintDecision = computeTaintSinkDecision(
+			input,
+			toolName,
+			target,
+			decision,
+		);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		const event = buildEvent(input, {
+			action: mapped.action,
+			status: "denied",
+			target,
+			provenance: { hook_event: "PreToolUse", tool_name: toolName },
+		});
+		store.append(event);
+		fireWebhookAlert(event);
+		return {
+			hookSpecificOutput: {
+				hookEventName: "PreToolUse",
+				permissionDecision: "deny",
+				permissionDecisionReason: `[Patchwork] enforcement layer error (fail-closed): ${msg}`,
+			},
+		};
+	}
+
+	if (taintDecision.verdict !== "allow") {
+		// v0.6.11 commit 9: out-of-band approval escape valve.
+		// Compute the canonical key for this action and see if the user
+		// has approved it via `patchwork approve`. If so, consume the
+		// token and allow — exactly once. The token is single-use so a
+		// leak authorizes at most one tool invocation matching the same
+		// session+tool+target.
+		const approvalTargetStr = approvalTargetForAdapter(toolName, target, input);
+		const key = canonicalKey({
+			session_id: input.session_id || "",
+			tool_name: toolName,
+			target: approvalTargetStr,
+		});
+		const approved = consumeApprovedToken(key);
+		if (approved) {
+			// Log the approved consumption so the audit trail records
+			// who unlocked this action and which token authorized it.
+			const event = buildEvent(input, {
+				action: mapped.action,
+				status: "completed",
+				target,
+				provenance: {
+					hook_event: "PreToolUse",
+					tool_name: toolName,
+				},
+			});
+			store.append(event);
+			return {};
+		}
+
+		// No approval token. Materialize a pending request so the user
+		// has a single command (`patchwork approve <id>`) to authorize
+		// the retry. Use a tighter target_summary for the deny message
+		// so a 500-char shell command doesn't fill the terminal.
+		let pendingId: string | null = null;
+		try {
+			const pending = writePendingRequest({
+				session_id: input.session_id || "",
+				tool_name: toolName,
+				target: approvalTargetStr,
+				target_summary: shortTargetSummary(approvalTargetStr),
+				reason: taintDecision.reason,
+				rule: taintDecision.rule,
+			});
+			pendingId = pending.request_id;
+		} catch {
+			// Pending-file write failure is not security-relevant — the
+			// deny still fires, the user just won't have a request id
+			// to approve against and will need to retry on a fresh key.
+		}
+
+		const event = buildEvent(input, {
+			action: mapped.action,
+			status: "denied",
+			target,
+			provenance: { hook_event: "PreToolUse", tool_name: toolName },
+		});
+		store.append(event);
+		fireWebhookAlert(event);
+
+		const prefix =
+			taintDecision.verdict === "approval_required"
+				? "[Patchwork] approval required"
+				: "[Patchwork] denied";
+		// R2-001: do NOT include a copy-pasteable approve command in
+		// the deny reason. If the agent can read its own denial, it
+		// can run `patchwork approve <id>` itself — defeating the
+		// human gate. Instead, instruct the agent to ASK the user to
+		// run it. The `patchwork approve` CLI is also TTY-gated so
+		// even if the agent runs it, the CLI itself refuses.
+		const approveHint = pendingId
+			? `\n  Ask the human user to run \`patchwork approve ${pendingId}\` in their own terminal, then retry.`
+			: "";
+		return {
+			hookSpecificOutput: {
+				hookEventName: "PreToolUse",
+				permissionDecision: "deny",
+				permissionDecisionReason: `${prefix}: ${taintDecision.reason} (rule: ${taintDecision.rule})${approveHint}`,
+			},
+		};
+	}
+
 	return {};
+}
+
+/**
+ * Build the canonical target string the approval flow uses to identify
+ * "the same action." For file tools that's the path; for Bash it's the
+ * command; for fetchers it's the URL; for mcp/task it's the tool name.
+ * The canonical_key derives a stable hash from this so the user's
+ * approval and the agent's retry land on the same key.
+ */
+function approvalTargetForAdapter(
+	toolName: string,
+	target: Target,
+	input: ClaudeCodeHookInput,
+): string {
+	if (toolName === "Bash") {
+		const cmd = (input.tool_input || {}).command;
+		return typeof cmd === "string" ? cmd : "";
+	}
+	return (
+		target.path ||
+		target.abs_path ||
+		target.url ||
+		target.command ||
+		target.tool_name ||
+		toolName
+	);
+}
+
+/** Truncate a target string for the deny-message line so we don't
+ *  blast 1000-char shell commands into the terminal. */
+function shortTargetSummary(target: string): string {
+	if (target.length <= 120) return target;
+	return `${target.slice(0, 117)}...`;
+}
+
+// ---------------------------------------------------------------------------
+// Commit 8: ToolEvent construction + taint/sink decision plumbing
+// ---------------------------------------------------------------------------
+
+/**
+ * A synthetic snapshot used by `computeTaintSinkDecision` whenever the
+ * persisted file is missing or corrupt. Carries exactly one source under
+ * every kind so `classify.ts`'s persistence severity flip sees "tainted"
+ * and escalates writes to `deny` rather than `approval_required`. The
+ * decision composer's reader-fail-closed semantics independently treat
+ * `null` as tainted for the keystone rule, so the two layers agree.
+ */
+function syntheticTaintForFailClosed(sessionId: string): TaintSnapshot {
+	const by_kind: Record<string, TaintSource[]> = {};
+	const fakeSource: TaintSource = {
+		ts: 0,
+		ref: "patchwork:fail-closed-synthetic",
+		content_hash: "sha256:fail-closed-synthetic",
+	};
+	for (const kind of ALL_TAINT_KINDS) {
+		by_kind[kind] = [fakeSource];
+	}
+	return {
+		session_id: sessionId,
+		by_kind,
+		generated_files: {},
+	};
+}
+
+/**
+ * Build the inputs the decision composer needs and call it. Returns the
+ * composer's verdict; the caller turns that into a hook output.
+ */
+function computeTaintSinkDecision(
+	input: ClaudeCodeHookInput,
+	toolName: string,
+	target: Target,
+	policyDecision: { allowed: boolean; reason?: string },
+): PreToolDecision {
+	const sessionId = input.session_id || generateSessionId();
+	const snapshot = readTaintSnapshot(sessionId);
+
+	// Build a minimal ToolEvent for the sink classifier. The classifier
+	// only consumes `tool`, `target_paths`/`resolved_paths`, and
+	// `taint_state` today — keep the rest defaulted. When the snapshot
+	// is null we substitute the synthetic "all-active" taint so
+	// classify.ts's severity flip sees a tainted session.
+	const targetPaths: string[] = [];
+	if (target.path) targetPaths.push(target.path);
+	if (target.abs_path && target.abs_path !== target.path) {
+		targetPaths.push(target.abs_path);
+	}
+
+	const toolEvent: ToolEvent = {
+		tool: toolName,
+		phase: "pre",
+		cwd: input.cwd,
+		project_root: input.cwd,
+		raw_input: input.tool_input ?? {},
+		target_paths: targetPaths,
+		resolved_paths: targetPaths,
+		urls: target.url ? [target.url] : [],
+		hosts: [],
+		taint_state:
+			snapshot ?? syntheticTaintForFailClosed(sessionId),
+		policy_version: "v0.6.11-pre.1",
+	};
+	const sinkMatches = [...classifyToolEvent(toolEvent)];
+
+	// Parse Bash commands so the keystone rule can see indicators and
+	// confidence. Other tools skip this — there's no shell to parse.
+	let parsedCommand: ReturnType<typeof parseShellCommand> | undefined;
+	if (toolName === "Bash") {
+		const cmd =
+			typeof (input.tool_input || {}).command === "string"
+				? ((input.tool_input || {}).command as string)
+				: "";
+		if (cmd.length > 0) {
+			parsedCommand = parseShellCommand(cmd);
+		}
+	}
+
+	// R1-005: layer the dangerous-shell-combos classifier on top of the
+	// resolved-path sink layer. It walks the parsed tree and emits
+	// SinkMatches for indicator pairs `classifyToolEvent` can't see
+	// (curl | sh, secret | curl, gh upload, git push, npm install).
+	// `tainted` here mirrors the composer's fail-closed semantic: null
+	// snapshot collapses to true so a stale-storage state can never let
+	// a dangerous combo through as approval_required when it would have
+	// been deny under real taint.
+	if (parsedCommand) {
+		const tainted = snapshot === null ? true : hasAnyTaint(snapshot);
+		const comboMatches = classifyDangerousShellCombos(parsedCommand, tainted);
+		for (const m of comboMatches) sinkMatches.push(m);
+	}
+
+	return decidePreToolUse({
+		policy: policyDecision,
+		sinkMatches,
+		parsedCommand,
+		taintSnapshot: snapshot,
+	});
 }
 
 async function handlePostToolUse(
@@ -415,6 +699,20 @@ async function handlePostToolUse(
 
 	store.append(event);
 	fireWebhookAlert(event);
+
+	// --- Taint snapshot update (v0.6.11 commit 7) ----------------------------
+	// Fold any taint sources this PostToolUse introduces into the session
+	// snapshot at ~/.patchwork/taint/<session_id>.json. Wrapped in try/catch
+	// per the source-fail-open contract: a storage bug here can only fail to
+	// *record* taint. The PreToolUse enforcer (commit 8) treats missing or
+	// corrupt snapshots as all-kinds-active and forces approval, so dropping
+	// a write only ever pushes the next decision to a stricter path.
+	try {
+		updateTaintSnapshotForPostTool(input, toolName, target);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`[patchwork] taint snapshot update failed: ${msg}\n`);
+	}
 
 	// --- Commit attestation: detect git commit and generate inline compliance proof ---
 	if (
@@ -552,6 +850,297 @@ function getAgentVersion(): string {
 		return "unknown";
 	} catch {
 		return "unknown";
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Taint snapshot wiring (v0.6.11 commit 7)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve which `TaintKind`s a given Claude Code tool name raises. The
+ * `mcp__<server>__<tool>` family collapses to the `"mcp:"` key in
+ * `RAISES_FOR_TOOL`; everything else is a direct lookup.
+ */
+function taintKindsForTool(toolName: string): readonly TaintKind[] {
+	if (toolName.startsWith("mcp__")) {
+		return RAISES_FOR_TOOL["mcp:"] ?? [];
+	}
+	return RAISES_FOR_TOOL[toolName] ?? [];
+}
+
+/**
+ * Pick the most-meaningful identifier for a tool's taint source `ref`:
+ * a file path, then URL, then command, then tool_name, falling back to
+ * the tool name itself. The ref appears in the audit trail and in
+ * `getActiveSources()` output — readers don't need it to be unique, just
+ * descriptive enough for forensic review.
+ */
+function pickSourceRef(toolName: string, target: Target | undefined): string {
+	return (
+		target?.path ||
+		target?.abs_path ||
+		target?.url ||
+		target?.command ||
+		target?.tool_name ||
+		toolName
+	);
+}
+
+/**
+ * Update the per-session taint snapshot for a PostToolUse event.
+ *
+ * Per design §3.3 / `RAISES_FOR_TOOL`:
+ *   - `WebFetch` / `WebSearch` raise `prompt` + `network_content`.
+ *   - `mcp__*` tools raise `mcp` + `prompt`.
+ *   - `Read` raises `prompt` (over-raise until commit 9 wires
+ *     trusted_paths config — the default trust posture is "untrusted"
+ *     so every Read currently warrants the raise anyway). Read's
+ *     `secret` kind is deferred to commit 8, which will gate it on a
+ *     `secret_read` match from `classifyToolEvent` rather than firing
+ *     on every Read.
+ *   - `Write` / `Edit` / `MultiEdit` / `NotebookEdit` register the
+ *     output path as `generated_file` with the currently-active taint
+ *     sources captured as upstream provenance.
+ *   - `Bash` is deliberately empty in `RAISES_FOR_TOOL` — its taint
+ *     contribution requires shell-parser composition (`curl`/`wget`
+ *     in a pipeline → `network_content`) and is wired in commit 8.
+ *
+ * This helper throws on storage I/O failure; the caller wraps it in a
+ * try/catch per the source-fail-open contract (see header on
+ * `taint-store.ts`).
+ */
+/**
+ * Read-path trust classifier (v0.6.11 commit 9). Calls
+ * `isPathUntrustedRepo` from the taint engine with the active policy's
+ * `trusted_paths` and a picomatch-backed glob matcher. Returns true
+ * when the path should be treated as untrusted (= raises prompt taint
+ * on Read); false when the user has explicitly trusted it.
+ *
+ * Users write trusted_paths globs RELATIVE to the project root —
+ * `src/**`, not `/abs/path/src/**`. The matcher here tests the
+ * abs-path against the pattern AND a repo-relative form, so either
+ * style works. The engine's `FORCE_UNTRUSTED_PATTERNS` always wins
+ * (README/docs/node_modules/etc.) so trusted_paths can't accidentally
+ * silence prompt-injection surfaces.
+ */
+function readPathIsUntrusted(path: string, cwd: string): boolean {
+	const { policy } = loadActivePolicy(cwd);
+	// Project-local trusted_paths overlay (R1-trust-classifier wiring).
+	// loadActivePolicy returns the system policy when one exists, which
+	// is correct for enforcement rules — but trusted_paths is the one
+	// knob the project policy can additively express to narrow taint
+	// posture. Read it directly from `<cwd>/.patchwork/policy.yml`
+	// when present and union its trusted_paths onto the system policy's.
+	const trustedPaths = mergeTrustedPaths(policy.trusted_paths, cwd);
+	const repoRelative = path.startsWith(`${cwd}/`)
+		? path.slice(cwd.length + 1)
+		: path;
+	const matchGlob = (candidate: string, pattern: string): boolean => {
+		const isMatch = picomatch(pattern, { dot: true, nocase: true });
+		// Try both the candidate as-given AND its repo-relative form so
+		// users can write `src/**` or `/abs/project/src/**` and either
+		// works. The candidate from the engine is either the abs path
+		// (for the trusted_paths check) or a pattern from
+		// FORCE_UNTRUSTED_PATTERNS that uses `**` prefixes already.
+		if (isMatch(candidate)) return true;
+		if (candidate === path && isMatch(repoRelative)) return true;
+		return false;
+	};
+	return isPathUntrustedRepo(path, {
+		projectRoot: cwd,
+		trustedPaths,
+		matchGlob,
+	});
+}
+
+function mergeTrustedPaths(
+	systemTrusted: readonly string[],
+	cwd: string,
+): readonly string[] {
+	// R2-003: trust overlay now comes from the USER-LEVEL store at
+	// `~/.patchwork/trusted-repos.yml`, NOT from the repo. A hostile
+	// project cannot commit its own trust config — only the user, at
+	// an interactive terminal via `patchwork trust-repo-config`, can.
+	const userTrusted = getTrustedPathsForRepo(cwd);
+	const merged = new Set(systemTrusted);
+	for (const p of userTrusted) merged.add(p);
+	return [...merged];
+}
+
+/**
+ * Walk a parsed shell tree and return the deduplicated set of taint
+ * kinds the indicators imply for a PostToolUse update.
+ *
+ * Mapping (commit 8 + R1-006):
+ *   - `fetch_tool` (curl/wget/http) → `network_content` + `prompt`.
+ *     The response body is now in the session's context.
+ *   - `secret_path` (read of credential-class path) → `secret` + `prompt`.
+ *     The credential contents flowed into the transcript.
+ *   - `interpreter_inline_eval` (`sh -c "..."`, `python -c "..."`,
+ *     `node -e "..."`, etc.) → `prompt`. Inline source executed by a
+ *     subshell IS new content that just landed in context. Note this
+ *     overlaps with `pipe_to_interpreter` — that one is a sink (a
+ *     dangerous *destination*), not a source, so it is not mapped here
+ *     (R1-005's dangerous-shell-combos classifier handles it).
+ *
+ * Other indicator kinds (process_sub_to_interpreter, eval_construct,
+ * network_redirect, secret_path for *writes*, scp/rsync/nc/socat/ssh,
+ * package_lifecycle, gh_upload, git_remote_mutate) describe what the
+ * command DID rather than what came INTO context — they belong to the
+ * sink layer, not the source layer. R1-005's combos classifier is
+ * where they get adjudicated.
+ */
+function bashIndicatorTaint(root: ReturnType<typeof parseShellCommand>): readonly TaintKind[] {
+	const kinds = new Set<TaintKind>();
+	const stack = [root];
+	while (stack.length > 0) {
+		const node = stack.pop()!;
+		for (const ind of node.sink_indicators) {
+			if (ind.kind === "fetch_tool") {
+				kinds.add("network_content");
+				kinds.add("prompt");
+			} else if (ind.kind === "secret_path") {
+				kinds.add("secret");
+				kinds.add("prompt");
+			} else if (ind.kind === "interpreter_inline_eval") {
+				kinds.add("prompt");
+			}
+		}
+		if (node.children) {
+			for (const child of node.children) stack.push(child);
+		}
+	}
+	return [...kinds];
+}
+
+function updateTaintSnapshotForPostTool(
+	input: ClaudeCodeHookInput,
+	toolName: string,
+	target: Target,
+): void {
+	const allKinds = taintKindsForTool(toolName);
+
+	// commit 7 narrowing: `Read` raises `prompt` only here. The `secret`
+	// kind on Read requires a `secret_read` match from `classifyToolEvent`
+	// in `@patchwork/core/sinks`, which is composed in commit 8 alongside
+	// the rest of the PreToolUse sink classifier wiring. Recording every
+	// Read as a secret source would make `clearTaint("secret")` reject
+	// without `--allow-secret-clear` after any read, which is wrong.
+	//
+	// commit 9: `Read` of a path matching the active policy's
+	// `trusted_paths` does NOT raise `prompt` taint. `FORCE_UNTRUSTED`
+	// patterns (README*, docs/**, node_modules/**, etc.) always win
+	// inside `isPathUntrustedRepo` so trusted_paths can never silence
+	// the prompt-injection canary surfaces.
+	let baseKinds: readonly TaintKind[] =
+		toolName === "Read"
+			? allKinds.filter((k) => k !== "secret")
+			: allKinds;
+	if (toolName === "Read" && baseKinds.includes("prompt")) {
+		const readPath = target.abs_path || target.path;
+		if (readPath && !readPathIsUntrusted(readPath, input.cwd)) {
+			baseKinds = baseKinds.filter((k) => k !== "prompt");
+		}
+	}
+
+	// commit 8: Bash taint via shell-parser indicators. `RAISES_FOR_TOOL.Bash`
+	// is intentionally empty; the actual mapping is derived from the
+	// parsed tree's sink indicators (e.g. `curl ...` → network_content +
+	// prompt). Parse failures here are non-fatal — if the recognizer
+	// returns "unknown" with no indicators, no taint is raised.
+	let bashKinds: readonly TaintKind[] = [];
+	let bashParsed: ReturnType<typeof parseShellCommand> | undefined;
+	if (toolName === "Bash") {
+		const cmd =
+			typeof (input.tool_input || {}).command === "string"
+				? ((input.tool_input || {}).command as string)
+				: "";
+		if (cmd.length > 0) {
+			bashParsed = parseShellCommand(cmd);
+			bashKinds = bashIndicatorTaint(bashParsed);
+		}
+	}
+
+	const kinds: readonly TaintKind[] = [
+		...baseKinds,
+		...bashKinds.filter((k) => !baseKinds.includes(k)),
+	];
+	if (kinds.length === 0) return;
+
+	const sessionId = input.session_id || generateSessionId();
+
+	// R1-003: hold a per-session lock across the read-modify-write so a
+	// concurrent PostToolUse for the same session can't race and lose
+	// updates.
+	withSessionLock(sessionId, () => {
+		doFoldedUpdate();
+	});
+	return;
+
+	function doFoldedUpdate(): void {
+	let snapshot = loadOrInitSnapshot(sessionId);
+	let changed = false;
+
+	const ts = Date.now();
+	const ref = pickSourceRef(toolName, target);
+
+	// Hash the tool's response body when present, so the source record
+	// pins the *content* that flowed in — not just the call. When there
+	// is no response body (e.g. a Write returning a status string),
+	// fall back to a tool-name-derived hash so the schema's required
+	// content_hash field is always populated.
+	const responseText =
+		input.tool_response?.output ||
+		input.tool_response?.content ||
+		input.tool_response?.stdout ||
+		"";
+	const content_hash =
+		typeof responseText === "string" && responseText.length > 0
+			? hashContent(responseText)
+			: hashContent(`tool:${toolName}:${ts}`);
+
+	for (const kind of kinds) {
+		if (kind === "generated_file") {
+			// generated_file taint is path-anchored. The upstream set is
+			// every currently-active source across all kinds — that's
+			// what `registerGeneratedFile` records as the provenance
+			// list for this write. A write with no upstream taint is a
+			// no-op: clean output stays clean.
+			const path = target.abs_path || target.path;
+			if (!path) continue;
+			const upstream: TaintSource[] = ALL_TAINT_KINDS.flatMap((k) =>
+				getActiveSources(snapshot, k),
+			);
+			if (upstream.length === 0) continue;
+			snapshot = registerGeneratedFile(snapshot, path, upstream);
+			changed = true;
+		} else {
+			snapshot = registerTaint(snapshot, kind, {
+				ts,
+				ref,
+				content_hash,
+			});
+			changed = true;
+		}
+	}
+
+	// Skip the write when nothing actually changed — avoids churn for
+	// tools whose only kind is `generated_file` and that run before any
+	// upstream taint has been recorded.
+	if (!changed) return;
+
+	// R1-002: set the .pending marker just before the write, clear it
+	// after success. A crash between set and clear leaves the marker on
+	// disk and the next PreToolUse reads `null` (fail-closed). The
+	// marker does NOT wrap the load — readers would otherwise mistake
+	// a healthy write-in-progress for staleness inside the same lock.
+	try {
+		setPendingMarker(sessionId);
+		writeTaintSnapshot(snapshot);
+	} finally {
+		clearPendingMarker(sessionId);
+	}
 	}
 }
 
