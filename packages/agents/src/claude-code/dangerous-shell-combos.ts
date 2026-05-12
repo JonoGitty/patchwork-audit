@@ -74,52 +74,108 @@ const EGRESS_KINDS: ReadonlySet<SinkIndicatorKind> = new Set<SinkIndicatorKind>(
 ]);
 
 /**
- * Argv heads that dump the environment / secrets. R2-004 fix —
- * `env | base64 | curl` was a documented A2 gap until GPT-5.5 pointed
- * out that the env-dump-to-network pattern is recognizable WITHOUT
- * URL allowlisting. These argv heads represent commands whose output
- * commonly contains environment variables, secrets, or session
- * state, and whose presence in a pipeline that egresses to a network
- * sink is a direct exfiltration signal.
+ * Argv heads that dump the environment / secrets. R2-004 +
+ * R3-002/R3-003 fixes.
  *
- *   - `env` with no operand-style args = print env
- *   - `printenv` = print env
+ * R2-004 origin: `env | base64 | curl` was a documented A2 gap until
+ * GPT-5.5 pointed out that the env-dump-to-network pattern is
+ * recognizable WITHOUT URL allowlisting.
+ *
+ * Recognized dump shapes (covered by `isEnvDump` below):
+ *
+ *   - `env` / `printenv` with zero args = print env
+ *   - `set` with EXACTLY zero args = print all shell variables.
+ *     R3-002: `set -e`, `set -u`, `set -o pipefail`, `set -euo pipefail`
+ *     are option-setting only, NOT env dumps. Treating them as such
+ *     false-positives on every defensive shell prologue. We now require
+ *     argv.length === 1 (just `set`) before classifying as env dump.
  *   - `export -p` = print exported vars
- *   - `set` with no args = print all shell vars
- *   - `declare -x` / `declare -p` = print declared vars
+ *   - `declare -p` / `declare -x` / `declare -px` / `declare -xp`
+ *   - `typeset -p` / `typeset -x` / `typeset -px` (ksh/zsh aliases)
+ *   - `readonly -p` = print readonly vars
+ *   - `compgen -e` = list exported variable names (bash)
+ *   - argv contains `/proc/self/environ`, `/proc/$$/environ`, or
+ *     `/proc/<pid>/environ` directly (e.g. `cat /proc/self/environ`)
+ *   - a node has a stdin redirect (`<`, `<<<`) from `/proc/self/environ`
+ *     or sibling — e.g. `tr '\0' '\n' </proc/self/environ`
  *
  * We don't try to be exhaustive — the keystone catches anything we
- * miss when the parse is non-`high` and the session is tainted. This
- * is the specific high-confidence shape the v0.6.11 release-gate
- * test A2 demands.
+ * miss when the parse is non-`high` and the session is tainted.
+ * Language-level forms (`python -c 'import os; print(os.environ)'`)
+ * are deferred to v0.6.12 formal-source modeling.
  */
-const ENV_DUMP_HEADS: ReadonlySet<string> = new Set([
+const ENV_DUMP_BARE_HEADS: ReadonlySet<string> = new Set([
 	"env",
 	"printenv",
-	"set",
 ]);
+
+const PROC_ENVIRON_RE = /^\/proc\/(self|\$\$|\d+)\/environ$/;
+
+/** True if `s` is `-p`, `-x`, `-px`, `-xp` (declare/typeset dump flags). */
+function isDeclareDumpFlag(s: string): boolean {
+	return s === "-p" || s === "-x" || s === "-px" || s === "-xp";
+}
 
 /** True if `node` looks like an environment-dump invocation. */
 function isEnvDump(node: ShellParsedCommand): boolean {
+	// Redirection from /proc/<pid>/environ is itself a dump — even on a
+	// node whose argv is just `cat`, `tr`, `xargs`, etc.
+	for (const r of node.redirects) {
+		if (
+			(r.kind === "stdin_file" || r.kind === "herestring") &&
+			r.target_resolved &&
+			PROC_ENVIRON_RE.test(r.target)
+		) {
+			return true;
+		}
+	}
+
 	const argv = node.argv;
 	if (argv === "unresolved") {
 		// Resolved head is the parser's best-effort first word even
 		// when the rest is dynamic — check it.
 		const head = node.resolved_head;
-		return typeof head === "string" && ENV_DUMP_HEADS.has(head);
+		if (typeof head === "string" && ENV_DUMP_BARE_HEADS.has(head)) return true;
+		return false;
 	}
 	if (argv.length === 0) return false;
 	const head = argv[0];
-	if (ENV_DUMP_HEADS.has(head)) return true;
-	// `export -p` and `declare -p` / `declare -x` dump too.
+
+	// Any argv element naming /proc/<pid>/environ is a dump regardless
+	// of the head — `cat /proc/self/environ`, `xargs -0 /proc/$$/environ`.
+	for (const a of argv) {
+		if (PROC_ENVIRON_RE.test(a)) return true;
+	}
+
+	// env / printenv with zero args
+	if (ENV_DUMP_BARE_HEADS.has(head) && argv.length === 1) return true;
+
+	// R3-002: `set` ONLY dumps when bare. `set -e`, `set -euo pipefail`,
+	// `set -o pipefail` are option-setting and must NOT trip this rule.
+	if (head === "set" && argv.length === 1) return true;
+
+	// export -p
 	if (head === "export" && argv.length === 2 && argv[1] === "-p") return true;
+
+	// declare/typeset -p, -x, -px, -xp
 	if (
-		head === "declare" &&
+		(head === "declare" || head === "typeset") &&
 		argv.length === 2 &&
-		(argv[1] === "-p" || argv[1] === "-x")
+		isDeclareDumpFlag(argv[1])
 	) {
 		return true;
 	}
+
+	// readonly -p
+	if (head === "readonly" && argv.length === 2 && argv[1] === "-p") {
+		return true;
+	}
+
+	// compgen -e
+	if (head === "compgen" && argv.length === 2 && argv[1] === "-e") {
+		return true;
+	}
+
 	return false;
 }
 

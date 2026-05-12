@@ -43,6 +43,46 @@ For each scenario, the session also accumulates a durable audit chain
 with DSSE/in-toto attestations for any commits made during the session — so a
 denied attempt is also visible in the audit trail.
 
+## Same-UID approval boundary (R3-001)
+
+The single most important caveat in v0.6.11's threat model: **the agent
+runs as the same UID as the user**. Anything the user can do from their
+shell, the agent can also do from its `Bash` tool — including running
+`patchwork approve <id>`, `patchwork clear-taint`, or
+`patchwork trust-repo-config '**'`.
+
+There is no purely in-process check (TTY detection, environment variable,
+parent-PID inspection, controlling-terminal sniffing) that survives an
+agent with shell access running at the same UID. The agent can:
+
+- allocate a pseudo-terminal via `script -q -c '...'`, `expect`,
+  `python -c 'import pty; pty.spawn(...)'`, or `socat`, which makes the
+  child's stdin/stdout look like TTYs to any check inside the CLI;
+- set arbitrary environment variables in the child it spawns;
+- read its own controlling terminal's path and pass it through.
+
+v0.6.11's defense is therefore layered, with the primary boundary
+**outside** the CLI process:
+
+1. **Primary — system-policy command-prefix denies.** The PreToolUse
+   hook (running before the agent's `Bash` subprocess spawns) evaluates
+   `/Library/Patchwork/policy.yml` with a regex deny against
+   `patchwork approve|clear-taint|trust-repo-config`. This is the line
+   that actually refuses agent invocations. The policy file is
+   root-owned and the agent cannot rewrite it.
+2. **Secondary — TTY check inside the CLI** (defense-in-depth). If the
+   hook ever loses coverage or the agent finds a path that bypasses the
+   PreToolUse pipeline, the CLI still refuses non-TTY stdin/stdout.
+   This is **not** a security boundary — a determined agent with `script`
+   available can pass it.
+3. **Hardening removed in R3-001.** The previous
+   `PATCHWORK_HUMAN_CONTEXT=1` environment override was agent-settable
+   (same UID = same env) and offered no real escape valve, only an
+   apparent one. Removed.
+
+The proper out-of-band approval mechanism — a root-owned daemon the
+agent process literally cannot speak to — is on the v0.6.12 roadmap.
+
 ## What v0.6.11 does NOT defend against
 
 Patchwork is a **deterministic policy layer**, not a semantic firewall. It
@@ -123,8 +163,10 @@ the keystone (the rule consults taint and `null` collapses to "tainted").
 |---|---|---|
 | R1-001 / R1-008 | Snapshot authenticity | HMAC/signature via root-owned relay signing proxy. |
 | R1-011 | fsync durability | fsync the temp file + parent dir; moot once authenticity lands. |
-| A2 | URL-allowlist + body-shape detection | Implementation of the v0.6.12 network policy. |
+| A2 (broader) | URL-allowlist + body-shape detection | v0.6.12 network policy. (env-dump-to-network and `/proc/self/environ` variants closed in v0.6.11 R2-004/R3-003; arbitrary allowed-domain exfil remains.) |
 | A7 (formal) | Dedicated `generated_file_execute` sink class | Currently caught by combo rules; v0.6.12 makes it a first-class class with dedicated tests. |
+| R3-001 (residual) | Out-of-band approval daemon | Root-owned approval channel the agent process cannot reach, removing the same-UID approval residual. |
+| R3-003 (residual) | Language-level env exfil | `python -c 'import os; print(os.environ)'`, Node/Ruby equivalents; deferred to formal source modeling in v0.6.12. |
 
 See `REVIEWS/2026-05-12-gpt55-v0.6.11-r1-fix-status.md` for the full
 R1 audit fix-status table.

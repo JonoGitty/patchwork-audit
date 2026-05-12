@@ -68,7 +68,10 @@ describe("checkHumanContext (R2-001/002 fix)", () => {
 		expect(checkHumanContext().ok).toBe(false);
 	});
 
-	it("PATCHWORK_HUMAN_CONTEXT=1 override bypasses both TTY checks", () => {
+	// R3-001: the agent-settable env override is removed. ANY value of
+	// PATCHWORK_HUMAN_CONTEXT must NOT bypass the TTY check, because
+	// the agent runs as the same UID and can trivially set env vars.
+	it("PATCHWORK_HUMAN_CONTEXT=1 does NOT bypass TTY check (R3-001)", () => {
 		Object.defineProperty(process.stdin, "isTTY", {
 			configurable: true,
 			value: false,
@@ -78,10 +81,10 @@ describe("checkHumanContext (R2-001/002 fix)", () => {
 			value: false,
 		});
 		process.env.PATCHWORK_HUMAN_CONTEXT = "1";
-		expect(checkHumanContext().ok).toBe(true);
+		expect(checkHumanContext().ok).toBe(false);
 	});
 
-	it("PATCHWORK_HUMAN_CONTEXT=anything-else does NOT bypass", () => {
+	it("PATCHWORK_HUMAN_CONTEXT=anything-else also does NOT bypass (R3-001)", () => {
 		Object.defineProperty(process.stdin, "isTTY", {
 			configurable: true,
 			value: false,
@@ -89,7 +92,6 @@ describe("checkHumanContext (R2-001/002 fix)", () => {
 		process.env.PATCHWORK_HUMAN_CONTEXT = "0";
 		expect(checkHumanContext().ok).toBe(false);
 		process.env.PATCHWORK_HUMAN_CONTEXT = "true";
-		// Strict equality to "1" — anything else is rejected.
 		expect(checkHumanContext().ok).toBe(false);
 	});
 });

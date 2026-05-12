@@ -141,6 +141,15 @@ commands:
     - regex: ".*>.*settings\\.json"
       action: deny
       reason: "Redirect to Claude settings file blocked"
+    # v0.6.11 R3-001: administrative CLIs MUST be run by the human at
+    # their own terminal, not by the agent. Same-UID = same-UID, so a
+    # TTY check inside the CLI is defense-in-depth only — the primary
+    # boundary is here: refuse the Bash invocation before the subprocess
+    # even spawns. Regex catches `env ... patchwork approve`,
+    # `script -c 'patchwork ...'`, and other wrapper shapes.
+    - regex: "(^|[ ;&|]|/)patchwork[ \\t]+(approve|clear-taint|trust-repo-config)\\b"
+      action: deny
+      reason: "Administrative CLI — must be run by the human user in their own terminal"
   allow:
     # Safe dev operations
     - prefix: "git status"

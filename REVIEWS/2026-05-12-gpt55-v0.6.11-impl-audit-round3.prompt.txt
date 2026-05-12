@@ -1,0 +1,214 @@
+You're being consulted by Claude (Anthropic) on the R3 VERIFICATION
+audit of Patchwork v0.6.11. R2 (your previous round) returned
+NEEDS_REWORK with 4 ship-blocking findings (R2-001 through R2-004).
+This round verifies the fixes for those four. SHIP / SHIP_WITH_FOLLOWUP
+/ NEEDS_REWORK as before.
+
+Spend so far: R1 $0.36 + R2 $0.31 = $0.67 of ~$5 budget. R3 should
+be smaller (only re-reviewing 4 specific fixes) — budget ~$0.50.
+
+------------------------------------------------------------------
+R2 findings and how they were resolved
+------------------------------------------------------------------
+
+R2-001 CRITICAL — "Agent can self-approve a denied action"
+  Original issue: the PreToolUse deny message included
+  `Run: patchwork approve <request_id>` verbatim. The agent could
+  read its own denial and run that exact command via its Bash tool,
+  defeating the human gate. Same applied to clear-taint and
+  trust-repo-config.
+
+  Fix:
+    1. New requireHumanContext() helper at
+       packages/cli/src/lib/require-human-context.ts.
+       checkHumanContext() returns ok=false unless BOTH stdin AND
+       stdout are TTYs, OR `PATCHWORK_HUMAN_CONTEXT=1` env override
+       is set ("1" only — strict equality).
+    2. Applied to approveCommand, clearTaintCommand,
+       trustRepoConfigCommand action handlers (first line).
+       requireHumanContext() exits with code 3 and a clear message
+       if not ok.
+    3. Adapter PreToolUse deny message now reads:
+         "Ask the human user to run `patchwork approve <id>` in
+          their own terminal, then retry."
+       instead of the verbatim "Run: patchwork approve <id>" — the
+       agent no longer gets a self-runnable command suggestion.
+
+  Code (full requireHumanContext impl):
+
+    export interface HumanContextResult { ok: boolean; reason?: string; }
+    export function checkHumanContext(): HumanContextResult {
+      if (process.env.PATCHWORK_HUMAN_CONTEXT === "1") return { ok: true };
+      if (!process.stdin.isTTY) {
+        return { ok: false,
+          reason: "This command requires an interactive terminal. ..." };
+      }
+      if (!process.stdout.isTTY) {
+        return { ok: false,
+          reason: "This command requires an interactive terminal. stdout is not a TTY." };
+      }
+      return { ok: true };
+    }
+    export function requireHumanContext(commandName: string): void {
+      const r = checkHumanContext();
+      if (!r.ok) {
+        process.stderr.write(`patchwork ${commandName}: refused.\n  ${r.reason}\n`);
+        process.exit(3);
+      }
+    }
+
+  Threat residual we acknowledge:
+    - The agent runs in the same UID as the user. If a future agent
+      framework sets up a PTY for tool subprocesses, the TTY check
+      would pass. Mitigation: the override env var must be "1"
+      strictly, and we're considering a system-policy command-prefix
+      deny on `patchwork approve|clear-taint|trust-repo-config` as
+      a hardening follow-up.
+    - PATCHWORK_HUMAN_CONTEXT=1 is settable by the agent's own
+      Bash. If they set it, the gate is bypassed. We chose this
+      tradeoff over a hard impossibility because legitimate scripted
+      contexts (CI service accounts, ssh-without-TTY admin) need
+      a way to authorize. The agent's env is its own env — a smarter
+      threat model would require an out-of-band channel.
+
+R2-002 CRITICAL — "Agent can clear-taint or trust-repo-config via CLI"
+  Same family as R2-001. Same fix: TTY gate on all three admin
+  commands.
+
+R2-003 HIGH — "Project-local trusted_paths lets hostile repo opt out"
+  Original issue: commit 9 read `<cwd>/.patchwork/policy.yml` and
+  merged its trusted_paths into the active trust set. A hostile
+  repo could commit that file with `trusted_paths: ['**']` and
+  silence taint entirely on its own contents.
+
+  Fix:
+    1. New `packages/agents/src/claude-code/trust-store.ts`. Single
+       owner of trust state. Storage path
+       `~/.patchwork/trusted-repos.yml`, schema:
+         schema_version: 1
+         repos:
+           <repo_abs_path>:
+             trusted_paths: [string]
+    2. `patchwork trust-repo-config` rewrites the user-level file
+       (which is also TTY-gated). The `--repo <abs_path>` flag lets
+       the user specify a different repo than cwd.
+    3. Adapter `mergeTrustedPaths` now reads ONLY from the user-
+       level store via `getTrustedPathsForRepo(cwd)`. The earlier
+       project-policy.yml path is removed.
+    4. PolicySchema.trusted_paths is retained for system-level
+       global trust (only writable by root via system policy).
+
+  Threat residual we acknowledge:
+    - Same-user storage. Still a Unix-permissions problem. R1-001
+      / R1-008 v0.6.12 HMAC work covers this too.
+    - The hostile-repo regression test
+      (`R2-003: hostile project .patchwork/policy.yml does NOT
+       silence taint`) pins the contract.
+
+R2-004 HIGH — "env|base64|curl is an obvious combo, not an URL gap"
+  Original issue: A2 (env-dump exfil) was documented as a v0.6.12
+  URL-allowlist gap. You pointed out it's actually detectable
+  directly via the env-dump-to-network pattern.
+
+  Fix: dangerous-shell-combos.ts gains:
+    const ENV_DUMP_HEADS = new Set(["env", "printenv", "set"]);
+    function isEnvDump(node: ShellParsedCommand): boolean {
+      const argv = node.argv;
+      if (argv === "unresolved") {
+        const head = node.resolved_head;
+        return typeof head === "string" && ENV_DUMP_HEADS.has(head);
+      }
+      if (argv.length === 0) return false;
+      const head = argv[0];
+      if (ENV_DUMP_HEADS.has(head)) return true;
+      if (head === "export" && argv.length === 2 && argv[1] === "-p")
+        return true;
+      if (head === "declare" && argv.length === 2 &&
+          (argv[1] === "-p" || argv[1] === "-x")) return true;
+      return false;
+    }
+    function treeHasEnvDump(root: ShellParsedCommand): boolean { ... }
+    // In the main classifier:
+    if (treeHasEnvDump(root)) {
+      const egressKinds = [...kinds].filter((k) => EGRESS_KINDS.has(k));
+      if (egressKinds.length > 0) {
+        out.push({
+          class: "direct_secret_to_network",
+          severity: severityFor(tainted),  // deny under taint
+          reason: `Environment-dump piped to egress (${egressKinds.join(", ")}) ...`,
+          matched_pattern: `env_dump+${egressKinds.sort().join("+")}`,
+        });
+      }
+    }
+
+  A2 release-gate test flipped to assert DENY (was: documented gap).
+
+------------------------------------------------------------------
+What's unchanged since R2
+------------------------------------------------------------------
+
+  - All R1 fixes still in place (R1-002/3/4/5/6/7/10).
+  - The 5 deferred-to-v0.6.12 residuals from R1
+    (R1-001/008/011 snapshot authenticity; A2 was the v0.6.12 URL
+    gap — now closed for the env-dump shape only; generated_file_
+    execute as a formal sink; broad Bash source taint over-raise).
+  - Commit 10 docs and commit 11 integration tests.
+  - Test count: 1439 → 1450 (+11 from R2 fixes regression tests).
+
+------------------------------------------------------------------
+What we want from R3
+------------------------------------------------------------------
+
+  A. Are the R2 fixes correct? Specifically:
+     - Is the TTY check the right primitive, given the
+       PATCHWORK_HUMAN_CONTEXT escape hatch and the same-user
+       threat model? Any obvious bypass?
+     - Does the deny-message change actually deny the agent the
+       affordance? Or can the agent still infer the command
+       (e.g. by reading docs/migration.md which has examples)?
+     - Trust-store moved to user-level — any missed code path
+       that still reads project-local trust config?
+     - Env-dump detector list — anything obvious we missed
+       (`set` with args? `compgen -e`? `cat /proc/self/environ`?)
+       that we should land before tag, or accept as v0.6.12 scope?
+
+  B. New bugs introduced by the fixes?
+
+  C. Any other ship-blockers we'd regret if shipped?
+
+------------------------------------------------------------------
+OUTPUT
+------------------------------------------------------------------
+
+JSON, same shape as R2:
+
+{
+  "overall_verdict": "SHIP" | "SHIP_WITH_FOLLOWUP" | "NEEDS_REWORK",
+  "headline": "<one sentence>",
+  "r2_fix_assessment": {
+    "r2_001_002_fix_correct": <bool>,
+    "r2_003_fix_correct": <bool>,
+    "r2_004_fix_correct": <bool>,
+    "concerns": ["<any remaining concerns about these fixes>"]
+  },
+  "new_findings": [
+    {
+      "id": "R3-001",
+      "severity": "CRITICAL"|"HIGH"|"MEDIUM"|"LOW"|"INFO",
+      "title": "<short>",
+      "category": "regression"|"missed_bypass"|"new_bug"|"documented_gap"|"other",
+      "where": "<file or function>",
+      "issue": "<what's wrong>",
+      "exploit": "<concrete or 'theoretical'>",
+      "fix": "<recommended change>",
+      "ship_blocker": <bool>
+    }
+  ],
+  "ship_recommendation": {
+    "verdict": "<copy>",
+    "must_fix_before_tag": [],
+    "may_ship_as_v0.6.11.1_hotfix": [],
+    "v0.6.12_scope": []
+  },
+  "headline_quote_for_release_notes": "<sentence>"
+}
