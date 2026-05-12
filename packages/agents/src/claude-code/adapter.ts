@@ -5,8 +5,11 @@ import {
 	type Target,
 	type TaintKind,
 	type TaintSource,
+	type TaintSnapshot,
+	type ToolEvent,
 	CURRENT_SCHEMA_VERSION,
 	classifyRisk,
+	classifyToolEvent,
 	evaluatePolicy,
 	generateEventId,
 	generateSessionId,
@@ -16,6 +19,7 @@ import {
 	loadActivePolicy,
 	getHomeDir,
 	sendToRelayAsync,
+	parseShellCommand,
 	ALL_TAINT_KINDS,
 	RAISES_FOR_TOOL,
 	getActiveSources,
@@ -24,8 +28,13 @@ import {
 } from "@patchwork/core";
 import {
 	loadOrInitSnapshot,
+	readTaintSnapshot,
 	writeTaintSnapshot,
 } from "./taint-store.js";
+import {
+	decidePreToolUse,
+	type PreToolDecision,
+} from "./pre-tool-decision.js";
 import { isAbsolute, relative, dirname, join } from "node:path";
 import {
 	existsSync,
@@ -377,7 +386,152 @@ function handlePreToolUse(store: Store, input: ClaudeCodeHookInput): ClaudeCodeH
 		};
 	}
 
+	// --- v0.6.11 commit 8: sink + taint enforcement layer ---------------
+	// Runs after the rule-based policy allows. Can only escalate to deny
+	// or approval_required; never relaxes a policy decision. Errors here
+	// fail closed — a bug in the enforcement layer must not silently
+	// allow.
+	let taintDecision: PreToolDecision;
+	try {
+		taintDecision = computeTaintSinkDecision(
+			input,
+			toolName,
+			target,
+			decision,
+		);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		const event = buildEvent(input, {
+			action: mapped.action,
+			status: "denied",
+			target,
+			provenance: { hook_event: "PreToolUse", tool_name: toolName },
+		});
+		store.append(event);
+		fireWebhookAlert(event);
+		return {
+			hookSpecificOutput: {
+				hookEventName: "PreToolUse",
+				permissionDecision: "deny",
+				permissionDecisionReason: `[Patchwork] enforcement layer error (fail-closed): ${msg}`,
+			},
+		};
+	}
+
+	if (taintDecision.verdict !== "allow") {
+		const event = buildEvent(input, {
+			action: mapped.action,
+			status: "denied",
+			target,
+			provenance: { hook_event: "PreToolUse", tool_name: toolName },
+		});
+		store.append(event);
+		fireWebhookAlert(event);
+
+		const prefix =
+			taintDecision.verdict === "approval_required"
+				? "[Patchwork] approval required"
+				: "[Patchwork] denied";
+		return {
+			hookSpecificOutput: {
+				hookEventName: "PreToolUse",
+				permissionDecision: "deny",
+				permissionDecisionReason: `${prefix}: ${taintDecision.reason} (rule: ${taintDecision.rule})`,
+			},
+		};
+	}
+
 	return {};
+}
+
+// ---------------------------------------------------------------------------
+// Commit 8: ToolEvent construction + taint/sink decision plumbing
+// ---------------------------------------------------------------------------
+
+/**
+ * A synthetic snapshot used by `computeTaintSinkDecision` whenever the
+ * persisted file is missing or corrupt. Carries exactly one source under
+ * every kind so `classify.ts`'s persistence severity flip sees "tainted"
+ * and escalates writes to `deny` rather than `approval_required`. The
+ * decision composer's reader-fail-closed semantics independently treat
+ * `null` as tainted for the keystone rule, so the two layers agree.
+ */
+function syntheticTaintForFailClosed(sessionId: string): TaintSnapshot {
+	const by_kind: Record<string, TaintSource[]> = {};
+	const fakeSource: TaintSource = {
+		ts: 0,
+		ref: "patchwork:fail-closed-synthetic",
+		content_hash: "sha256:fail-closed-synthetic",
+	};
+	for (const kind of ALL_TAINT_KINDS) {
+		by_kind[kind] = [fakeSource];
+	}
+	return {
+		session_id: sessionId,
+		by_kind,
+		generated_files: {},
+	};
+}
+
+/**
+ * Build the inputs the decision composer needs and call it. Returns the
+ * composer's verdict; the caller turns that into a hook output.
+ */
+function computeTaintSinkDecision(
+	input: ClaudeCodeHookInput,
+	toolName: string,
+	target: Target,
+	policyDecision: { allowed: boolean; reason?: string },
+): PreToolDecision {
+	const sessionId = input.session_id || generateSessionId();
+	const snapshot = readTaintSnapshot(sessionId);
+
+	// Build a minimal ToolEvent for the sink classifier. The classifier
+	// only consumes `tool`, `target_paths`/`resolved_paths`, and
+	// `taint_state` today — keep the rest defaulted. When the snapshot
+	// is null we substitute the synthetic "all-active" taint so
+	// classify.ts's severity flip sees a tainted session.
+	const targetPaths: string[] = [];
+	if (target.path) targetPaths.push(target.path);
+	if (target.abs_path && target.abs_path !== target.path) {
+		targetPaths.push(target.abs_path);
+	}
+
+	const toolEvent: ToolEvent = {
+		tool: toolName,
+		phase: "pre",
+		cwd: input.cwd,
+		project_root: input.cwd,
+		raw_input: input.tool_input ?? {},
+		target_paths: targetPaths,
+		resolved_paths: targetPaths,
+		urls: target.url ? [target.url] : [],
+		hosts: [],
+		taint_state:
+			snapshot ?? syntheticTaintForFailClosed(sessionId),
+		policy_version: "v0.6.11-pre.1",
+	};
+	const sinkMatches = classifyToolEvent(toolEvent);
+
+	// Parse Bash commands so the keystone rule can see indicators and
+	// confidence. Other tools skip this — there's no shell to parse.
+	let parsedCommand: ReturnType<typeof parseShellCommand> | undefined;
+	if (toolName === "Bash") {
+		const cmd =
+			typeof (input.tool_input || {}).command === "string"
+				? ((input.tool_input || {}).command as string)
+				: "";
+		if (cmd.length > 0) {
+			parsedCommand = parseShellCommand(cmd);
+		}
+	}
+
+	return decidePreToolUse({
+		policy: policyDecision,
+		sinkMatches,
+		parsedCommand,
+		taintSnapshot: snapshot,
+	});
 }
 
 async function handlePostToolUse(
@@ -637,13 +791,44 @@ function pickSourceRef(toolName: string, target: Target | undefined): string {
  * try/catch per the source-fail-open contract (see header on
  * `taint-store.ts`).
  */
+/**
+ * Walk a parsed shell tree and return the deduplicated set of taint
+ * kinds the indicators imply for a PostToolUse update.
+ *
+ * Mapping (v0.6.11 commit 8 conservative scope):
+ *   - `fetch_tool` (curl/wget/http) → `network_content` + `prompt`
+ *     (the response body is now in the session's context)
+ *
+ * Other commit-4 indicator kinds (interpreter, pipe_to_interpreter,
+ * eval_construct, …) are NOT mapped here yet — they describe what the
+ * command DID, but PostToolUse is about what came INTO context as a
+ * result. A `sh -c 'date'` doesn't taint the session; a `curl ...`
+ * does. Later commits can widen this mapping if needed.
+ */
+function bashIndicatorTaint(root: ReturnType<typeof parseShellCommand>): readonly TaintKind[] {
+	const kinds = new Set<TaintKind>();
+	const stack = [root];
+	while (stack.length > 0) {
+		const node = stack.pop()!;
+		for (const ind of node.sink_indicators) {
+			if (ind.kind === "fetch_tool") {
+				kinds.add("network_content");
+				kinds.add("prompt");
+			}
+		}
+		if (node.children) {
+			for (const child of node.children) stack.push(child);
+		}
+	}
+	return [...kinds];
+}
+
 function updateTaintSnapshotForPostTool(
 	input: ClaudeCodeHookInput,
 	toolName: string,
 	target: Target,
 ): void {
 	const allKinds = taintKindsForTool(toolName);
-	if (allKinds.length === 0) return;
 
 	// commit 7 narrowing: `Read` raises `prompt` only here. The `secret`
 	// kind on Read requires a `secret_read` match from `classifyToolEvent`
@@ -651,10 +836,33 @@ function updateTaintSnapshotForPostTool(
 	// the rest of the PreToolUse sink classifier wiring. Recording every
 	// Read as a secret source would make `clearTaint("secret")` reject
 	// without `--allow-secret-clear` after any read, which is wrong.
-	const kinds =
+	const baseKinds: readonly TaintKind[] =
 		toolName === "Read"
 			? allKinds.filter((k) => k !== "secret")
 			: allKinds;
+
+	// commit 8: Bash taint via shell-parser indicators. `RAISES_FOR_TOOL.Bash`
+	// is intentionally empty; the actual mapping is derived from the
+	// parsed tree's sink indicators (e.g. `curl ...` → network_content +
+	// prompt). Parse failures here are non-fatal — if the recognizer
+	// returns "unknown" with no indicators, no taint is raised.
+	let bashKinds: readonly TaintKind[] = [];
+	let bashParsed: ReturnType<typeof parseShellCommand> | undefined;
+	if (toolName === "Bash") {
+		const cmd =
+			typeof (input.tool_input || {}).command === "string"
+				? ((input.tool_input || {}).command as string)
+				: "";
+		if (cmd.length > 0) {
+			bashParsed = parseShellCommand(cmd);
+			bashKinds = bashIndicatorTaint(bashParsed);
+		}
+	}
+
+	const kinds: readonly TaintKind[] = [
+		...baseKinds,
+		...bashKinds.filter((k) => !baseKinds.includes(k)),
+	];
 	if (kinds.length === 0) return;
 
 	const sessionId = input.session_id || generateSessionId();
