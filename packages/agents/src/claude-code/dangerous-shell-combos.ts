@@ -74,6 +74,120 @@ const EGRESS_KINDS: ReadonlySet<SinkIndicatorKind> = new Set<SinkIndicatorKind>(
 ]);
 
 /**
+ * R5-001: semantic admin-CLI invocation detector.
+ *
+ * R3-001 introduced a system-policy regex deny for `patchwork approve|
+ * clear-taint|trust-repo-config` so the agent could not self-approve a
+ * denied action. R4-001 broadened the left boundary to catch quoted
+ * PTY wrappers like `script -q -c 'patchwork approve <id>'`. R5-001 is
+ * the third class of bypass: shell quoting/escaping *inside* the
+ * command word itself preserves the executed command name while
+ * breaking the raw-string regex match:
+ *
+ *   script -q -c "'patchwork' approve abc" /dev/null
+ *   script -q -c "p'atch'work approve abc" /dev/null
+ *   bash -c '"patchwork" approve abc'
+ *
+ * The shell parser STRIPS those quotes when producing the resolved
+ * argv, so a semantic check on the parsed argv catches the class of
+ * issue once and for all — regardless of which quoting form the
+ * attacker chooses. This is the v0.6.11 fix; v0.6.12 plans an
+ * out-of-band approval daemon that makes the boundary location-
+ * independent.
+ */
+const ADMIN_CLI_VERBS: ReadonlySet<string> = new Set([
+	"approve",
+	"clear-taint",
+	"trust-repo-config",
+]);
+
+/**
+ * R6-001: Peel residual flag args of shell command modifiers
+ * `command` / `exec`.
+ *
+ * The core parser already unwraps the modifier *word* itself (see
+ * unwrapCompoundPrefixes in packages/core/src/shell/parse.ts) but it
+ * doesn't strip the modifier's own flag args, so e.g.
+ *   `exec -a fakename patchwork approve abc`
+ * arrives here with argv = ["-a", "fakename", "patchwork", "approve", "abc"]
+ * and resolved_head = "exec". We use resolved_head to know the original
+ * modifier and peel its flag arguments off the front of argv.
+ *
+ *   exec -a NAME   → 2 tokens
+ *   command -p     → 1 token
+ *   command -v     → 1 token (prints path; not a real exec, but harmless to deny)
+ *   command -V     → 1 token (same)
+ *
+ * After peeling, argv[0] is the effective executable token the shell
+ * would actually run, and the basename/verb check works normally.
+ */
+const MODIFIER_HEADS: ReadonlySet<string> = new Set(["command", "exec"]);
+
+function basenameOf(p: string): string {
+	const i = p.lastIndexOf("/");
+	return i < 0 ? p : p.substring(i + 1);
+}
+
+function peelModifierFlags(
+	argv: readonly string[],
+	originalHead: string | undefined,
+): readonly string[] {
+	if (!originalHead || !MODIFIER_HEADS.has(originalHead)) return argv;
+	let i = 0;
+	while (i < argv.length && argv[i].startsWith("-")) {
+		if (originalHead === "exec" && argv[i] === "-a" && i + 1 < argv.length) {
+			i += 2;
+			continue;
+		}
+		// Single short flag (command's -p/-v/-V, or any other flag the
+		// modifier might accept) — skip one token. Conservative but
+		// safe: false positives are bounded by the basename + verb
+		// checks below, which still must both match.
+		i += 1;
+	}
+	return argv.slice(i);
+}
+
+/**
+ * True if `node` is an invocation of the `patchwork` CLI with one of
+ * the administrative verbs. Handles:
+ *   - bare command name: `patchwork approve ...`
+ *   - any path: `./patchwork`, `/usr/local/bin/patchwork`, `~/.local/bin/patchwork`
+ *   - quoted forms after parser quote-stripping: `'patchwork' approve ...`,
+ *     `"patchwork" approve ...`, `p'atch'work approve ...`
+ *   - shell command modifiers (R6-001): `command patchwork approve`,
+ *     `exec patchwork approve`, `exec -a foo patchwork approve`
+ *
+ * Also returns true when argv is unresolved but resolved_head's
+ * basename is `patchwork` — the parser's best-effort first word covers
+ * cases where the argv as a whole couldn't be resolved.
+ */
+function isAdminCliInvocation(node: ShellParsedCommand): boolean {
+	const argv = node.argv;
+	if (argv === "unresolved") {
+		const head = node.resolved_head;
+		if (typeof head !== "string") return false;
+		return basenameOf(head) === "patchwork";
+	}
+	const peeled = peelModifierFlags(argv, node.resolved_head);
+	if (peeled.length < 2) return false;
+	if (basenameOf(peeled[0]) !== "patchwork") return false;
+	return ADMIN_CLI_VERBS.has(peeled[1]);
+}
+
+function treeHasAdminCliInvocation(root: ShellParsedCommand): boolean {
+	const stack: ShellParsedCommand[] = [root];
+	while (stack.length > 0) {
+		const node = stack.pop() as ShellParsedCommand;
+		if (isAdminCliInvocation(node)) return true;
+		if (node.children) {
+			for (const child of node.children) stack.push(child);
+		}
+	}
+	return false;
+}
+
+/**
  * Argv heads that dump the environment / secrets. R2-004 +
  * R3-002/R3-003 fixes.
  *
@@ -239,6 +353,25 @@ export function classifyDangerousShellCombos(
 ): SinkMatch[] {
 	const { all, kinds } = collect(root);
 	const out: SinkMatch[] = [];
+
+	// 0. R5-001: agent invocation of administrative `patchwork` CLI.
+	//    Always deny — regardless of taint state — because the agent
+	//    must never authorize its own actions. Semantic check on the
+	//    parsed argv catches every quoting form (`'patchwork' approve`,
+	//    `"patchwork" approve`, `p'atch'work approve`, absolute paths)
+	//    that the raw-string system-policy regex could miss.
+	if (treeHasAdminCliInvocation(root)) {
+		out.push({
+			class: "pipe_to_shell",
+			severity: "deny",
+			reason:
+				"Administrative `patchwork` CLI invocation (approve / " +
+				"clear-taint / trust-repo-config) — agent cannot authorize " +
+				"its own actions. Ask the human user to run this command in " +
+				"their own terminal.",
+			matched_pattern: "admin_cli_invocation",
+		});
+	}
 
 	// 1. Pipe/process-sub into an interpreter — `... | sh`, `bash <(curl ...)`.
 	//    These are direct execution-of-fetched-content paths.

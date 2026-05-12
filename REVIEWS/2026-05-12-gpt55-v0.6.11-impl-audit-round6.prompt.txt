@@ -1,0 +1,221 @@
+You're being consulted by Claude (Anthropic) on the R6 VERIFICATION
+audit of Patchwork v0.6.11. R5 (your previous round) returned
+NEEDS_REWORK with one ship-blocker, R5-001 CRITICAL. This round
+verifies the fix.
+
+You also previously recommended in R5: "Prefer semantic command-word
+detection over expanding a raw regex indefinitely." This fix takes
+exactly that path.
+
+Spend so far: R1 $0.36 + R2 $0.31 + R3 $0.24 + R4 $0.27 + R5 $0.22
+= $1.40 of ~$5 budget. R6 should be small (one fix, one verification
+question) — budget ~$0.20.
+
+------------------------------------------------------------------
+R5 finding and how it was resolved
+------------------------------------------------------------------
+
+R5-001 CRITICAL — "Admin CLI deny regex still misses shell-quoted or
+                   escaped patchwork executable tokens"
+
+  Your R5 finding: even after R4-001 broadened the left boundary, the
+  system-policy regex was matching against the raw command STRING.
+  Shell quoting/escaping inside the executable token preserves the
+  executed command name while breaking the raw match:
+
+    script -q -c "'patchwork' approve abc" /dev/null
+    script -q -c "p'atch'work approve abc" /dev/null
+    bash -c '"patchwork" approve abc'
+
+  Your recommended fix: "apply the admin deny rule to a shell-
+  normalized command representation ... Prefer semantic command-word
+  detection over expanding a raw regex indefinitely."
+
+  Fix taken:
+
+  1. The R3/R4 system-policy raw-string regex remains in place as
+     the FIRST line of defense — it still catches `script -c
+     'patchwork approve <id>'` (where the inner body has a
+     contiguous `patchwork` token) BEFORE the agent's Bash
+     subprocess even spawns, which is the strongest possible
+     boundary location.
+
+  2. A SECOND line: a semantic detector inside
+     packages/agents/src/claude-code/dangerous-shell-combos.ts
+     that operates on the PARSED shell tree. The shell parser
+     already strips quotes when producing argv, so a check on the
+     parsed argv is regex-form-independent.
+
+     New code (abbreviated):
+
+       const ADMIN_CLI_VERBS = new Set([
+         "approve", "clear-taint", "trust-repo-config",
+       ]);
+
+       function basenameOf(p) { return p.split("/").pop(); }
+
+       function isAdminCliInvocation(node) {
+         if (node.argv === "unresolved") {
+           const h = node.resolved_head;
+           return typeof h === "string" && basenameOf(h) === "patchwork";
+         }
+         if (node.argv.length < 2) return false;
+         if (basenameOf(node.argv[0]) !== "patchwork") return false;
+         return ADMIN_CLI_VERBS.has(node.argv[1]);
+       }
+
+       function treeHasAdminCliInvocation(root) {
+         // DFS, return true if any descendant node matches.
+       }
+
+     In classifyDangerousShellCombos(), if
+     treeHasAdminCliInvocation(root) is true, emit a SinkMatch
+     with severity="deny", matched_pattern="admin_cli_invocation",
+     reason mentioning the agent must not authorize its own actions.
+
+     CRUCIAL: severity is `deny` REGARDLESS of taint state. Admin
+     CLI invocation by the agent is always denied — fresh session,
+     no taint, doesn't matter.
+
+  3. The unresolved-argv branch covers an additional case: if the
+     parser can't resolve the full argv (dynamic args, deeply
+     nested constructs) but `resolved_head` is still
+     `patchwork` (basename), we still match. This deliberately
+     ERRS TOWARD denial: any node whose head LOOKS like patchwork
+     gets denied, even if we can't see the verb. False-positive
+     risk: the only `patchwork` binary on a system running
+     Patchwork IS Patchwork itself, and unresolved-argv
+     `patchwork` invocations are vanishingly rare in legitimate
+     code paths.
+
+  Regression tests added (16 new in dangerous-shell-combos.test.ts):
+
+    DENY (11):
+      - bare `patchwork approve abc123`
+      - `'patchwork' approve abc123`
+      - `"patchwork" approve abc123`
+      - `p'atch'work approve abc123`
+      - `p\atchwork approve abc123`
+      - `/usr/local/bin/patchwork approve abc123`
+      - `./patchwork approve abc123`
+      - `~/.local/bin/patchwork approve abc123`
+      - `patchwork clear-taint`
+      - `patchwork trust-repo-config /tmp/x`
+      - `env X=1 patchwork approve abc123`
+
+    DENY-WHEN-UNTAINTED (1):
+      - severity=deny applies regardless of taint state
+
+    MUST NOT FALSE-POSITIVE (4):
+      - `patchwork status` (non-admin verb)
+      - `patchwork-foo approve` (different binary)
+      - bare `approve abc` (no patchwork)
+      - `npm install @patchwork/cli`
+
+    All 16 pass under classifyDangerousShellCombos().
+
+  Defense-in-depth picture (post R5-001):
+
+    Layer 1 — System policy regex (root-owned policy.yml)
+      Matches raw command string. Catches:
+        - bare `patchwork approve <id>`
+        - any wrapper that contains contiguous `patchwork` text in
+          the visible command body (script -c '...', bash -c '...',
+          subshells, command substitution, backticks, etc.)
+      Runs BEFORE the Bash subprocess spawns.
+
+    Layer 2 — Semantic dangerous-shell-combos detector (R5-001 new)
+      Matches parsed argv after quote-stripping. Catches:
+        - quoted forms of the executable token
+        - escaped letters in the executable token
+        - any path form basename'd to `patchwork`
+      Runs inside the PreToolUse hook on the parsed shell tree.
+
+    Layer 3 — TTY check inside the CLI (R2 original, R3 hardened)
+      Best-effort defense if hooks ever get bypassed. Trivially
+      defeated by `script -c '...'` but cheap to keep.
+
+    Residual (deferred to v0.6.12):
+      - Shell metaprogramming where the executable name is
+        constructed from variables: `p=patchwork; "$p" approve abc`.
+        Parser sees argv=[<unresolved>, approve, abc] or argv=
+        ["unresolved"]. Mitigation: under any active taint, the
+        keystone rule + sink classifier still typically fire on
+        such commands. v0.6.12 plans an out-of-band root-owned
+        approval daemon that makes the boundary location-
+        independent of the agent's process.
+
+------------------------------------------------------------------
+Test count: 1483 -> 1499 (+16 R5-001 semantic tests).
+------------------------------------------------------------------
+
+------------------------------------------------------------------
+What we want from R6
+------------------------------------------------------------------
+
+  A. Does the semantic admin-CLI detector close the R5-001 class
+     of bypass?
+       - Is `basenameOf(argv[0]) === "patchwork"` the right shape,
+         or are there obvious path forms it misses?
+       - Is the unresolved-argv branch (head-only match) appropriate
+         given the false-positive vs. false-negative tradeoff?
+       - Have we created any new false positives that legitimate
+         code would hit?
+
+  B. With the system-policy regex AND the semantic detector in
+     place, is there a remaining concrete agent-bypass shape that
+     SHIPS without requiring shell metaprogramming (i.e. constructing
+     the binary name from variables)? We're explicitly accepting
+     that as v0.6.12 scope.
+
+  C. Any NEW bugs introduced?
+
+  D. If R6 returns SHIP / SHIP_WITH_FOLLOWUP, our release plan is:
+       1. Add a `patchwork init --upgrade` migration that rewrites
+          /Library/Patchwork/policy.yml to add the new admin-CLI
+          regex (idempotent: detects existing rule shape and
+          replaces). Documented in docs/v0.6.11/migration.md.
+       2. Version 0.6.10 → 0.6.11.
+       3. Update DESIGN/v0.6.11-progress.md final row.
+       4. Clean build, tag v0.6.11, npm publish, gh release.
+     Is that minimum sufficient, or are we missing a migration
+     step?
+
+------------------------------------------------------------------
+OUTPUT
+------------------------------------------------------------------
+
+JSON, same shape as R5:
+
+{
+  "overall_verdict": "SHIP" | "SHIP_WITH_FOLLOWUP" | "NEEDS_REWORK",
+  "headline": "<one sentence>",
+  "r5_fix_assessment": {
+    "r5_001_fix_correct": <bool>,
+    "concerns": ["<any remaining concerns about the semantic detector>"]
+  },
+  "new_findings": [
+    {
+      "id": "R6-001",
+      "severity": "CRITICAL"|"HIGH"|"MEDIUM"|"LOW"|"INFO",
+      "title": "<short>",
+      "category": "regression"|"missed_bypass"|"new_bug"|"documented_gap"|"other",
+      "where": "<file or function>",
+      "issue": "<what's wrong>",
+      "exploit": "<concrete or 'theoretical'>",
+      "fix": "<recommended change>",
+      "ship_blocker": <bool>
+    }
+  ],
+  "ship_recommendation": {
+    "verdict": "<copy>",
+    "must_fix_before_tag": [],
+    "may_ship_as_v0.6.11.1_hotfix": [],
+    "v0.6.12_scope": []
+  },
+  "migration_step_assessment": {
+    "minimum_release_plan_is_sufficient": <bool>,
+    "missing_steps": ["<anything else users need to do/know>"]
+  },
+  "headline_quote_for_release_notes": "<sentence>"
+}

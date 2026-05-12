@@ -61,27 +61,133 @@ agent with shell access running at the same UID. The agent can:
 - set arbitrary environment variables in the child it spawns;
 - read its own controlling terminal's path and pass it through.
 
-v0.6.11's defense is therefore layered, with the primary boundary
-**outside** the CLI process:
+v0.6.11's defense is therefore **layered**, with each layer accepting
+that the layer below is structurally weaker:
 
-1. **Primary — system-policy command-prefix denies.** The PreToolUse
-   hook (running before the agent's `Bash` subprocess spawns) evaluates
+1. **Layer 1 — System-policy command-prefix denies** (root-owned,
+   strongest). The PreToolUse hook evaluates
    `/Library/Patchwork/policy.yml` with a regex deny against
-   `patchwork approve|clear-taint|trust-repo-config`. This is the line
-   that actually refuses agent invocations. The policy file is
-   root-owned and the agent cannot rewrite it.
-2. **Secondary — TTY check inside the CLI** (defense-in-depth). If the
-   hook ever loses coverage or the agent finds a path that bypasses the
-   PreToolUse pipeline, the CLI still refuses non-TTY stdin/stdout.
-   This is **not** a security boundary — a determined agent with `script`
-   available can pass it.
-3. **Hardening removed in R3-001.** The previous
-   `PATCHWORK_HUMAN_CONTEXT=1` environment override was agent-settable
-   (same UID = same env) and offered no real escape valve, only an
-   apparent one. Removed.
+   `patchwork approve|clear-taint|trust-repo-config`. This runs
+   BEFORE the agent's `Bash` subprocess spawns. The policy file is
+   root-owned; the agent cannot rewrite it. Catches every shape
+   where a contiguous `patchwork` token appears in the raw command
+   string — including wrapped forms like `script -c '...'` because
+   the inner content is visible in the outer string.
 
-The proper out-of-band approval mechanism — a root-owned daemon the
-agent process literally cannot speak to — is on the v0.6.12 roadmap.
+2. **Layer 2 — Semantic `admin_cli_invocation` detector** (in-process,
+   quote-aware). The dangerous-shell-combos classifier walks the
+   PARSED shell tree and checks whether `basename(argv[0]) === "patchwork"`
+   and `argv[1]` is an admin verb. The shell parser strips quotes when
+   producing argv, so this catches `'patchwork' approve`, `"patchwork"
+   approve`, `p'atch'work approve`, and (after R6-001) shell command
+   modifiers like `command patchwork approve` / `exec -a foo patchwork
+   approve`. Severity = `deny` regardless of taint state.
+
+3. **Layer 3 — TTY check inside the CLI** (defense-in-depth, weakest).
+   `checkHumanContext()` refuses non-TTY stdin/stdout. **This is not a
+   security boundary** — a determined agent can allocate a PTY via
+   `script`, `expect`, or `python -c 'import pty; pty.spawn(...)'`.
+   It costs nothing to keep, but it's the *last* line, not the first.
+
+### Accepted residuals in v0.6.11
+
+Two bypass shapes were identified during audit and **deliberately
+not closed in v0.6.11** because no in-process fix is sound while the
+same-UID constraint holds. Both are tagged for the v0.6.12 daemon
+work below:
+
+- **R6-002: alternate-name execution.** An agent can symlink or copy
+  the patchwork binary to a different name, then invoke the admin
+  verb through that name. Example:
+
+  ```
+  ln -s "$(command -v patchwork)" ./pw
+  script -q -c './pw approve abc123' /dev/null
+  ```
+
+  Layer 1 doesn't match `./pw` (no `patchwork` token in the raw
+  string). Layer 2 doesn't match because `basename(argv[0]) === "pw"`,
+  not `"patchwork"`. Layer 3 falls to the `script` PTY.
+
+  Adding realpath resolution to Layer 2 would close the literal
+  symlink form, but the variable-name form (`p=patchwork; "$p"
+  approve abc`) remains open, and the agent can always add another
+  layer of indirection (function indirection, `eval`-constructed
+  names, etc.). Chasing each form is regex armor on a
+  same-UID-bounded layer.
+
+- **Variable-named exec.** As above: any form where the executable
+  name is constructed from a shell variable, function, alias, or
+  eval'd string. The parsed argv loses the connection to a literal
+  `patchwork` token, and no static check on argv can recover it.
+
+### Why these residuals are acceptable for v0.6.11
+
+The residuals share a single root cause: **the agent and the user
+share a UID, and approval lives at a process the agent's UID can
+reach**. Every layer above is trying to detect a *string shape* that
+implies an approval call. As long as approval IS reachable, an
+attacker can keep finding string shapes that don't match the
+detector.
+
+v0.6.11 is materially better than v0.6.10 (which had no enforcement
+at all). It refuses bare and most wrapped admin CLI invocations, all
+the env-dump-to-network exfil shapes, all the pipe-to-shell shapes,
+package-lifecycle scripts under taint, and persistence writes to
+shell-rc / git-hooks / CI configs. The audit trail also records
+every denied attempt, so a sufficiently motivated bypass is at
+least visible.
+
+### Why v0.6.12 introduces a root-owned approval daemon
+
+The v0.6.12 plan moves the approval boundary **out of the agent's
+reach entirely**:
+
+- A small background process (`patchwork-approver`) runs as **root**.
+  It owns the approval state in a root-only-readable directory.
+  The agent's UID cannot read, write, or fake state in that directory.
+- There is **no `patchwork approve` CLI** in the agent-callable
+  sense. The CLI command, if it exists at all, is a thin client that
+  asks the daemon "please show this request to the user." The daemon
+  surfaces it through a channel the agent doesn't share — a desktop
+  notification, a Touch ID prompt, a separate physical terminal, a
+  web UI on localhost, a phone push — whatever the user configures.
+- The PreToolUse hook asks the daemon "is request ID `<x>` approved?"
+  via a Unix socket. The daemon answers yes/no. The agent cannot
+  forge an approved response because it cannot impersonate root.
+
+Under that model, all four classes of bypass we found in audit
+rounds R2–R6 — TTY forging, env override, regex evasion, semantic
+detector evasion, symlinks, variable-named exec — **stop being
+exploitable**, because there is no CLI to call. They simply don't
+matter anymore. The boundary is no longer "what string shape does
+the agent type?" but "can a process running as user UID forge a
+response from a process running as root UID?" — and the answer to
+the second question is structurally no on any OS with a working
+process model.
+
+The same daemon will also sign per-session taint snapshots with a
+root-held HMAC key, closing the R1-001 / R1-008 snapshot
+authenticity residual at the same time.
+
+### What the daemon does *not* fix
+
+The daemon solves the same-UID approval class completely, but it
+does not address:
+
+- Subtle prompt-injection-driven code changes that touch no sinks
+  (code-review territory).
+- Hostile MCP servers emitting plausibly-benign content (needs
+  separate provenance work).
+- Long-running child processes the parent Bash command spawned and
+  then exited (PostToolUse fires on parent exit; the child can
+  continue to act).
+- Allowed-domain exfiltration (separate v0.6.12 URL-allowlist work).
+- Language-level env dumps (`python -c 'import os; print(os.environ)'`).
+  Needs Python/Node taint integration.
+
+Those remain in scope for v0.6.12+ but are distinct work streams from
+the approval daemon.
 
 ## What v0.6.11 does NOT defend against
 
@@ -165,7 +271,7 @@ the keystone (the rule consults taint and `null` collapses to "tainted").
 | R1-011 | fsync durability | fsync the temp file + parent dir; moot once authenticity lands. |
 | A2 (broader) | URL-allowlist + body-shape detection | v0.6.12 network policy. (env-dump-to-network and `/proc/self/environ` variants closed in v0.6.11 R2-004/R3-003; arbitrary allowed-domain exfil remains.) |
 | A7 (formal) | Dedicated `generated_file_execute` sink class | Currently caught by combo rules; v0.6.12 makes it a first-class class with dedicated tests. |
-| R3-001 (residual) | Out-of-band approval daemon | Root-owned approval channel the agent process cannot reach, removing the same-UID approval residual. |
+| R3-001 / R6-002 (residual) | Out-of-band approval daemon | Root-owned approval channel the agent process cannot reach, removing the same-UID approval residual and the symlink/alternate-name and variable-named exec bypasses. |
 | R3-003 (residual) | Language-level env exfil | `python -c 'import os; print(os.environ)'`, Node/Ruby equivalents; deferred to formal source modeling in v0.6.12. |
 
 See `REVIEWS/2026-05-12-gpt55-v0.6.11-r1-fix-status.md` for the full

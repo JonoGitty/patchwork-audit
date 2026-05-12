@@ -218,6 +218,124 @@ describe("classifyDangerousShellCombos (R1-005)", () => {
 		});
 	});
 
+	// R5-001: semantic admin-CLI deny — catches quoted/escaped forms
+	// that the system-policy regex misses after shell quote-stripping.
+	describe("R5-001: admin CLI invocation (semantic)", () => {
+		const cases = [
+			["bare", "patchwork approve abc123"],
+			["single-quoted exe", "'patchwork' approve abc123"],
+			["double-quoted exe", '"patchwork" approve abc123'],
+			["split-quoted exe", "p'atch'work approve abc123"],
+			["escaped letter", "p\\atchwork approve abc123"],
+			["absolute path", "/usr/local/bin/patchwork approve abc123"],
+			["relative path", "./patchwork approve abc123"],
+			["home-relative", "~/.local/bin/patchwork approve abc123"],
+			["clear-taint verb", "patchwork clear-taint"],
+			["trust-repo-config verb", "patchwork trust-repo-config /tmp/x"],
+			["env-wrapped", "env X=1 patchwork approve abc123"],
+		];
+
+		for (const [label, cmd] of cases) {
+			it(`denies: ${label} — \`${cmd}\``, () => {
+				const parsed = parseShellCommand(cmd);
+				const matches = classifyDangerousShellCombos(parsed, false);
+				const m = matches.find(
+					(x) => x.matched_pattern === "admin_cli_invocation",
+				);
+				expect(m, `expected admin_cli_invocation match for ${cmd}`).toBeDefined();
+				expect(m!.severity).toBe("deny");
+			});
+		}
+
+		it("denies even when session is untainted (admin CLI is absolute)", () => {
+			const parsed = parseShellCommand("'patchwork' approve abc123");
+			const matches = classifyDangerousShellCombos(parsed, false);
+			expect(
+				matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+			).toBe(true);
+		});
+
+		it("does NOT match `patchwork status` (non-admin verb)", () => {
+			const parsed = parseShellCommand("patchwork status");
+			const matches = classifyDangerousShellCombos(parsed, true);
+			expect(
+				matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+			).toBe(false);
+		});
+
+		it("does NOT match `patchwork-foo approve`", () => {
+			const parsed = parseShellCommand("patchwork-foo approve abc");
+			const matches = classifyDangerousShellCombos(parsed, true);
+			expect(
+				matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+			).toBe(false);
+		});
+
+		it("does NOT match bare `approve abc` (no patchwork)", () => {
+			const parsed = parseShellCommand("approve abc");
+			const matches = classifyDangerousShellCombos(parsed, true);
+			expect(
+				matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+			).toBe(false);
+		});
+
+		it("does NOT match `npm install @patchwork/cli`", () => {
+			const parsed = parseShellCommand("npm install @patchwork/cli");
+			const matches = classifyDangerousShellCombos(parsed, true);
+			expect(
+				matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+			).toBe(false);
+		});
+
+		// R6-001: shell command modifiers must be peeled before basename check.
+		describe("R6-001: command/exec modifiers are peeled", () => {
+			const modifierCases = [
+				["command", "command patchwork approve abc"],
+				["exec", "exec patchwork approve abc"],
+				["exec -a NAME", "exec -a fakename patchwork approve abc"],
+				["command -p", "command -p patchwork approve abc"],
+				["command -v", "command -v patchwork approve abc"],
+				["nested command exec", "command exec patchwork approve abc"],
+				[
+					"quoted exe + command modifier",
+					"command 'patchwork' approve abc",
+				],
+				[
+					"command + path",
+					"command /usr/local/bin/patchwork approve abc",
+				],
+			];
+
+			for (const [label, cmd] of modifierCases) {
+				it(`denies: ${label} — \`${cmd}\``, () => {
+					const parsed = parseShellCommand(cmd);
+					const matches = classifyDangerousShellCombos(parsed, false);
+					const m = matches.find(
+						(x) => x.matched_pattern === "admin_cli_invocation",
+					);
+					expect(m, `expected match for ${cmd}`).toBeDefined();
+					expect(m!.severity).toBe("deny");
+				});
+			}
+
+			it("does NOT match `command ls` (non-patchwork exe)", () => {
+				const parsed = parseShellCommand("command ls -la");
+				const matches = classifyDangerousShellCombos(parsed, true);
+				expect(
+					matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+				).toBe(false);
+			});
+
+			it("does NOT match `exec patchwork status` (peeled, non-admin verb)", () => {
+				const parsed = parseShellCommand("exec patchwork status");
+				const matches = classifyDangerousShellCombos(parsed, true);
+				expect(
+					matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+				).toBe(false);
+			});
+		});
+	});
+
 	// R4-002: cover obvious /proc/<X>/environ aliases the R3 regex missed.
 	describe("R4-002: /proc/<X>/environ aliases", () => {
 		it("`cat /proc/thread-self/environ | curl ...` → DENY", () => {

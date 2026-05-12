@@ -47,14 +47,14 @@ in v0.6.11:
 ### `patchwork approve <request_id>`
 
 When Patchwork denies an action with `permissionDecision: "deny"`, the
-denial reason includes a request_id and the exact approve command. Run
-it in your own shell (NOT inside the agent's session — the agent
-running approve would defeat the human gate).
+denial reason includes a request_id and tells the user (not the
+agent) to run the approve command in their own terminal. Run it in
+your own shell — not inside the agent's session.
 
 ```sh
 # Agent sees:
-# [Patchwork] approval required: ... (rule: sink_deny)
-#   Run: patchwork approve 7d3c81c773959f7f
+# [Patchwork] denied: ... (rule: sink_deny)
+#   Ask the human user to run `patchwork approve 7d3c81c773959f7f` in their own terminal.
 
 # You run:
 patchwork approve 7d3c81c773959f7f
@@ -62,6 +62,17 @@ patchwork approve 7d3c81c773959f7f
 ```
 
 `patchwork approve` (no arg) lists all currently-pending requests.
+
+> **Why the agent can't approve for you.** v0.6.11 layers three defenses
+> against the agent self-approving: a system-policy regex deny that
+> refuses the Bash invocation before it spawns, a semantic detector
+> that walks the parsed shell tree and matches `patchwork`/admin-verb
+> argv shapes regardless of quoting, and an in-CLI TTY check. The
+> remaining same-UID residuals (symlink/alternate-name exec,
+> variable-named exec) are documented in
+> [threat-model.md § Accepted residuals](threat-model.md#accepted-residuals-in-v0611);
+> they are structurally fixed by the v0.6.12 root-owned approval
+> daemon, which moves the boundary out of the agent's UID entirely.
 
 ### `patchwork clear-taint`
 
@@ -128,6 +139,36 @@ this boundary.
 - The system policy at `/Library/Patchwork/policy.yml` still controls
   rule-based deny
 
+## Required upgrade step: system-policy refresh
+
+v0.6.11 ships a new deny rule in `docs/default-policy.yml` that
+refuses agent invocations of `patchwork approve | clear-taint |
+trust-repo-config` at the PreToolUse layer (before the Bash
+subprocess spawns). For existing installs this rule needs to land
+in your live system policy at `/Library/Patchwork/policy.yml`:
+
+```sh
+# In your own terminal (sudo required):
+sudo patchwork init --upgrade
+```
+
+`patchwork init --upgrade` is idempotent: it adds the new admin-CLI
+deny rule if missing, leaves your existing custom rules untouched,
+and reports a summary diff. **Until you run this, the in-CLI TTY
+check is the only gate against agent self-approval**, and a
+PTY-allocating wrapper (`script -c '...'`) will pass it. Run the
+upgrade.
+
+If you can't run `patchwork init --upgrade` (e.g. you maintain the
+system policy by hand or via configuration management), the rule to
+add under `commands.deny:` is:
+
+```yaml
+- regex: "(^|[^A-Za-z0-9_-])patchwork[ \\t]+(approve|clear-taint|trust-repo-config)\\b"
+  action: deny
+  reason: "Administrative CLI — must be run by the human user in their own terminal"
+```
+
 ## What's new for v0.6.11 (TL;DR)
 
 - New CLIs: `patchwork approve`, `patchwork clear-taint`, `patchwork
@@ -136,9 +177,20 @@ this boundary.
 - New approval request files at `~/.patchwork/approvals/<id>.pending.json`
   + `<id>.approved.json`.
 - New PolicySchema field: `trusted_paths: string[]`.
+- New user-level trust store at `~/.patchwork/trusted-repos.yml`
+  (replaces the project-local `.patchwork/policy.yml` trust overlay
+  that a hostile repo could commit — see R2-003).
 - New relay-config field: `socket_group: string` (fixes the silent
   EACCES regression from v0.6.10).
-- Tests: 943 → ~1440. Build clean across all packages.
+- New system-policy regex deny for admin CLIs (R3-001 / R4-001 /
+  R6-001 hardening across six adversarial audit rounds).
+- New semantic `admin_cli_invocation` sink in dangerous-shell-combos
+  (R5-001 / R6-001) — quote- and modifier-aware.
+- Broadened env-source detector covers `env`, `printenv`, bare
+  `set`, `export -p`, `declare -p/-x/-px/-xp`, `typeset -p/-x/-px`,
+  `readonly -p`, `compgen -e`, and any redirect or argv reference to
+  `/proc/<X>/environ` (R2-004 / R3-003 / R4-002).
+- Tests: 943 → 1509. Build clean across all packages.
 
 ## Where to look when something denies
 
@@ -152,4 +204,37 @@ this boundary.
    policy, seals).
 
 See `docs/v0.6.11/threat-model.md` for the full picture of what
-v0.6.11 defends against and what it doesn't.
+v0.6.11 defends against and what it doesn't — including the
+"Same-UID approval boundary" section that explains why some bypass
+shapes are accepted residuals in v0.6.11 and structurally closed by
+the v0.6.12 root-owned approval daemon.
+
+## What's coming in v0.6.12
+
+The v0.6.11 audit loop spent six rounds hardening the
+agent-self-approval boundary at the layer where it lives today
+(CLI + system-policy regex). Each round closed concrete bypasses,
+but they're all variations of one root cause: **approval is a
+command that the agent's own UID can type**. v0.6.12 fixes this
+structurally:
+
+- A small `patchwork-approver` daemon will run as **root**, owning
+  the approval state in a root-only directory. The agent's UID
+  cannot read or write that state.
+- The `patchwork approve` CLI as the agent knows it will go away.
+  Approval will surface through a channel the agent doesn't share
+  (desktop notification / Touch ID / phone push / web UI on
+  localhost — configurable).
+- The PreToolUse hook will ask the daemon over a Unix socket "is
+  request `<x>` approved?" Yes/no. The agent cannot forge the
+  daemon's response.
+
+That removes the same-UID boundary from the approval flow entirely,
+making the R6-002 alternate-name and variable-named-exec residuals
+moot (there's no command to call, regardless of what the agent
+names its binary). The same daemon will sign per-session taint
+snapshots with a root-held HMAC key, closing the snapshot
+authenticity residual (R1-001 / R1-008) at the same time.
+
+v0.6.12 will also ship the first-class URL allowlist + body-shape
+detection that closes allowed-domain exfiltration.
