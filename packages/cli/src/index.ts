@@ -25,6 +25,9 @@ import { commitAttestCommand } from "./commands/commit-attest.js";
 import { relayCommand } from "./commands/relay.js";
 import { setupCommand } from "./commands/setup.js";
 import { teamCommand } from "./commands/team.js";
+import { approveCommand } from "./commands/approve.js";
+import { clearTaintCommand } from "./commands/clear-taint.js";
+import { trustRepoConfigCommand } from "./commands/trust-repo-config.js";
 
 const program = new Command();
 
@@ -59,5 +62,8 @@ program.addCommand(commitAttestCommand);
 program.addCommand(relayCommand);
 program.addCommand(setupCommand);
 program.addCommand(teamCommand);
+program.addCommand(approveCommand);
+program.addCommand(clearTaintCommand);
+program.addCommand(trustRepoConfigCommand);
 
 program.parse();

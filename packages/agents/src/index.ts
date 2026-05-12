@@ -26,6 +26,30 @@ export {
 	type CommitAttestationParams,
 } from "./claude-code/commit-attestor.js";
 
+// Taint store (v0.6.11 commit 7)
+export {
+	readTaintSnapshot,
+	writeTaintSnapshot,
+	loadOrInitSnapshot,
+	getTaintDir,
+	getTaintSnapshotPath,
+} from "./claude-code/taint-store.js";
+
+// Approval store (v0.6.11 commit 9)
+export {
+	canonicalKey,
+	getApprovalDir,
+	writePendingRequest,
+	readPendingRequest,
+	writeApprovedToken,
+	consumeApprovedToken,
+	listPendingRequests,
+	DEFAULT_APPROVAL_TTL_MS,
+	type PendingRequest,
+	type ApprovedToken,
+	type CanonicalKeyInput,
+} from "./claude-code/approval-store.js";
+
 // Codex
 export { syncCodexHistory } from "./codex/history-parser.js";
 

@@ -30,10 +30,12 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@patchwork/core": "workspace:*"
+    "@patchwork/core": "workspace:*",
+    "picomatch": "^4.0.3"
   },
   "devDependencies": {
     "tsup": "^8.3.0",
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.0",
+    "@types/picomatch": "^3.0.0"
   }
 }

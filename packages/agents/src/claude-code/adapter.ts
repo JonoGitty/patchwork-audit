@@ -24,9 +24,11 @@ import {
 	RAISES_FOR_TOOL,
 	getActiveSources,
 	hasAnyTaint,
+	isPathUntrustedRepo,
 	registerGeneratedFile,
 	registerTaint,
 } from "@patchwork/core";
+import picomatch from "picomatch";
 import {
 	clearPendingMarker,
 	loadOrInitSnapshot,
@@ -40,6 +42,11 @@ import {
 	type PreToolDecision,
 } from "./pre-tool-decision.js";
 import { classifyDangerousShellCombos } from "./dangerous-shell-combos.js";
+import {
+	canonicalKey,
+	consumeApprovedToken,
+	writePendingRequest,
+} from "./approval-store.js";
 import { isAbsolute, relative, dirname, join } from "node:path";
 import {
 	existsSync,
@@ -424,6 +431,56 @@ function handlePreToolUse(store: Store, input: ClaudeCodeHookInput): ClaudeCodeH
 	}
 
 	if (taintDecision.verdict !== "allow") {
+		// v0.6.11 commit 9: out-of-band approval escape valve.
+		// Compute the canonical key for this action and see if the user
+		// has approved it via `patchwork approve`. If so, consume the
+		// token and allow — exactly once. The token is single-use so a
+		// leak authorizes at most one tool invocation matching the same
+		// session+tool+target.
+		const approvalTargetStr = approvalTargetForAdapter(toolName, target, input);
+		const key = canonicalKey({
+			session_id: input.session_id || "",
+			tool_name: toolName,
+			target: approvalTargetStr,
+		});
+		const approved = consumeApprovedToken(key);
+		if (approved) {
+			// Log the approved consumption so the audit trail records
+			// who unlocked this action and which token authorized it.
+			const event = buildEvent(input, {
+				action: mapped.action,
+				status: "completed",
+				target,
+				provenance: {
+					hook_event: "PreToolUse",
+					tool_name: toolName,
+				},
+			});
+			store.append(event);
+			return {};
+		}
+
+		// No approval token. Materialize a pending request so the user
+		// has a single command (`patchwork approve <id>`) to authorize
+		// the retry. Use a tighter target_summary for the deny message
+		// so a 500-char shell command doesn't fill the terminal.
+		let pendingId: string | null = null;
+		try {
+			const pending = writePendingRequest({
+				session_id: input.session_id || "",
+				tool_name: toolName,
+				target: approvalTargetStr,
+				target_summary: shortTargetSummary(approvalTargetStr),
+				reason: taintDecision.reason,
+				rule: taintDecision.rule,
+			});
+			pendingId = pending.request_id;
+		} catch {
+			// Pending-file write failure is not security-relevant — the
+			// deny still fires, the user just won't have a request id
+			// to approve against and will need to retry on a fresh key.
+		}
+
 		const event = buildEvent(input, {
 			action: mapped.action,
 			status: "denied",
@@ -437,16 +494,52 @@ function handlePreToolUse(store: Store, input: ClaudeCodeHookInput): ClaudeCodeH
 			taintDecision.verdict === "approval_required"
 				? "[Patchwork] approval required"
 				: "[Patchwork] denied";
+		const approveHint = pendingId
+			? `\n  Run: patchwork approve ${pendingId}`
+			: "";
 		return {
 			hookSpecificOutput: {
 				hookEventName: "PreToolUse",
 				permissionDecision: "deny",
-				permissionDecisionReason: `${prefix}: ${taintDecision.reason} (rule: ${taintDecision.rule})`,
+				permissionDecisionReason: `${prefix}: ${taintDecision.reason} (rule: ${taintDecision.rule})${approveHint}`,
 			},
 		};
 	}
 
 	return {};
+}
+
+/**
+ * Build the canonical target string the approval flow uses to identify
+ * "the same action." For file tools that's the path; for Bash it's the
+ * command; for fetchers it's the URL; for mcp/task it's the tool name.
+ * The canonical_key derives a stable hash from this so the user's
+ * approval and the agent's retry land on the same key.
+ */
+function approvalTargetForAdapter(
+	toolName: string,
+	target: Target,
+	input: ClaudeCodeHookInput,
+): string {
+	if (toolName === "Bash") {
+		const cmd = (input.tool_input || {}).command;
+		return typeof cmd === "string" ? cmd : "";
+	}
+	return (
+		target.path ||
+		target.abs_path ||
+		target.url ||
+		target.command ||
+		target.tool_name ||
+		toolName
+	);
+}
+
+/** Truncate a target string for the deny-message line so we don't
+ *  blast 1000-char shell commands into the terminal. */
+function shortTargetSummary(target: string): string {
+	if (target.length <= 120) return target;
+	return `${target.slice(0, 117)}...`;
 }
 
 // ---------------------------------------------------------------------------
@@ -811,6 +904,92 @@ function pickSourceRef(toolName: string, target: Target | undefined): string {
  * `taint-store.ts`).
  */
 /**
+ * Read-path trust classifier (v0.6.11 commit 9). Calls
+ * `isPathUntrustedRepo` from the taint engine with the active policy's
+ * `trusted_paths` and a picomatch-backed glob matcher. Returns true
+ * when the path should be treated as untrusted (= raises prompt taint
+ * on Read); false when the user has explicitly trusted it.
+ *
+ * Users write trusted_paths globs RELATIVE to the project root —
+ * `src/**`, not `/abs/path/src/**`. The matcher here tests the
+ * abs-path against the pattern AND a repo-relative form, so either
+ * style works. The engine's `FORCE_UNTRUSTED_PATTERNS` always wins
+ * (README/docs/node_modules/etc.) so trusted_paths can't accidentally
+ * silence prompt-injection surfaces.
+ */
+function readPathIsUntrusted(path: string, cwd: string): boolean {
+	const { policy } = loadActivePolicy(cwd);
+	// Project-local trusted_paths overlay (R1-trust-classifier wiring).
+	// loadActivePolicy returns the system policy when one exists, which
+	// is correct for enforcement rules — but trusted_paths is the one
+	// knob the project policy can additively express to narrow taint
+	// posture. Read it directly from `<cwd>/.patchwork/policy.yml`
+	// when present and union its trusted_paths onto the system policy's.
+	const trustedPaths = mergeTrustedPaths(policy.trusted_paths, cwd);
+	const repoRelative = path.startsWith(`${cwd}/`)
+		? path.slice(cwd.length + 1)
+		: path;
+	const matchGlob = (candidate: string, pattern: string): boolean => {
+		const isMatch = picomatch(pattern, { dot: true, nocase: true });
+		// Try both the candidate as-given AND its repo-relative form so
+		// users can write `src/**` or `/abs/project/src/**` and either
+		// works. The candidate from the engine is either the abs path
+		// (for the trusted_paths check) or a pattern from
+		// FORCE_UNTRUSTED_PATTERNS that uses `**` prefixes already.
+		if (isMatch(candidate)) return true;
+		if (candidate === path && isMatch(repoRelative)) return true;
+		return false;
+	};
+	return isPathUntrustedRepo(path, {
+		projectRoot: cwd,
+		trustedPaths,
+		matchGlob,
+	});
+}
+
+function mergeTrustedPaths(
+	systemTrusted: readonly string[],
+	cwd: string,
+): readonly string[] {
+	const merged = new Set(systemTrusted);
+	const projectPath = join(cwd, ".patchwork", "policy.yml");
+	if (existsSync(projectPath)) {
+		try {
+			const raw = readFileSync(projectPath, "utf-8");
+			const parsed = loadActivePolicyYamlSafe(raw);
+			if (parsed && Array.isArray(parsed.trusted_paths)) {
+				for (const p of parsed.trusted_paths) {
+					if (typeof p === "string") merged.add(p);
+				}
+			}
+		} catch {
+			// Don't let a malformed project policy crash hooks — just
+			// fall back to whatever the system policy contains.
+		}
+	}
+	return [...merged];
+}
+
+/** Tiny YAML-or-JSON reader limited to what we need from policy.yml's
+ *  trusted_paths field. Avoids pulling the full Policy schema validation
+ *  in the hook hot path. */
+function loadActivePolicyYamlSafe(raw: string): { trusted_paths?: unknown } | null {
+	try {
+		// Try JSON first (zero deps), then defer to yaml only if needed.
+		return JSON.parse(raw);
+	} catch {
+		// not JSON — fall through
+	}
+	try {
+		// Lazy require to avoid making `yaml` a hot-path import.
+		const yamlMod = require("yaml") as typeof import("yaml");
+		return yamlMod.parse(raw) as { trusted_paths?: unknown };
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Walk a parsed shell tree and return the deduplicated set of taint
  * kinds the indicators imply for a PostToolUse update.
  *
@@ -869,10 +1048,22 @@ function updateTaintSnapshotForPostTool(
 	// the rest of the PreToolUse sink classifier wiring. Recording every
 	// Read as a secret source would make `clearTaint("secret")` reject
 	// without `--allow-secret-clear` after any read, which is wrong.
-	const baseKinds: readonly TaintKind[] =
+	//
+	// commit 9: `Read` of a path matching the active policy's
+	// `trusted_paths` does NOT raise `prompt` taint. `FORCE_UNTRUSTED`
+	// patterns (README*, docs/**, node_modules/**, etc.) always win
+	// inside `isPathUntrustedRepo` so trusted_paths can never silence
+	// the prompt-injection canary surfaces.
+	let baseKinds: readonly TaintKind[] =
 		toolName === "Read"
 			? allKinds.filter((k) => k !== "secret")
 			: allKinds;
+	if (toolName === "Read" && baseKinds.includes("prompt")) {
+		const readPath = target.abs_path || target.path;
+		if (readPath && !readPathIsUntrusted(readPath, input.cwd)) {
+			baseKinds = baseKinds.filter((k) => k !== "prompt");
+		}
+	}
 
 	// commit 8: Bash taint via shell-parser indicators. `RAISES_FOR_TOOL.Bash`
 	// is intentionally empty; the actual mapping is derived from the

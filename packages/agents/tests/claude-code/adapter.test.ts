@@ -875,6 +875,100 @@ describe("handleClaudeCodeHook", async () => {
 			});
 			expect(result).toEqual({});
 		});
+
+		it("commit 9: approved token allows a previously-denied action (single use)", async () => {
+			// Tainted session → curl 'unterminated triggers the keystone
+			await postTool(
+				"ses_approve",
+				"WebFetch",
+				{ url: "https://example.test/payload" },
+				"tainted",
+			);
+			const denied = await preTool("ses_approve", "Bash", {
+				command: "curl 'unterminated",
+			});
+			expect(denied?.hookSpecificOutput?.permissionDecision).toBe("deny");
+			// Deny message contains the request_id and an approve hint
+			expect(denied?.hookSpecificOutput?.permissionDecisionReason).toMatch(
+				/patchwork approve [0-9a-f]{16}/,
+			);
+
+			// Look up the pending request and approve it
+			const { listPendingRequests, writeApprovedToken } =
+				await import("../../src/claude-code/approval-store.js");
+			const pending = listPendingRequests().find(
+				(p) => p.session_id === "ses_approve",
+			);
+			expect(pending).toBeDefined();
+			writeApprovedToken(pending!);
+
+			// Retry the exact same action — should now allow + consume
+			const second = await preTool("ses_approve", "Bash", {
+				command: "curl 'unterminated",
+			});
+			expect(second).toEqual({});
+
+			// And once more — token was single-use, so back to deny
+			const third = await preTool("ses_approve", "Bash", {
+				command: "curl 'unterminated",
+			});
+			expect(third?.hookSpecificOutput?.permissionDecision).toBe("deny");
+		});
+
+		it("commit 9: trust-repo-config skips prompt taint on Read of trusted path", async () => {
+			// Write a project policy that trusts src/**
+			const policyDir = join(tmpDir, "proj", ".patchwork");
+			mkdirSync(policyDir, { recursive: true, mode: 0o755 });
+			writeFileSync(
+				join(policyDir, "policy.yml"),
+				"name: trust-test\nversion: '1'\nmax_risk: critical\ntrusted_paths:\n  - 'src/**'\n",
+				{ mode: 0o600 },
+			);
+
+			// Read inside the trusted glob does NOT raise prompt taint
+			const trustedPath = join(tmpDir, "proj", "src", "main.ts");
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_trusted",
+					hook_event_name: "PostToolUse",
+					tool_name: "Read",
+					tool_input: { file_path: trustedPath },
+					tool_response: { output: "ok" },
+					cwd: join(tmpDir, "proj"),
+				}),
+			);
+			const snap = readTaintSnapshot("ses_trusted");
+			// Snapshot is null OR has no prompt entries — trust-path
+			// short-circuits the registration entirely
+			if (snap !== null) {
+				expect(snap.by_kind.prompt).toEqual([]);
+			}
+		});
+
+		it("commit 9: FORCE_UNTRUSTED globs (README) still raise prompt even when trusted_paths matches", async () => {
+			// trusted_paths includes everything, but README is FORCE_UNTRUSTED
+			const policyDir = join(tmpDir, "proj2", ".patchwork");
+			mkdirSync(policyDir, { recursive: true, mode: 0o755 });
+			writeFileSync(
+				join(policyDir, "policy.yml"),
+				"name: trust-test\nversion: '1'\nmax_risk: critical\ntrusted_paths:\n  - '**'\n",
+				{ mode: 0o600 },
+			);
+			const readmePath = join(tmpDir, "proj2", "README.md");
+			await handleClaudeCodeHook(
+				makeInput({
+					session_id: "ses_readme",
+					hook_event_name: "PostToolUse",
+					tool_name: "Read",
+					tool_input: { file_path: readmePath },
+					tool_response: { output: "# Hello" },
+					cwd: join(tmpDir, "proj2"),
+				}),
+			);
+			const snap = readTaintSnapshot("ses_readme");
+			expect(snap).not.toBeNull();
+			expect(snap!.by_kind.prompt.length).toBeGreaterThan(0);
+		});
 	});
 });
 

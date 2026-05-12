@@ -32,7 +32,13 @@ importers:
       '@patchwork/core':
         specifier: workspace:*
         version: link:../core
+      picomatch:
+        specifier: ^4.0.3
+        version: 4.0.3
     devDependencies:
+      '@types/picomatch':
+        specifier: ^3.0.0
+        version: 3.0.2
       tsup:
         specifier: ^8.3.0
         version: 8.5.1(postcss@8.5.8)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.2)
@@ -915,6 +921,9 @@ packages:
 
   '@types/node@25.2.3':
     resolution: {integrity: sha512-m0jEgYlYz+mDJZ2+F4v8D1AyQb+QzsNqRuI7xg1VQX/KlKS0qT9r1Mo16yo5F/MtifXFgaofIFsdFMox2SxIbQ==}
+
+  '@types/picomatch@3.0.2':
+    resolution: {integrity: sha512-n0i8TD3UDB7paoMMxA3Y65vUncFJXjcUf7lQY7YyKGl6031FNjfsLs6pdLFCy2GNFxItPJG8GvvpbZc2skH7WA==}
 
   '@types/picomatch@4.0.2':
     resolution: {integrity: sha512-qHHxQ+P9PysNEGbALT8f8YOSHW0KJu6l2xU8DYY0fu/EmGxXdVnuTLvFUvBgPJMSqXq29SYHveejeAha+4AYgA==}
@@ -2737,6 +2746,8 @@ snapshots:
   '@types/node@25.2.3':
     dependencies:
       undici-types: 7.16.0
+
+  '@types/picomatch@3.0.2': {}
 
   '@types/picomatch@4.0.2': {}
 
