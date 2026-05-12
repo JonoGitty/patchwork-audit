@@ -159,6 +159,28 @@ describe("decidePreToolUse — rule 3: shell keystone (unknown + indicator + tai
 		expect(r.verdict).toBe("allow");
 	});
 
+	it("R1-004: fires for low-confidence parse with indicator under taint (widened beyond unknown)", () => {
+		// Synthetic low-confidence tree with a fetch_tool indicator.
+		const lowWithIndicator: ShellParsedCommand = {
+			argv: ["curl", "$URL"],
+			env: {},
+			redirects: [],
+			raw: "curl $URL",
+			confidence: "low",
+			sink_indicators: [
+				{ kind: "fetch_tool", token: "curl", position: 0 },
+			],
+		};
+		const r = decidePreToolUse({
+			policy: allowedPolicy,
+			sinkMatches: [],
+			parsedCommand: lowWithIndicator,
+			taintSnapshot: taintedSnapshot(),
+		});
+		expect(r.verdict).toBe("deny");
+		expect(r.rule).toBe("bash_unknown_indicator_taint");
+	});
+
 	it("does NOT fire when confidence is high (parser resolved cleanly)", () => {
 		const parsed = parseShellCommand("curl https://example.test");
 		// High-confidence curl WITH taint is the sink-classifier's job to

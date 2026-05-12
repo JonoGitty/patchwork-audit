@@ -12,14 +12,18 @@
  *      surface that. The taint/sink layer can only *escalate*, never
  *      relax the rule-based policy.
  *
- *   2. SHELL KEYSTONE (`unknown` + indicator + taint = DENY).
- *      For Bash, if the parsed tree has ANY node with `confidence:
- *      "unknown"` AND that node carries ANY sink indicator AND the
- *      session has ANY active taint kind, deny. The premise: an
- *      unparseable command we can't fully reason about, which still
- *      shows surface-level danger (curl, eval, scp, …), running in a
- *      session that has already touched untrusted content — the only
- *      safe answer is no. Source: design §3.7 + GPT round-4.
+ *   2. SHELL KEYSTONE (parser-doubt + indicator + taint = DENY).
+ *      For Bash, if the parsed tree has ANY node with
+ *      `confidence !== "high"` (i.e. `"unknown"` OR `"low"`) AND that
+ *      node carries ANY sink indicator AND the session has ANY active
+ *      taint kind, deny. R1-004 widened this from `unknown`-only —
+ *      `low` confidence means the parser understood the command but
+ *      couldn't statically resolve some piece (env expansion, dynamic
+ *      argv, partial dialect support), and several attacker-friendly
+ *      shell constructs (process subs, here-docs, quoting tricks) sit
+ *      in that band. The premise stands: any parse-uncertainty plus a
+ *      surface-level danger indicator (curl/eval/scp/…) in a tainted
+ *      session = refuse. Source: design §3.7 + GPT round-4 + R1.
  *
  *   3. SINK DENY.
  *      Any `classifyToolEvent` match with `severity: "deny"`. Today
@@ -56,13 +60,13 @@
  *      enforcement where enforcement matters, never fewer.
  */
 
-// `ShellShellParsedCommand` is the rich shell-parser tree from commit 4 (op,
+// `ShellParsedCommand` is the rich shell-parser tree from commit 4 (op,
 // children, structured sink_indicators, confidence). The simpler
-// `ShellParsedCommand` re-export from `tool-event.ts` is for ToolEvent
+// `ParsedCommand` re-export from `tool-event.ts` is for ToolEvent
 // serialization and is intentionally lossy — the keystone rule needs the
 // rich tree.
 import type {
-	ShellShellParsedCommand,
+	ShellParsedCommand,
 	SinkIndicator,
 	SinkMatch,
 	TaintSnapshot,
@@ -123,17 +127,18 @@ function collectIndicators(root: ShellParsedCommand): SinkIndicator[] {
 }
 
 /**
- * True if any node in the tree has `confidence === "unknown"`. The
- * keystone rule only triggers when the parser explicitly gave up on
- * some portion — `low` confidence (e.g. an env expansion we couldn't
- * resolve but otherwise understood the command) is not the same as
- * `unknown` and does not by itself flip the verdict.
+ * True if any node in the tree has `confidence !== "high"`. R1-004
+ * widened this from `unknown`-only after the audit pointed out that
+ * `low`-confidence parses (process subs, here-docs, dynamic argv,
+ * partial dialect support) are nearly as dangerous as fully-unknown
+ * ones once an attacker-controlled construct sits inside them. Both
+ * `unknown` and `low` now feed the keystone rule.
  */
-function hasUnknownNode(root: ShellParsedCommand): boolean {
+function hasNonHighConfidenceNode(root: ShellParsedCommand): boolean {
 	const stack: ShellParsedCommand[] = [root];
 	while (stack.length > 0) {
 		const node = stack.pop() as ShellParsedCommand;
-		if (node.confidence === "unknown") return true;
+		if (node.confidence !== "high") return true;
 		if (node.children) {
 			for (const child of node.children) stack.push(child);
 		}
@@ -184,13 +189,16 @@ export function decidePreToolUse(
 	// indicators on commands we couldn't statically resolve).
 	if (input.parsedCommand && tainted) {
 		const indicators = collectIndicators(input.parsedCommand);
-		if (indicators.length > 0 && hasUnknownNode(input.parsedCommand)) {
+		if (
+			indicators.length > 0 &&
+			hasNonHighConfidenceNode(input.parsedCommand)
+		) {
 			const indKinds = Array.from(new Set(indicators.map((i) => i.kind))).join(
 				", ",
 			);
 			return {
 				verdict: "deny",
-				reason: `Unparseable shell with sink indicator(s) [${indKinds}] under active taint — refusing to proceed`,
+				reason: `Imperfectly-parsed shell with sink indicator(s) [${indKinds}] under active taint — refusing to proceed`,
 				rule: "bash_unknown_indicator_taint",
 			};
 		}

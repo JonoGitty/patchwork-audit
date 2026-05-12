@@ -1,0 +1,443 @@
+You're being consulted by Claude (Anthropic) on Patchwork — the AI-coding-agent
+audit-trail tool you previously design-reviewed across 4 rounds (Apr/May 2026)
+and then security-audited on v0.6.9 (28 findings → 22 fixed in v0.6.10 incl.
+your V11–V13 relay sign-endpoint validator). v0.6.10 is on npm; v0.6.11 is in
+flight on branch `feature/v0.6.11-taint` and has now landed commits 1–8 plus
+an out-of-band relay fix. Commits 1–6 were core substrate (ToolEvent registry,
+sink taxonomy, multi-kind taint engine, conservative shell recognizer, URL
+canonicalization, git-remote resolution). This audit is **R1: post-wiring
+implementation audit** of the two highest-risk commits — 7 (PostToolUse taint
+sources) and 8 (PreToolUse sink + taint enforcement, the keystone). Tests
+1342 → 1398 (+56 across 7+8), all passing; full repo 1405. Relay also unbroken
+(`efeff50` fix: configurable `socket_group` so the daemon's 0660 socket isn't
+locked to `wheel`, which was silently failing every hook send since v0.6.10).
+
+We want you to look for BYPASSES first, then logic bugs, then design-mismatch.
+Take your time — multi-round is fine.
+
+----------------------------------------------------------------------------
+APPROVED DESIGN (frozen 2026-05-10, your 4-round consult was the basis)
+----------------------------------------------------------------------------
+
+1. STORAGE CONTRACT (commit 7)
+   - Per-session taint snapshot at `~/.patchwork/taint/<session_id>.json`,
+     mode 0600, dir 0700, atomic tmp+rename.
+   - Schema is the existing `TaintSnapshotSchema` from `@patchwork/core`.
+   - Source fail-open: PostToolUse wraps storage in try/catch and continues
+     on any I/O error. A storage bug must NEVER block the hook pipeline.
+   - Sink fail-closed: PreToolUse must treat `null` from `readTaintSnapshot`
+     as "every taint kind active" so a storage bug only ever forces MORE
+     enforcement where enforcement matters, never fewer.
+
+2. KEYSTONE RULE (commit 8)
+   - For Bash: any node anywhere in the parsed shell tree with
+     `confidence === "unknown"` AND any sink_indicator on any node AND any
+     active taint kind → DENY. Fires BEFORE sink rules because an
+     unparseable Bash with a curl indicator under taint is more dangerous
+     than what the sink layer can see (sink only matches resolved paths).
+
+3. PRETOOL DECISION ORDER (commit 8)
+     1. policy_deny (existing rule-based policy already denied)
+     2. bash_unknown_indicator_taint (keystone)
+     3. sink_deny (any classifyToolEvent match severity=deny)
+     4. sink_approval_required (any match severity=approval_required)
+     5. default_allow
+
+4. RAISES_FOR_TOOL TABLE (commit 3, wired in 7 & 8)
+   - WebFetch / WebSearch → prompt + network_content
+   - mcp__* → mcp + prompt
+   - Read → prompt + secret  (commit 7 narrowed to prompt only; secret is
+     commit-8's job via a `secret_read` match from `classifyToolEvent`)
+   - Bash → empty in the table; commit 8 maps fetch_tool indicators →
+     network_content + prompt via shell-parser output
+   - Write/Edit/MultiEdit/NotebookEdit → registerGeneratedFile with
+     currently-active upstream sources
+
+5. READER FAIL-CLOSED NUANCE (resolved during commit 8 development)
+   - Original design said "missing/corrupt snapshot → approval_required."
+     We softened this: `null` snapshot is NOT itself a verdict, because
+     every fresh session legitimately has no snapshot file yet and forcing
+     approval on every first-action would be unusable. Instead, every rule
+     that *consults* taint collapses `null` to true. So:
+       * fresh-session Bash ls allows (no rule consults taint)
+       * fresh-session Bash curl 'unterminated denies via keystone
+       * fresh-session Write to /etc/x denies via sink (adapter synthesizes
+         an "all-active" taint_state on the ToolEvent so classify.ts's
+         persistence severity flips to deny)
+   - Please critique this softening.
+
+6. KNOWN DEFERRED ITEMS (out of scope for R1)
+   - Approval CLI (`patchwork approve`) lands in commit 9. For now,
+     verdict=approval_required maps to permissionDecision:"deny" with a
+     distinct reason prefix so the agent can ask the user.
+   - Read → secret-kind taint narrowing via classifyToolEvent's
+     `secret_read` match is NOT yet wired (commit 8 didn't ship it). We
+     intentionally over-allow today and the integration tests in commit 11
+     will pin the missing behavior.
+
+----------------------------------------------------------------------------
+KEY CODE — full or near-full files for the auditor
+----------------------------------------------------------------------------
+
+### packages/agents/src/claude-code/taint-store.ts (commit 7, ~150 LOC)
+```ts
+import {
+  type TaintSnapshot,
+  TaintSnapshotSchema,
+  createSnapshot,
+  getHomeDir,
+} from "@patchwork/core";
+import {
+  chmodSync, existsSync, mkdirSync, readFileSync, renameSync,
+  statSync, writeFileSync,
+} from "node:fs";
+import { randomBytes } from "node:crypto";
+import { dirname, join } from "node:path";
+
+const TAINT_DIR_MODE = 0o700;
+const TAINT_FILE_MODE = 0o600;
+
+function sanitizeSessionId(sessionId: string): string {
+  return sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+export function getTaintDir(): string {
+  return join(getHomeDir(), ".patchwork", "taint");
+}
+
+export function getTaintSnapshotPath(sessionId: string): string {
+  return join(getTaintDir(), `${sanitizeSessionId(sessionId)}.json`);
+}
+
+function reconcileMode(path: string, targetMode: number): void {
+  try {
+    const stat = statSync(path);
+    if ((stat.mode & 0o777) !== targetMode) chmodSync(path, targetMode);
+  } catch { /* ignore */ }
+}
+
+export function readTaintSnapshot(
+  sessionId: string,
+  overridePath?: string,
+): TaintSnapshot | null {
+  const p = overridePath ?? getTaintSnapshotPath(sessionId);
+  try {
+    const raw = readFileSync(p, "utf-8");
+    const parsed = JSON.parse(raw);
+    const result = TaintSnapshotSchema.safeParse(parsed);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeTaintSnapshot(
+  snapshot: TaintSnapshot,
+  overridePath?: string,
+): void {
+  const p = overridePath ?? getTaintSnapshotPath(snapshot.session_id);
+  const dir = dirname(p);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true, mode: TAINT_DIR_MODE });
+  } else {
+    reconcileMode(dir, TAINT_DIR_MODE);
+  }
+  const tmpPath = `${p}.${randomBytes(4).toString("hex")}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(snapshot, null, 2) + "\n", {
+    mode: TAINT_FILE_MODE,
+  });
+  renameSync(tmpPath, p);
+}
+
+export function loadOrInitSnapshot(
+  sessionId: string,
+  overridePath?: string,
+): TaintSnapshot {
+  const existing = readTaintSnapshot(sessionId, overridePath);
+  if (existing) return existing;
+  return createSnapshot(sessionId);
+}
+```
+
+### packages/agents/src/claude-code/pre-tool-decision.ts (commit 8 keystone)
+```ts
+import type {
+  ShellParsedCommand, SinkIndicator, SinkMatch, TaintSnapshot,
+} from "@patchwork/core";
+import { hasAnyTaint } from "@patchwork/core";
+
+export interface PolicyDecisionLike {
+  allowed: boolean;
+  reason?: string;
+}
+export interface PreToolDecisionInput {
+  policy: PolicyDecisionLike;
+  sinkMatches: readonly SinkMatch[];
+  parsedCommand?: ShellParsedCommand;
+  taintSnapshot: TaintSnapshot | null;
+}
+export type PreToolVerdict = "allow" | "approval_required" | "deny";
+export interface PreToolDecision {
+  verdict: PreToolVerdict;
+  reason: string;
+  rule: "policy_deny" | "bash_unknown_indicator_taint" | "sink_deny"
+      | "sink_approval_required" | "default_allow";
+}
+
+function collectIndicators(root: ShellParsedCommand): SinkIndicator[] {
+  const out: SinkIndicator[] = [];
+  const stack: ShellParsedCommand[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop() as ShellParsedCommand;
+    for (const ind of node.sink_indicators) out.push(ind);
+    if (node.children) for (const c of node.children) stack.push(c);
+  }
+  return out;
+}
+function hasUnknownNode(root: ShellParsedCommand): boolean {
+  const stack: ShellParsedCommand[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop() as ShellParsedCommand;
+    if (node.confidence === "unknown") return true;
+    if (node.children) for (const c of node.children) stack.push(c);
+  }
+  return false;
+}
+function firstWithSeverity(
+  matches: readonly SinkMatch[], target: SinkMatch["severity"],
+): SinkMatch | null {
+  for (const m of matches) if (m.severity === target) return m;
+  return null;
+}
+
+export function decidePreToolUse(input: PreToolDecisionInput): PreToolDecision {
+  if (!input.policy.allowed) {
+    return {
+      verdict: "deny",
+      reason: input.policy.reason || "policy denied this action",
+      rule: "policy_deny",
+    };
+  }
+  const tainted = input.taintSnapshot === null
+    ? true
+    : hasAnyTaint(input.taintSnapshot);
+
+  if (input.parsedCommand && tainted) {
+    const indicators = collectIndicators(input.parsedCommand);
+    if (indicators.length > 0 && hasUnknownNode(input.parsedCommand)) {
+      const indKinds = Array.from(new Set(indicators.map((i) => i.kind)))
+        .join(", ");
+      return {
+        verdict: "deny",
+        reason: `Unparseable shell with sink indicator(s) [${indKinds}] under active taint — refusing to proceed`,
+        rule: "bash_unknown_indicator_taint",
+      };
+    }
+  }
+
+  const denyMatch = firstWithSeverity(input.sinkMatches, "deny");
+  if (denyMatch) {
+    return { verdict: "deny", reason: denyMatch.reason, rule: "sink_deny" };
+  }
+  const approvalMatch = firstWithSeverity(input.sinkMatches, "approval_required");
+  if (approvalMatch) {
+    return {
+      verdict: "approval_required",
+      reason: approvalMatch.reason,
+      rule: "sink_approval_required",
+    };
+  }
+  return { verdict: "allow", reason: "no rule blocks this action", rule: "default_allow" };
+}
+```
+
+### Relevant adapter.ts hunks (commit 7 + 8 wiring)
+
+PostToolUse — Bash shell-indicator taint mapping (commit 8 addition):
+```ts
+function bashIndicatorTaint(root: ReturnType<typeof parseShellCommand>): readonly TaintKind[] {
+  const kinds = new Set<TaintKind>();
+  const stack = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    for (const ind of node.sink_indicators) {
+      if (ind.kind === "fetch_tool") {
+        kinds.add("network_content");
+        kinds.add("prompt");
+      }
+    }
+    if (node.children) for (const c of node.children) stack.push(c);
+  }
+  return [...kinds];
+}
+```
+Only `fetch_tool` is mapped today; other indicator kinds (interpreter,
+pipe_to_interpreter, eval_construct, secret_path, scp_rsync, nc_socat,
+ssh, package_lifecycle, gh_upload, git_remote_mutate) are intentionally
+not mapped to taint because they describe what the command *did* rather
+than what came INTO the session context. Critique this.
+
+PreToolUse wiring (commit 8):
+```ts
+function syntheticTaintForFailClosed(sessionId: string): TaintSnapshot {
+  // Carries exactly one source under EVERY kind so classify.ts's
+  // hasAnyTaint shim returns true and persistence severity flips to deny.
+  const by_kind: Record<string, TaintSource[]> = {};
+  const fakeSource: TaintSource = {
+    ts: 0, ref: "patchwork:fail-closed-synthetic",
+    content_hash: "sha256:fail-closed-synthetic",
+  };
+  for (const kind of ALL_TAINT_KINDS) by_kind[kind] = [fakeSource];
+  return { session_id: sessionId, by_kind, generated_files: {} };
+}
+
+function computeTaintSinkDecision(
+  input: ClaudeCodeHookInput, toolName: string, target: Target,
+  policyDecision: { allowed: boolean; reason?: string },
+): PreToolDecision {
+  const sessionId = input.session_id || generateSessionId();
+  const snapshot = readTaintSnapshot(sessionId);
+
+  const targetPaths: string[] = [];
+  if (target.path) targetPaths.push(target.path);
+  if (target.abs_path && target.abs_path !== target.path) {
+    targetPaths.push(target.abs_path);
+  }
+
+  const toolEvent: ToolEvent = {
+    tool: toolName, phase: "pre",
+    cwd: input.cwd, project_root: input.cwd,
+    raw_input: input.tool_input ?? {},
+    target_paths: targetPaths, resolved_paths: targetPaths,
+    urls: target.url ? [target.url] : [],
+    hosts: [],
+    taint_state: snapshot ?? syntheticTaintForFailClosed(sessionId),
+    policy_version: "v0.6.11-pre.1",
+  };
+  const sinkMatches = classifyToolEvent(toolEvent);
+
+  let parsedCommand: ReturnType<typeof parseShellCommand> | undefined;
+  if (toolName === "Bash") {
+    const cmd = typeof (input.tool_input || {}).command === "string"
+      ? ((input.tool_input || {}).command as string) : "";
+    if (cmd.length > 0) parsedCommand = parseShellCommand(cmd);
+  }
+
+  return decidePreToolUse({
+    policy: policyDecision,
+    sinkMatches, parsedCommand, taintSnapshot: snapshot,
+  });
+}
+```
+
+Note: `handlePreToolUse` runs the existing `evaluatePolicy` BEFORE calling
+this helper. If policy denies, we never get here. If policy allows, we
+call this — and the composer's policy_deny rule is therefore dead code in
+the adapter integration today (but the composer is also unit-tested
+directly so the rule still matters for that surface). Critique whether
+this two-layer arrangement could miss a case.
+
+### classify.ts local hasAnyTaint shim (DESIGN NOTED FOR MIGRATION)
+```ts
+function hasAnyTaint(snapshot: TaintSnapshot | undefined): boolean {
+  if (!snapshot) return false;
+  for (const kind of Object.keys(snapshot.by_kind)) {
+    const sources = snapshot.by_kind[kind];
+    if (sources && sources.length > 0) return true;
+  }
+  return false;
+}
+```
+Differs from the engine's `hasAnyTaint` in `@patchwork/core/taint/snapshot.ts`
+which filters cleared sources. The engine version is correct (cleared
+sources should not register as active). The design note says commit 8
+should migrate classify.ts to the engine version. We did NOT migrate yet.
+Is this a bug today? (No `clearTaint` CLI exists yet — commit 9.)
+
+----------------------------------------------------------------------------
+WHAT WE WANT FROM R1
+----------------------------------------------------------------------------
+
+Please find:
+
+A. BYPASSES of the keystone rule. Specifically:
+   - Can a Bash command have `fetch_tool` indicator without registering
+     any taint that the keystone consults?
+   - Can the parser be coerced into returning confidence="low" (not
+     "unknown") for a command that should be denied? The keystone only
+     triggers on "unknown" — is that the right line?
+   - Are there indicator kinds we should weight in the keystone but
+     currently don't (interpreter? pipe_to_interpreter? secret_path?)?
+   - Does the keystone need to also fire on resolved-confidence commands
+     that combine certain indicator + sink pairs?
+
+B. STORAGE / SOURCE BUGS in commit 7:
+   - Race conditions: two concurrent PostToolUse handlers writing to
+     the same session file (atomic rename only protects the file, not
+     read-modify-write).
+   - sanitizeSessionId loses uniqueness — two different session ids
+     can collide to the same path. Is that exploitable?
+   - readTaintSnapshot returns null on missing AND corrupt — the caller
+     can't tell. Is the "treat null as fail-closed-tainted" semantic
+     robust against an attacker who *deletes* the snapshot mid-session?
+   - Does atomic write+rename actually work on macOS/Linux for files
+     that might be in use by other readers?
+
+C. DECISION COMPOSER LOGIC:
+   - Rule priority correctness (is sink_deny ever more informative than
+     keystone? does the order leak info that should be denied?).
+   - The "synthetic all-active taint" injected when snapshot=null — does
+     it interact correctly with classify.ts's local shim?
+   - Edge cases: parsed_command with empty tree, sink matches that
+     duplicate-fire across multiple severities, advisory matches that
+     should escalate under taint but currently don't.
+
+D. DESIGN MISMATCH:
+   - Where does the implementation diverge from the approved design?
+   - Where did we under-implement (deferred items that should be in 8)?
+   - Where did we over-implement (something not in the design that
+     should be removed)?
+
+E. ANYTHING ELSE you'd flag as ship-blocking, ship-with-followup, or
+   ship-clean. We will trust SHIP, SHIP_WITH_FOLLOWUP, NEEDS_REWORK
+   verdicts.
+
+----------------------------------------------------------------------------
+OUTPUT
+----------------------------------------------------------------------------
+
+Return a JSON object with this shape (no markdown, raw JSON):
+
+{
+  "overall_verdict": "SHIP" | "SHIP_WITH_FOLLOWUP" | "NEEDS_REWORK",
+  "headline": "<one sentence>",
+  "findings": [
+    {
+      "id": "R1-001",
+      "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO",
+      "title": "<short>",
+      "category": "bypass" | "storage" | "logic" | "design_mismatch" | "other",
+      "where": "<file:line or function name>",
+      "issue": "<what's wrong>",
+      "exploit": "<concrete scenario; or 'theoretical' if none>",
+      "fix": "<recommended change>"
+    }
+  ],
+  "design_critique": {
+    "fail_closed_softening_correct": <bool>,
+    "fail_closed_softening_reasoning": "<your view on the null-snapshot semantic>",
+    "keystone_rule_correct": <bool>,
+    "keystone_rule_concerns": "<anything>",
+    "indicator_mapping_correct": <bool>,
+    "indicator_mapping_concerns": "<anything>"
+  },
+  "ship_recommendation": {
+    "blocking": ["R1-XXX", ...],
+    "must_fix_before_R2": ["R1-XXX", ...],
+    "should_fix_after_R2_before_release": ["R1-XXX", ...],
+    "may_defer": ["R1-XXX", ...]
+  },
+  "follow_up_questions": ["<questions for round 2 if needed>"]
+}
+
+Budget is ~$3 for R1 + R2 combined; please be thorough but efficient.

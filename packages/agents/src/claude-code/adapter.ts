@@ -23,18 +23,23 @@ import {
 	ALL_TAINT_KINDS,
 	RAISES_FOR_TOOL,
 	getActiveSources,
+	hasAnyTaint,
 	registerGeneratedFile,
 	registerTaint,
 } from "@patchwork/core";
 import {
+	clearPendingMarker,
 	loadOrInitSnapshot,
 	readTaintSnapshot,
+	setPendingMarker,
+	withSessionLock,
 	writeTaintSnapshot,
 } from "./taint-store.js";
 import {
 	decidePreToolUse,
 	type PreToolDecision,
 } from "./pre-tool-decision.js";
+import { classifyDangerousShellCombos } from "./dangerous-shell-combos.js";
 import { isAbsolute, relative, dirname, join } from "node:path";
 import {
 	existsSync,
@@ -511,7 +516,7 @@ function computeTaintSinkDecision(
 			snapshot ?? syntheticTaintForFailClosed(sessionId),
 		policy_version: "v0.6.11-pre.1",
 	};
-	const sinkMatches = classifyToolEvent(toolEvent);
+	const sinkMatches = [...classifyToolEvent(toolEvent)];
 
 	// Parse Bash commands so the keystone rule can see indicators and
 	// confidence. Other tools skip this — there's no shell to parse.
@@ -524,6 +529,20 @@ function computeTaintSinkDecision(
 		if (cmd.length > 0) {
 			parsedCommand = parseShellCommand(cmd);
 		}
+	}
+
+	// R1-005: layer the dangerous-shell-combos classifier on top of the
+	// resolved-path sink layer. It walks the parsed tree and emits
+	// SinkMatches for indicator pairs `classifyToolEvent` can't see
+	// (curl | sh, secret | curl, gh upload, git push, npm install).
+	// `tainted` here mirrors the composer's fail-closed semantic: null
+	// snapshot collapses to true so a stale-storage state can never let
+	// a dangerous combo through as approval_required when it would have
+	// been deny under real taint.
+	if (parsedCommand) {
+		const tainted = snapshot === null ? true : hasAnyTaint(snapshot);
+		const comboMatches = classifyDangerousShellCombos(parsedCommand, tainted);
+		for (const m of comboMatches) sinkMatches.push(m);
 	}
 
 	return decidePreToolUse({
@@ -795,15 +814,24 @@ function pickSourceRef(toolName: string, target: Target | undefined): string {
  * Walk a parsed shell tree and return the deduplicated set of taint
  * kinds the indicators imply for a PostToolUse update.
  *
- * Mapping (v0.6.11 commit 8 conservative scope):
- *   - `fetch_tool` (curl/wget/http) → `network_content` + `prompt`
- *     (the response body is now in the session's context)
+ * Mapping (commit 8 + R1-006):
+ *   - `fetch_tool` (curl/wget/http) → `network_content` + `prompt`.
+ *     The response body is now in the session's context.
+ *   - `secret_path` (read of credential-class path) → `secret` + `prompt`.
+ *     The credential contents flowed into the transcript.
+ *   - `interpreter_inline_eval` (`sh -c "..."`, `python -c "..."`,
+ *     `node -e "..."`, etc.) → `prompt`. Inline source executed by a
+ *     subshell IS new content that just landed in context. Note this
+ *     overlaps with `pipe_to_interpreter` — that one is a sink (a
+ *     dangerous *destination*), not a source, so it is not mapped here
+ *     (R1-005's dangerous-shell-combos classifier handles it).
  *
- * Other commit-4 indicator kinds (interpreter, pipe_to_interpreter,
- * eval_construct, …) are NOT mapped here yet — they describe what the
- * command DID, but PostToolUse is about what came INTO context as a
- * result. A `sh -c 'date'` doesn't taint the session; a `curl ...`
- * does. Later commits can widen this mapping if needed.
+ * Other indicator kinds (process_sub_to_interpreter, eval_construct,
+ * network_redirect, secret_path for *writes*, scp/rsync/nc/socat/ssh,
+ * package_lifecycle, gh_upload, git_remote_mutate) describe what the
+ * command DID rather than what came INTO context — they belong to the
+ * sink layer, not the source layer. R1-005's combos classifier is
+ * where they get adjudicated.
  */
 function bashIndicatorTaint(root: ReturnType<typeof parseShellCommand>): readonly TaintKind[] {
 	const kinds = new Set<TaintKind>();
@@ -813,6 +841,11 @@ function bashIndicatorTaint(root: ReturnType<typeof parseShellCommand>): readonl
 		for (const ind of node.sink_indicators) {
 			if (ind.kind === "fetch_tool") {
 				kinds.add("network_content");
+				kinds.add("prompt");
+			} else if (ind.kind === "secret_path") {
+				kinds.add("secret");
+				kinds.add("prompt");
+			} else if (ind.kind === "interpreter_inline_eval") {
 				kinds.add("prompt");
 			}
 		}
@@ -866,6 +899,16 @@ function updateTaintSnapshotForPostTool(
 	if (kinds.length === 0) return;
 
 	const sessionId = input.session_id || generateSessionId();
+
+	// R1-003: hold a per-session lock across the read-modify-write so a
+	// concurrent PostToolUse for the same session can't race and lose
+	// updates.
+	withSessionLock(sessionId, () => {
+		doFoldedUpdate();
+	});
+	return;
+
+	function doFoldedUpdate(): void {
 	let snapshot = loadOrInitSnapshot(sessionId);
 	let changed = false;
 
@@ -916,7 +959,19 @@ function updateTaintSnapshotForPostTool(
 	// tools whose only kind is `generated_file` and that run before any
 	// upstream taint has been recorded.
 	if (!changed) return;
-	writeTaintSnapshot(snapshot);
+
+	// R1-002: set the .pending marker just before the write, clear it
+	// after success. A crash between set and clear leaves the marker on
+	// disk and the next PreToolUse reads `null` (fail-closed). The
+	// marker does NOT wrap the load — readers would otherwise mistake
+	// a healthy write-in-progress for staleness inside the same lock.
+	try {
+		setPendingMarker(sessionId);
+		writeTaintSnapshot(snapshot);
+	} finally {
+		clearPendingMarker(sessionId);
+	}
+	}
 }
 
 function handleSubagentStart(store: Store, input: ClaudeCodeHookInput): null {

@@ -90,7 +90,12 @@ describe("taint-store", () => {
 		writeTaintSnapshot(snap);
 		const files = readdirSync(getTaintDir());
 		expect(files.some((f) => f.endsWith(".tmp"))).toBe(false);
-		expect(files.some((f) => f === "ses_atomic.json")).toBe(true);
+		// sha256(ses_atomic).json — file exists at the derived path
+		expect(files.some((f) => f.endsWith(".json"))).toBe(true);
+		// And it's exactly the path our function derives
+		const expectedName =
+			getTaintSnapshotPath("ses_atomic").split("/").pop() as string;
+		expect(files).toContain(expectedName);
 	});
 
 	it("readTaintSnapshot returns null for a missing file", () => {
@@ -167,5 +172,50 @@ describe("taint-store", () => {
 		const back = readTaintSnapshot("ses_overwrite");
 		expect(back!.by_kind.mcp).toHaveLength(1);
 		expect(back!.by_kind.prompt).toEqual([]);
+	});
+
+	// -----------------------------------------------------------------------
+	// R1 regression tests
+	// -----------------------------------------------------------------------
+
+	it("R1-007: distinct session ids hash to distinct paths (no collision)", () => {
+		// Old sanitizer mapped 'a/b' and 'a_b' to the same path.
+		const p1 = getTaintSnapshotPath("a/b");
+		const p2 = getTaintSnapshotPath("a_b");
+		expect(p1).not.toBe(p2);
+	});
+
+	it("R1-007: session_id mismatch in file body causes readTaintSnapshot to return null", () => {
+		// Write a snapshot whose internal session_id is 'forged' at the path
+		// for 'ses_real'. The integrity check in readTaintSnapshot must reject.
+		const realPath = getTaintSnapshotPath("ses_real");
+		const dir = getTaintDir();
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const bogus = createSnapshot("ses_forged"); // wrong id
+		writeFileSync(realPath, JSON.stringify(bogus, null, 2), {
+			mode: 0o600,
+		});
+		// Reader asks for ses_real but file says ses_forged → null
+		expect(readTaintSnapshot("ses_real")).toBeNull();
+	});
+
+	it("R1-002: pending marker present alongside snapshot collapses read to null", () => {
+		// Set up a valid snapshot
+		writeTaintSnapshot(createSnapshot("ses_pending"));
+		expect(readTaintSnapshot("ses_pending")).not.toBeNull();
+
+		// Now mark it pending — simulating a writer crashed mid-write
+		const pendingPath = getTaintSnapshotPath("ses_pending").replace(
+			/\.json$/,
+			".pending",
+		);
+		writeFileSync(pendingPath, "", { mode: 0o600 });
+
+		// Reader fails closed
+		expect(readTaintSnapshot("ses_pending")).toBeNull();
+
+		// Clear the marker — reader trusts the file again
+		rmSync(pendingPath);
+		expect(readTaintSnapshot("ses_pending")).not.toBeNull();
 	});
 });

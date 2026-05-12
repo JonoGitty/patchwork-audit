@@ -43,6 +43,7 @@
 
 import picomatch from "picomatch";
 import type { ToolEvent, TaintSnapshot } from "../core/tool-event.js";
+import { hasAnyTaint as engineHasAnyTaint } from "../taint/snapshot.js";
 import { PERSISTENCE_PATTERNS, expandHomePattern } from "./persistence-paths.js";
 import { SECRET_PATTERNS } from "./secret-paths.js";
 import type { SinkMatch } from "./types.js";
@@ -126,19 +127,16 @@ function findFirstMatch(
 }
 
 /**
- * Whether the snapshot has *any* taint kind active. Used as a single flip
- * for severity (`deny` vs `approval_required`) on the persistence sink.
- * The taint engine's clear-taint API (commit 3) is responsible for clearing
- * `by_kind` entries when the user runs `patchwork clear-taint`; we just
- * read whatever the snapshot currently says.
+ * Whether the snapshot has *any* taint kind active. Wraps the taint
+ * engine's `hasAnyTaint` so cleared sources are filtered correctly —
+ * the previous local shim counted every source array entry, which
+ * would have over-enforced once the `clearTaint` CLI (commit 9) lands
+ * and cleared-but-retained sources start appearing in the snapshot
+ * (R1-010).
  */
 function hasAnyTaint(snapshot: TaintSnapshot | undefined): boolean {
 	if (!snapshot) return false;
-	for (const kind of Object.keys(snapshot.by_kind)) {
-		const sources = snapshot.by_kind[kind];
-		if (sources && sources.length > 0) return true;
-	}
-	return false;
+	return engineHasAnyTaint(snapshot);
 }
 
 /**
