@@ -68,6 +68,16 @@ pnpm hooks:install
 
 Requires `NPM_TOKEN` secret configured in the repository.
 
+## Security-hardening contributions (Mythos-readiness)
+
+Work toward hardening Patchwork against autonomous (Mythos-class) agents is tracked in [`DESIGN/v0.6.12-mythos-readiness-tracker.md`](DESIGN/v0.6.12-mythos-readiness-tracker.md). If you're picking up a hardening item:
+
+1. Read the tracker's **"load-bearing property"** section first — every contribution must move toward the single reference-monitor invariant, not just patch one bypass.
+2. Pick an item from the at-a-glance table. Each has acceptance criteria + a validation command. Update the **"Next action"** line when you change an item's state.
+3. **Design items (D-series, M-series architecture)** get a cross-vendor review (e.g. via GPT-5.5) BEFORE implementation. **Code items** (F/T/U) follow the normal feature-branch + tests flow above.
+4. Don't mix a whole-file reformat into a behaviour change (see the X2 note in the tracker) — keep security commits focused.
+5. Verbatim cross-vendor reviews live in `REVIEWS/`. Add yours there for traceability.
+
 ## Reporting Issues
 
 - Use GitHub Issues for bugs and feature requests.
