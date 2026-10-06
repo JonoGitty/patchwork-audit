@@ -13,6 +13,7 @@ import {
 	assessRelayHealth,
 	relayHealthExitCode,
 	DEFAULT_MAX_SILENCE_MS,
+	DEFAULT_DIVERGENCE_WINDOW_MS,
 	type ChainStateResponse,
 	type SealStatusResponse,
 } from "@patchwork/core";
@@ -132,6 +133,11 @@ export const relayCommand = new Command("relay")
 				"treat heartbeat silence longer than this as degraded",
 				String(DEFAULT_MAX_SILENCE_MS / 60_000),
 			)
+			.option(
+				"--divergence-window <minutes>",
+				"how recent a delivery failure must be to count as current",
+				String(DEFAULT_DIVERGENCE_WINDOW_MS / 60_000),
+			)
 			.option("--json", "emit the report as JSON")
 			.action((opts) => {
 				if (!existsSync(RELAY_LOG_PATH)) {
@@ -163,10 +169,17 @@ export const relayCommand = new Command("relay")
 						? minutes * 60_000
 						: DEFAULT_MAX_SILENCE_MS;
 
+				const windowMinutes = Number(opts.divergenceWindow);
+				const divergenceWindowMs =
+					Number.isFinite(windowMinutes) && windowMinutes > 0
+						? windowMinutes * 60_000
+						: DEFAULT_DIVERGENCE_WINDOW_MS;
+
 				const report = assessRelayHealth({
 					logContent: readFileSync(RELAY_LOG_PATH, "utf-8"),
 					divergence: readRelayDivergenceMarker(),
 					maxSilenceMs,
+					divergenceWindowMs,
 				});
 
 				if (opts.json) {
@@ -199,11 +212,20 @@ export const relayCommand = new Command("relay")
 					);
 				}
 				if (report.divergenceFailures > 0) {
+					const current = report.reasons.some((r) => r.includes("deliver"));
+					const label = `${report.divergenceFailures} failed`;
 					console.log(
-						`  Delivery:   ${chalk.red(`${report.divergenceFailures} failed`)}`,
+						`  Delivery:   ${current ? chalk.red(label) : chalk.dim(`${label} (historical)`)}`,
 					);
 				}
 				console.log(`  Integrity:  ${verdict}`);
+
+				if (report.notes.length > 0) {
+					console.log("");
+					for (const note of report.notes) {
+						console.log(chalk.dim(`  i ${note}`));
+					}
+				}
 
 				if (report.reasons.length > 0) {
 					console.log("");

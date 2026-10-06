@@ -234,6 +234,7 @@ export {
 	assessRelayHealth,
 	relayHealthExitCode,
 	DEFAULT_MAX_SILENCE_MS,
+	DEFAULT_DIVERGENCE_WINDOW_MS,
 	type RelayHealthStatus,
 	type RelayHealthReport,
 	type AssessRelayHealthInput,

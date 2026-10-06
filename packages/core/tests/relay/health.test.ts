@@ -3,6 +3,7 @@ import {
 	assessRelayHealth,
 	relayHealthExitCode,
 	DEFAULT_MAX_SILENCE_MS,
+	DEFAULT_DIVERGENCE_WINDOW_MS,
 	type RelayDivergenceMarker,
 } from "../../src/index.js";
 
@@ -27,13 +28,16 @@ function event(id: string): string {
 	});
 }
 
-function divergence(failures: number): RelayDivergenceMarker {
+function divergence(
+	failures: number,
+	lastFailureAt = "2026-10-06T09:59:00.000Z",
+): RelayDivergenceMarker {
 	return {
 		schema_version: 1,
 		failure_count: failures,
-		first_failure_at: "2026-10-06T08:00:00.000Z",
-		last_failure_at: "2026-10-06T09:59:00.000Z",
-		last_error: "connect EACCES /Library/Patchwork/relay.sock",
+		first_failure_at: "2026-05-01T14:50:15.015Z",
+		last_failure_at: lastFailureAt,
+		last_error: "Relay connection timed out",
 	};
 }
 
@@ -59,7 +63,7 @@ describe("assessRelayHealth (F4)", () => {
 	// The regression this whole module exists for: in v0.6.10 the socket
 	// group was wrong, every delivery returned EACCES, and verify reported
 	// PASS for days on a chain that was receiving nothing.
-	it("is DEGRADED when deliveries are failing, even though every line parses", () => {
+	it("is DEGRADED when deliveries are failing now, even though every line parses", () => {
 		const report = assessRelayHealth({
 			logContent: [event("evt_1"), heartbeat("2026-10-06T09:59:30.000Z")].join(
 				"\n",
@@ -71,8 +75,85 @@ describe("assessRelayHealth (F4)", () => {
 		expect(report.corrupt).toBe(0);
 		expect(report.status).toBe("stale");
 		expect(report.divergenceFailures).toBe(417);
-		expect(report.reasons.join(" ")).toMatch(/hooks cannot reach the relay/);
+		// Daemon is alive and delivery still failed — the sharp case.
+		expect(report.reasons.join(" ")).toMatch(
+			/relay was reachable and still did not take the event/,
+		);
 		expect(relayHealthExitCode(report)).toBe(2);
+	});
+
+	it("names the daemon-unreachable case differently from the daemon-alive case", () => {
+		const report = assessRelayHealth({
+			// No fresh heartbeat: the daemon was not there to take it.
+			logContent: [event("evt_1"), heartbeat("2026-10-06T09:00:00.000Z")].join(
+				"\n",
+			),
+			divergence: divergence(5),
+			now: NOW,
+		});
+
+		expect(report.status).toBe("stale");
+		expect(report.reasons.join(" ")).toMatch(/hooks cannot reach the relay/);
+	});
+
+	// Regression guard for the cry-wolf defect. The divergence marker is
+	// cumulative and never self-clears, so a raw failure_count > 0 test
+	// degrades forever after a single historical failure. On a laptop that
+	// is permanent: this is the real shape measured on one MacBook, 3,529
+	// cumulative failures from months of lid-close, with a perfectly
+	// healthy daemon right now. It must read PASS with a note, because an
+	// alarm that is always on teaches people to dismiss it.
+	it("PASSES with a note when divergence is historical, not current", () => {
+		const report = assessRelayHealth({
+			logContent: [event("evt_1"), heartbeat("2026-10-06T09:59:30.000Z")].join(
+				"\n",
+			),
+			divergence: divergence(3529, "2026-10-05T22:14:00.000Z"),
+			now: NOW,
+		});
+
+		expect(report.status).toBe("pass");
+		expect(relayHealthExitCode(report)).toBe(0);
+		expect(report.reasons).toEqual([]);
+		expect(report.notes.join(" ")).toMatch(/historical, not current/);
+		// The missing events are still acknowledged, just not alarmed on.
+		expect(report.notes.join(" ")).toMatch(/missing from the relay copy/);
+		expect(report.divergenceFailures).toBe(3529);
+	});
+
+	it("respects a caller-supplied divergence window", () => {
+		const log = [event("evt_1"), heartbeat("2026-10-06T09:59:30.000Z")].join(
+			"\n",
+		);
+		const marker = divergence(12, "2026-10-06T07:00:00.000Z"); // 3h ago
+
+		expect(assessRelayHealth({ logContent: log, divergence: marker, now: NOW }).status).toBe(
+			"pass",
+		);
+		expect(
+			assessRelayHealth({
+				logContent: log,
+				divergence: marker,
+				now: NOW,
+				divergenceWindowMs: 4 * 60 * 60_000,
+			}).status,
+		).toBe("stale");
+	});
+
+	it("notes, rather than guesses, when the divergence marker has no usable timestamp", () => {
+		const report = assessRelayHealth({
+			logContent: heartbeat("2026-10-06T09:59:30.000Z"),
+			divergence: divergence(9, "not-a-date"),
+			now: NOW,
+		});
+
+		expect(report.divergenceAgeMs).toBeNull();
+		expect(report.status).toBe("pass");
+		expect(report.notes.join(" ")).toMatch(/age unknown/);
+	});
+
+	it("defaults the divergence window to one hour", () => {
+		expect(DEFAULT_DIVERGENCE_WINDOW_MS).toBe(3_600_000);
 	});
 
 	it("is DEGRADED when the daemon has stopped beating", () => {
@@ -156,6 +237,7 @@ describe("assessRelayHealth (F4)", () => {
 
 		expect(report.status).toBe("fail");
 		expect(relayHealthExitCode(report)).toBe(1);
+		// corrupt line + stale heartbeat + current delivery failures
 		expect(report.reasons.length).toBe(3);
 	});
 
@@ -170,6 +252,7 @@ describe("assessRelayHealth (F4)", () => {
 		expect(report.events).toBe(1);
 		expect(report.heartbeats).toBe(1);
 		expect(report.status).toBe("pass");
+		expect(report.notes).toEqual([]);
 	});
 
 	it("uses the newest heartbeat, not the last line", () => {
