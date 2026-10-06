@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { parseShellCommand } from "@patchwork/core";
 import { classifyDangerousShellCombos } from "../../src/claude-code/dangerous-shell-combos.js";
 
@@ -332,6 +335,107 @@ describe("classifyDangerousShellCombos (R1-005)", () => {
 				expect(
 					matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
 				).toBe(false);
+			});
+		});
+
+		// R6-002: alternate-name symlinks to the installed Patchwork binary
+		// must be detected via realpath identity, not just basename. See
+		// REVIEWS/2026-05-12-gpt55-v0.6.11-impl-audit-round6.json.
+		describe("F1 / R6-002: alternate-name (symlink) execution", () => {
+			let tmp: string;
+			let fakePatchwork: string;
+			const origCanonical = process.env.PATCHWORK_CANONICAL_REALPATH;
+
+			beforeEach(() => {
+				tmp = mkdtempSync(join(tmpdir(), "pw-f1-"));
+				fakePatchwork = join(tmp, "patchwork");
+				writeFileSync(fakePatchwork, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+				process.env.PATCHWORK_CANONICAL_REALPATH = fakePatchwork;
+			});
+			afterEach(() => {
+				if (origCanonical === undefined)
+					delete process.env.PATCHWORK_CANONICAL_REALPATH;
+				else process.env.PATCHWORK_CANONICAL_REALPATH = origCanonical;
+				try {
+					rmSync(tmp, { recursive: true, force: true });
+				} catch {
+					/* */
+				}
+			});
+
+			it("DENIES `<symlinkName> approve <id>` via realpath identity", () => {
+				const altName = join(tmp, "pw");
+				symlinkSync(fakePatchwork, altName);
+				const parsed = parseShellCommand(`${altName} approve abc123`);
+				const matches = classifyDangerousShellCombos(parsed, false);
+				const m = matches.find(
+					(x) => x.matched_pattern === "admin_cli_invocation",
+				);
+				expect(m, "alternate-name symlink should be detected").toBeDefined();
+				expect(m!.severity).toBe("deny");
+			});
+
+			it("DENIES alternate-name + clear-taint verb under taint", () => {
+				const altName = join(tmp, "approve-helper");
+				symlinkSync(fakePatchwork, altName);
+				const parsed = parseShellCommand(`${altName} clear-taint`);
+				const matches = classifyDangerousShellCombos(parsed, true);
+				expect(
+					matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+				).toBe(true);
+			});
+
+			it("DENIES symlink to patchwork wrapped in `exec`", () => {
+				const altName = join(tmp, "x");
+				symlinkSync(fakePatchwork, altName);
+				const parsed = parseShellCommand(`exec ${altName} approve abc`);
+				const matches = classifyDangerousShellCombos(parsed, false);
+				const m = matches.find(
+					(x) => x.matched_pattern === "admin_cli_invocation",
+				);
+				expect(m, "exec-wrapped symlink should be detected").toBeDefined();
+			});
+
+			it("does NOT match a non-patchwork executable with similar name", () => {
+				// A real-looking command that isn't actually the patchwork
+				// binary — basename != patchwork, realpath != canonical.
+				const other = join(tmp, "pw");
+				writeFileSync(other, "#!/bin/sh\necho hello\n", { mode: 0o755 });
+				const parsed = parseShellCommand(`${other} approve abc`);
+				const matches = classifyDangerousShellCombos(parsed, false);
+				expect(
+					matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+				).toBe(false);
+			});
+
+			it("does NOT crash on a non-existent path (fail-safe)", () => {
+				const parsed = parseShellCommand(
+					"/path/that/does/not/exist/pw approve abc",
+				);
+				expect(() =>
+					classifyDangerousShellCombos(parsed, false),
+				).not.toThrow();
+				const matches = classifyDangerousShellCombos(parsed, false);
+				expect(
+					matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+				).toBe(false);
+			});
+
+			// HONEST RESIDUAL: literal copies (cp) and wrapper scripts (exec
+			// inside a different file) are NOT caught by realpath identity.
+			// Documenting the limit here so the test corpus reflects reality.
+			// The root-owned approval daemon (planned v0.6.12 P0c) is the
+			// final fix; this expectation will invert when that lands.
+			it("DOCUMENTED RESIDUAL: literal binary copies still bypass (root-owned daemon needed)", () => {
+				const copy = join(tmp, "pw");
+				// cp-style: a literal copy of the binary (different inode,
+				// realpath points to itself, not the canonical patchwork).
+				writeFileSync(copy, readFileSync(fakePatchwork), { mode: 0o755 });
+				const parsed = parseShellCommand(`${copy} approve abc`);
+				const matches = classifyDangerousShellCombos(parsed, false);
+				expect(
+					matches.some((m) => m.matched_pattern === "admin_cli_invocation"),
+				).toBe(false); // <- known gap, not a bug we're fixing here
 			});
 		});
 	});
