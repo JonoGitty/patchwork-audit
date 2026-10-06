@@ -58,7 +58,7 @@ export default defineConfig({
 							link: "/concepts/risk-classification",
 						},
 						{
-							text: "Tamper-Proof Layers",
+							text: "Tamper-Evident Layers",
 							link: "/concepts/tamper-proof-layers",
 						},
 						{

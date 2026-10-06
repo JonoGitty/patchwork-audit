@@ -56,13 +56,13 @@ patchwork team status
 
 The **sync agent** runs on each developer's machine and:
 
-1. Reads events from the relay log (root-owned, tamper-proof)
+1. Reads events from the relay log (root-owned, tamper-evident)
 2. Batches events (up to 500 events or 1 MB per batch)
 3. Signs the batch with the machine's API key (HMAC-SHA256)
 4. Pushes to the team server's ingest endpoint
 5. Tracks sync progress with a local cursor
 
-Events are synced from the **relay log**, not the user log — ensuring the team server receives the tamper-proof copy.
+Events are synced from the **relay log**, not the user log — ensuring the team server receives the tamper-evident copy.
 
 ## Unenrolling
 

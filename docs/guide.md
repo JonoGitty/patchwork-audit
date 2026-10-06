@@ -272,7 +272,7 @@ git push origin refs/notes/patchwork
 
 ## 7. The Relay Daemon
 
-The relay is the tamper-proof backbone. It's a root-owned daemon that receives copies of every event via Unix socket and writes them to an append-only log that non-root users cannot modify.
+The relay is the tamper-evident backbone. It's a root-owned daemon that receives copies of every event via Unix socket and writes them to an append-only log that non-root users cannot modify.
 
 ### Why it matters
 

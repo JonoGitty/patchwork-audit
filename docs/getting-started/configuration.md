@@ -112,4 +112,4 @@ When running `patchwork init`, you can choose a security profile:
 
 - [Understand risk classification](/concepts/risk-classification) to know what gets flagged
 - [Write policies](/guides/policy) tailored to your project
-- [Set up the relay daemon](/concepts/tamper-proof-layers) for tamper-proof logging
+- [Set up the relay daemon](/concepts/tamper-proof-layers) for tamper-evident logging

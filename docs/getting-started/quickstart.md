@@ -75,4 +75,4 @@ All of this happens in milliseconds. The AI doesn't slow down — it just can't 
 
 - [Configure policies](/getting-started/configuration) to control what your AI can do
 - [Understand how it works](/concepts/how-it-works) under the hood
-- [Deploy the relay daemon](/concepts/tamper-proof-layers) for maximum tamper resistance
+- [Deploy the relay daemon](/concepts/tamper-proof-layers) for the strongest tamper-evidence available in Advisory mode

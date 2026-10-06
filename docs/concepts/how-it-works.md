@@ -121,5 +121,5 @@ Nothing is sent to any external service unless you explicitly configure [witness
 ## Next Steps
 
 - [Risk Classification](/concepts/risk-classification) — how Patchwork decides what's dangerous
-- [Tamper-Proof Layers](/concepts/tamper-proof-layers) — the 5 layers that prevent tampering
+- [Tamper-Evident Layers](/concepts/tamper-proof-layers) — the 5 layers that make tampering detectable
 - [Seals & Witnesses](/concepts/seals-and-witnesses) — cryptographic proof that logs haven't been altered

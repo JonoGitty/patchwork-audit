@@ -71,7 +71,7 @@ Copy `skills/patchwork/` into your `~/.claude/skills/` directory to add a `/patc
 cp -r skills/patchwork ~/.claude/skills/
 ```
 
-### System-level install (tamper-proof)
+### System-level install (tamper-evident)
 
 For managed machines where non-admin users should not be able to disable auditing:
 
@@ -254,7 +254,7 @@ Sensitive file detection covers: `.env`, private keys, cloud credentials, API to
 
 ## Integrity & Compliance
 
-### 5-layer tamper-proof architecture
+### 5-layer tamper-evident architecture
 
 | Layer | Component | Status |
 |-------|-----------|--------|
@@ -597,7 +597,7 @@ Four packages in a TypeScript monorepo:
 | GitHub Action | Full | Full | Full |
 | File permissions (0600/0700) | Full | Full | attrib +R (read-only) |
 | Watchdog (auto-repair hooks) | LaunchAgent (5 min + file watch) | systemd timer (5 min) | Task Scheduler (5 min) |
-| System install (tamper-proof) | Full (chflags schg, multi-user) | Full (chattr +i, multi-user) | Full (attrib +R, multi-user) |
+| System install (tamper-evident) | Full (chflags schg, multi-user) | Full (chattr +i, multi-user) | Full (attrib +R, multi-user) |
 | Guard script | bash | bash | PowerShell |
 
 ---

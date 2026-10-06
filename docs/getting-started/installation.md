@@ -33,7 +33,7 @@ cd packages/cli && npm link && cd ../..
 - **Operating system:** macOS, Linux, or Windows
 - **AI agent:** Claude Code (more agents coming soon)
 
-## System-Level Install (Tamper-Proof)
+## System-Level Install (Tamper-Evident)
 
 For managed machines where non-admin users should not be able to disable auditing:
 
@@ -62,7 +62,7 @@ The system install deploys:
 - A **watchdog** that ensures hooks can't be silently removed
 - **Immutable policy files** that non-admin users cannot modify
 
-See [Tamper-Proof Layers](/concepts/tamper-proof-layers) for details on what each layer protects.
+See [Tamper-Evident Layers](/concepts/tamper-proof-layers) for details on what each layer protects.
 
 ## Next Steps
 
