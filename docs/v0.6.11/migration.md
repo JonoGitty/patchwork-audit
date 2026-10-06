@@ -145,29 +145,27 @@ v0.6.11 ships a new deny rule in `docs/default-policy.yml` that
 refuses agent invocations of `patchwork approve | clear-taint |
 trust-repo-config` at the PreToolUse layer (before the Bash
 subprocess spawns). For existing installs this rule needs to land
-in your live system policy at `/Library/Patchwork/policy.yml`:
+in your live system policy at `/Library/Patchwork/policy.yml`.
 
-```sh
-# In your own terminal (sudo required):
-sudo patchwork init --upgrade
-```
-
-`patchwork init --upgrade` is idempotent: it adds the new admin-CLI
-deny rule if missing, leaves your existing custom rules untouched,
-and reports a summary diff. **Until you run this, the in-CLI TTY
-check is the only gate against agent self-approval**, and a
-PTY-allocating wrapper (`script -c '...'`) will pass it. Run the
-upgrade.
-
-If you can't run `patchwork init --upgrade` (e.g. you maintain the
-system policy by hand or via configuration management), the rule to
-add under `commands.deny:` is:
+**This is a manual edit.** `patchwork init` installs hooks; it does
+not refresh an existing system policy, and there is no `--upgrade`
+flag (earlier revisions of this guide referenced one that was never
+implemented). In your own terminal, add this rule under
+`commands.deny:` in `/Library/Patchwork/policy.yml`:
 
 ```yaml
 - regex: "(^|[^A-Za-z0-9_-])patchwork[ \\t]+(approve|clear-taint|trust-repo-config)\\b"
   action: deny
   reason: "Administrative CLI — must be run by the human user in their own terminal"
 ```
+
+Confirm it took effect with `patchwork policy show`.
+
+**Until this rule is in place, the in-CLI TTY check is the only gate
+against agent self-approval**, and a PTY-allocating wrapper
+(`script -c '...'`) will pass it. If you installed v0.6.11 by
+following an earlier revision of this guide, assume the rule is
+missing and check.
 
 ## What's new for v0.6.11 (TL;DR)
 

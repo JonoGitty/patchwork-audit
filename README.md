@@ -16,9 +16,11 @@ Patchwork solves this. It hooks into AI coding agents and records everything the
 
 **Local-first.** Your data never leaves your machine. No cloud. No telemetry. Everything works offline.
 
-**Tamper-resistant.** The AI agent cannot disable its own monitoring, corrupt the audit log, or weaken the security policy. A 5-layer tamper-proof architecture -- from hash chains to a root-owned relay daemon -- makes it impossible for non-admin users to remove.
+**Tamper-evident.** Every action is hash-chained and HMAC-sealed, so after-the-fact tampering with the audit log is detectable, and a versioned policy resists casual modification.
 
-**Policy enforcement.** Define what the AI can and cannot do. Patchwork blocks dangerous actions in real-time -- before they execute.
+**Policy enforcement.** Define what the AI can and cannot do. Patchwork classifies and blocks dangerous actions in real-time, before they execute.
+
+> **Security model -- read this.** Patchwork v0.6.x runs as **Advisory / tamper-evident**: enforcement happens in hooks that run at the *same privilege as the agent*. That makes tampering *detectable* and stops the obvious attacks, but a determined same-UID process can route around hook-level policy (e.g. via alternate interpreters, child processes, or direct network calls). **It is not an OS sandbox and should not be relied on as tamper-*resistant* against a hostile or fully autonomous agent.** True tamper-resistance -- a root-owned supervisor that launches the agent inside OS-level containment -- is the upcoming **Protected Mode (v0.7)**. To report a vulnerability, follow `SECURITY.md` (do not open a public issue).
 
 ---
 
@@ -548,6 +550,7 @@ Four packages in a TypeScript monorepo:
 ## Roadmap
 
 **Shipped:**
+- [x] **Admin-CLI identity hardening** -- closes R6-002, the alternate-name self-approval bypass: `isAdminCliInvocation` now falls back to realpath identity against the running CLI, so a symlinked alternate name (`ln -s $(command -v patchwork) ./pw && ./pw approve ...`) no longer passes as the human operator. Ships alongside an honest restatement of the security model: v0.6.x is Advisory and tamper-evident, not tamper-resistant. Literal binary copies and wrapper scripts remain a documented residual until Protected Mode. 1515 tests. (v0.6.12)
 - [x] **Compliance reports** -- 7 frameworks (SOC 2, ISO 27001, EU AI Act, GDPR, NIST AI RMF, HIPAA, PCI DSS), 31 controls, evidence linking, gap analysis, trends
 - [x] **Session replay** -- `patchwork replay <session-id>` (CLI + HTML + git diffs)
 - [x] **GitHub Action** -- `JonoGitty/patchwork@v1` for CI integration
@@ -569,11 +572,11 @@ Four packages in a TypeScript monorepo:
 - [x] **Installer dedup + loopback risk fix** -- multiple Patchwork hook entries now collapse cleanly on re-install (no more duplicate attestations); curl/wget targeting localhost is medium-risk instead of critical so the dashboard's own self-introspection loop doesn't trip the policy (v0.6.8)
 - [x] **In-toto / DSSE attestations (opt-in)** -- emit each commit attestation as a [DSSE-wrapped in-toto Statement v1](docs/reference/intoto.md) alongside the bespoke format, with a stable predicate type at `https://patchwork-audit.dev/ai-agent-session/v1`. Lets Patchwork attestations slot into the SLSA / Sigstore / supply-chain world without consumers needing to know about Patchwork's own schema. Set `PATCHWORK_INTOTO=1` on your PostToolUse hook to enable; default off. Also fixes the long-standing `extractCommitInfo` regex which silently skipped attestation on root commits and detached-HEAD output (v0.6.9)
 - [x] **GPT-5.5 cross-vendor security audit** -- 28 findings on v0.6.9 reviewed across multiple rounds, 22 fixed in v0.6.10 including the in-toto signing-oracle V11→V13 closure (chain integrity, command-injection vectors, policy bypass paths, signing-oracle hardening, fail-closed audit-log API, action enum lockdown). Architectural items deferred to v0.6.11+. (v0.6.10)
-- [x] **Taint-aware policy enforcement** -- Patchwork is now a *safety layer*, not just an audit trail. Multi-kind taint engine (`prompt`/`secret`/`network_content`/`mcp`/`generated_file`) tracks untrusted content in the session; conservative shell recognizer parses Bash commands; sink classifier + dangerous-shell-combos refuse exfil and execution paths under taint. New CLIs: `patchwork approve`, `patchwork clear-taint`, `patchwork trust-repo-config`. End-to-end release-gate tests for the [canonical attack scenarios](docs/v0.6.11/threat-model.md) (A1-A8). **Six GPT-5.5 adversarial audit rounds** (R1–R6) hardened the approval boundary against agent self-approval: env-override removal, system-policy regex deny, broadened regex for quoted PTY wrappers, semantic argv-based detection, `command`/`exec` modifier peeling, /proc/<X>/environ env-source coverage. Remaining same-UID residuals (alternate-name exec, variable-named exec) documented as accepted v0.6.11 limits — structurally fixed by the v0.6.12 root-owned approval daemon. 1509 tests. See [migration guide](docs/v0.6.11/migration.md) and [threat model](docs/v0.6.11/threat-model.md). (v0.6.11)
+- [x] **Taint-aware policy enforcement** -- Patchwork is now a *safety layer*, not just an audit trail. Multi-kind taint engine (`prompt`/`secret`/`network_content`/`mcp`/`generated_file`) tracks untrusted content in the session; conservative shell recognizer parses Bash commands; sink classifier + dangerous-shell-combos refuse exfil and execution paths under taint. New CLIs: `patchwork approve`, `patchwork clear-taint`, `patchwork trust-repo-config`. End-to-end release-gate tests for the [canonical attack scenarios](docs/v0.6.11/threat-model.md) (A1-A8). **Six GPT-5.5 adversarial audit rounds** (R1–R6) hardened the approval boundary against agent self-approval: env-override removal, system-policy regex deny, broadened regex for quoted PTY wrappers, semantic argv-based detection, `command`/`exec` modifier peeling, /proc/<X>/environ env-source coverage. Remaining same-UID residuals (alternate-name exec, variable-named exec) documented as accepted v0.6.11 limits — structurally addressed by Protected Mode (v0.7). 1509 tests. See [migration guide](docs/v0.6.11/migration.md) and [threat model](docs/v0.6.11/threat-model.md). (v0.6.11)
 
 **Planned:**
-- [ ] **Root-owned approval daemon (v0.6.12)** -- moves the approval boundary out of the agent's UID entirely. No more `patchwork approve` CLI for the agent to call; approval flows through a root-held channel (desktop prompt / Touch ID / phone push / etc.) the agent cannot impersonate. Structurally closes the same-UID class of bypass that audit rounds R2–R6 spent iterating on. Also signs per-session taint snapshots with a root-held HMAC key, closing the R1-001 / R1-008 snapshot-authenticity residual. See [threat model § Why v0.6.12](docs/v0.6.11/threat-model.md#why-v0612-introduces-a-root-owned-approval-daemon).
-- [ ] **URL allowlist + body-shape detection (v0.6.12)** -- first-class network policy with strict URL canonicalization; closes allowed-domain exfiltration (gist to user's own GitHub, DNS encoding, etc.).
+- [ ] **Protected Mode (v0.7)** -- moves the enforcement boundary out of the agent's UID entirely. A root-owned supervisor launches the agent and all its descendants inside OS-level containment (`sandbox-exec` on macOS, seccomp/landlock on Linux); the daemon owns policy, audit and approval; the hooks become telemetry rather than the gate. Approval flows through a channel the agent cannot impersonate. This is what structurally closes the same-UID class of bypass that audit rounds R2-R6 spent iterating on. A daemon on its own does not, because an agent can still route around any same-privilege hook via child processes, alternate interpreters or direct sockets. Snapshot HMAC signing with a root-held key (closing the R1-001 / R1-008 snapshot-authenticity residual) lands on the way there.
+- [ ] **URL allowlist + body-shape detection (v0.7)** -- first-class network policy with strict URL canonicalization; closes allowed-domain exfiltration (gist to user's own GitHub, DNS encoding, etc.).
 - [ ] **Witness endpoints** -- configure external anchoring for off-machine seal verification
 - [ ] **Diff-aware risk scoring** -- parse actual code changes, not just file paths
 - [ ] **Team mode** -- local-first with aggregated sealed bundles pushed to a team server
@@ -604,7 +607,7 @@ Four packages in a TypeScript monorepo:
 ```bash
 pnpm install
 pnpm build
-pnpm test          # 878 tests across 5 packages
+pnpm test          # 1515 tests across 5 packages
 pnpm lint
 ```
 
