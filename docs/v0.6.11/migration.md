@@ -150,8 +150,34 @@ in your live system policy at `/Library/Patchwork/policy.yml`.
 **This is a manual edit.** `patchwork init` installs hooks; it does
 not refresh an existing system policy, and there is no `--upgrade`
 flag (earlier revisions of this guide referenced one that was never
-implemented). In your own terminal, add this rule under
-`commands.deny:` in `/Library/Patchwork/policy.yml`:
+implemented).
+
+**If you used the system-level install, the policy file is flagged
+immutable and even `root` cannot write it until you clear the flag.**
+That is the hardening working as intended, but it does mean the edit
+is a three-step operation. Check first:
+
+```sh
+ls -lO /Library/Patchwork/policy.yml
+# -rw-r--r--  1 root  wheel  schg  ...   <- schg means immutable
+```
+
+On macOS, clear the flag, edit, then **put it back**. Leaving it
+cleared silently downgrades your install:
+
+```sh
+sudo cp /Library/Patchwork/policy.yml "/Library/Patchwork/policy.yml.bak-$(date +%Y%m%d)"
+sudo chflags noschg /Library/Patchwork/policy.yml
+# ... make the edit below ...
+sudo chflags schg /Library/Patchwork/policy.yml
+ls -lO /Library/Patchwork/policy.yml   # confirm schg is back
+```
+
+On Linux the equivalent is `sudo chattr -i` then `sudo chattr +i`; on
+Windows, `attrib -R` then `attrib +R`.
+
+Add this rule under `commands.deny:` in
+`/Library/Patchwork/policy.yml`:
 
 ```yaml
 - regex: "(^|[^A-Za-z0-9_-])patchwork[ \\t]+(approve|clear-taint|trust-repo-config)\\b"
@@ -159,7 +185,17 @@ implemented). In your own terminal, add this rule under
   reason: "Administrative CLI — must be run by the human user in their own terminal"
 ```
 
-Confirm it took effect with `patchwork policy show`.
+Confirm it took effect with `patchwork policy show | grep clear-taint`,
+and confirm the immutable flag is restored with `ls -lO`.
+
+Note that `patchwork policy validate` reports on the file you point it
+at, so a failed write followed by a successful validate is **not**
+evidence the edit landed. Grep the active policy instead.
+
+You do **not** need to restart or redeploy the relay daemon for a policy
+change: the hook loads the policy fresh on each invocation. Avoid an
+unnecessary restart, because any event in flight when the relay socket
+goes away is dropped.
 
 **Until this rule is in place, the in-CLI TTY check is the only gate
 against agent self-approval**, and a PTY-allocating wrapper

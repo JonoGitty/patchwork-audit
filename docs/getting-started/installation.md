@@ -64,6 +64,16 @@ The system install deploys:
 
 See [Tamper-Evident Layers](/concepts/tamper-proof-layers) for details on what each layer protects.
 
+::: warning Editing a system-level policy later
+The system install flags `/Library/Patchwork/policy.yml` immutable
+(`chflags schg` on macOS, `chattr +i` on Linux, `attrib +R` on Windows).
+That is deliberate, but it means **even `root` cannot edit the policy**
+until the flag is cleared, and a write attempt fails with
+`Operation not permitted` rather than a permissions message. Clear the
+flag, edit, then set it again — and verify with `ls -lO` that it is back,
+because leaving it cleared silently downgrades the install.
+:::
+
 ## Next Steps
 
 Once installed, follow the [Quickstart](/getting-started/quickstart) to set up your first audited session.
