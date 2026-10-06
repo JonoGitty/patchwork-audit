@@ -10,6 +10,10 @@ import {
 	RELAY_LOG_PATH,
 	RELAY_PID_PATH,
 	RELAY_PROTOCOL_VERSION,
+	assessRelayHealth,
+	relayHealthExitCode,
+	DEFAULT_MAX_SILENCE_MS,
+	DEFAULT_DIVERGENCE_WINDOW_MS,
 	type ChainStateResponse,
 	type SealStatusResponse,
 } from "@patchwork/core";
@@ -121,39 +125,126 @@ export const relayCommand = new Command("relay")
 	)
 	.addCommand(
 		new Command("verify")
-			.description("Verify relay log integrity against user-side events")
-			.action(() => {
+			.description(
+				"Verify relay log integrity, daemon liveness and delivery health",
+			)
+			.option(
+				"--max-silence <minutes>",
+				"treat heartbeat silence longer than this as degraded",
+				String(DEFAULT_MAX_SILENCE_MS / 60_000),
+			)
+			.option(
+				"--divergence-window <minutes>",
+				"how recent a delivery failure must be to count as current",
+				String(DEFAULT_DIVERGENCE_WINDOW_MS / 60_000),
+			)
+			.option("--json", "emit the report as JSON")
+			.action((opts) => {
 				if (!existsSync(RELAY_LOG_PATH)) {
-					console.log(chalk.yellow("No relay log found — relay not installed or no events received"));
+					// F4: no log is not health. The relay is either not installed
+					// or has never received anything, and both deserve a non-zero
+					// exit so a CI step or a cron check notices.
+					if (opts.json) {
+						console.log(
+							JSON.stringify(
+								{ status: "stale", reasons: ["no relay log found"] },
+								null,
+								2,
+							),
+						);
+					} else {
+						console.log(
+							chalk.yellow(
+								"No relay log found — relay not installed or no events received",
+							),
+						);
+					}
+					process.exitCode = 2;
 					return;
 				}
 
-				const content = readFileSync(RELAY_LOG_PATH, "utf-8");
-				const lines = content.split("\n").filter((l) => l.trim());
-				let events = 0;
-				let heartbeats = 0;
-				let corrupt = 0;
+				const minutes = Number(opts.maxSilence);
+				const maxSilenceMs =
+					Number.isFinite(minutes) && minutes > 0
+						? minutes * 60_000
+						: DEFAULT_MAX_SILENCE_MS;
 
-				for (const line of lines) {
-					try {
-						const parsed = JSON.parse(line);
-						if (parsed.type === "heartbeat") {
-							heartbeats++;
-						} else {
-							events++;
-						}
-					} catch {
-						corrupt++;
+				const windowMinutes = Number(opts.divergenceWindow);
+				const divergenceWindowMs =
+					Number.isFinite(windowMinutes) && windowMinutes > 0
+						? windowMinutes * 60_000
+						: DEFAULT_DIVERGENCE_WINDOW_MS;
+
+				const report = assessRelayHealth({
+					logContent: readFileSync(RELAY_LOG_PATH, "utf-8"),
+					divergence: readRelayDivergenceMarker(),
+					maxSilenceMs,
+					divergenceWindowMs,
+				});
+
+				if (opts.json) {
+					console.log(JSON.stringify(report, null, 2));
+					process.exitCode = relayHealthExitCode(report);
+					return;
+				}
+
+				const verdict =
+					report.status === "pass"
+						? chalk.green("PASS")
+						: report.status === "stale"
+							? chalk.yellow("DEGRADED")
+							: chalk.red("FAIL");
+
+				console.log(chalk.bold("Relay Log Verification\n"));
+				console.log(`  Events:     ${report.events}`);
+				console.log(`  Heartbeats: ${report.heartbeats}`);
+				console.log(
+					`  Corrupt:    ${report.corrupt === 0 ? chalk.green("0") : chalk.red(String(report.corrupt))}`,
+				);
+				if (report.silenceMs !== null) {
+					const mins = Math.round(report.silenceMs / 60_000);
+					const silence =
+						report.silenceMs < 60_000
+							? `${Math.round(report.silenceMs / 1000)}s ago`
+							: `${mins}m ago`;
+					console.log(
+						`  Last beat:  ${report.silenceMs > maxSilenceMs ? chalk.red(silence) : chalk.green(silence)}`,
+					);
+				}
+				if (report.divergenceFailures > 0) {
+					const current = report.reasons.some((r) => r.includes("deliver"));
+					const label = `${report.divergenceFailures} failed`;
+					console.log(
+						`  Delivery:   ${current ? chalk.red(label) : chalk.dim(`${label} (historical)`)}`,
+					);
+				}
+				console.log(`  Integrity:  ${verdict}`);
+
+				if (report.notes.length > 0) {
+					console.log("");
+					for (const note of report.notes) {
+						console.log(chalk.dim(`  i ${note}`));
 					}
 				}
 
-				console.log(chalk.bold("Relay Log Verification\n"));
-				console.log(`  Events:     ${events}`);
-				console.log(`  Heartbeats: ${heartbeats}`);
-				console.log(`  Corrupt:    ${corrupt === 0 ? chalk.green("0") : chalk.red(String(corrupt))}`);
-				console.log(
-					`  Integrity:  ${corrupt === 0 ? chalk.green("PASS") : chalk.red("FAIL")}`,
-				);
+				if (report.reasons.length > 0) {
+					console.log("");
+					for (const reason of report.reasons) {
+						console.log(chalk.yellow(`  ! ${reason}`));
+					}
+					console.log(
+						chalk.dim(
+							"\n  DEGRADED means the log may be incomplete, not that it was edited.",
+						),
+					);
+					console.log(
+						chalk.dim(
+							"  Patchwork can prove the log was not altered. It cannot prove it is complete.",
+						),
+					);
+				}
+
+				process.exitCode = relayHealthExitCode(report);
 			}),
 	);
 

@@ -5,6 +5,8 @@ import {
 	existsSync,
 	readdirSync,
 	statSync,
+	readFileSync,
+	symlinkSync,
 	writeFileSync,
 	mkdirSync,
 } from "node:fs";
@@ -218,4 +220,85 @@ describe("taint-store", () => {
 		rmSync(pendingPath);
 		expect(readTaintSnapshot("ses_pending")).not.toBeNull();
 	});
+
+	// F3: refuse to follow symlinks on taint-store paths. Mirrors the
+	// installer.ts defence for `.claude/` and settings.json. The point of
+	// each test is that VALID content behind a symlink is still refused:
+	// the question is not "is this snapshot well-formed" but "is this the
+	// file we wrote".
+	describe("F3 / R1-xxx: symlink refusal on taint paths", () => {
+		const sessionId = "ses_f3_symlink";
+
+		it("read returns null when the snapshot path is a symlink", () => {
+			const taintDir = getTaintDir();
+			mkdirSync(taintDir, { recursive: true, mode: 0o700 });
+
+			// A perfectly valid snapshot, parked somewhere the agent chose.
+			const decoy = join(tmpDir, "decoy-snapshot.json");
+			const valid = createSnapshot(sessionId);
+			writeFileSync(decoy, `${JSON.stringify(valid, null, 2)}\n`, {
+				mode: 0o600,
+			});
+
+			symlinkSync(decoy, getTaintSnapshotPath(sessionId));
+
+			// Fails closed despite the target parsing cleanly.
+			expect(readTaintSnapshot(sessionId)).toBeNull();
+		});
+
+		it("read returns null when the taint directory is a symlink", () => {
+			const decoyDir = join(tmpDir, "decoy-taint-dir");
+			mkdirSync(decoyDir, { recursive: true, mode: 0o700 });
+			mkdirSync(join(tmpDir, ".patchwork"), { recursive: true, mode: 0o700 });
+
+			const valid = createSnapshot(sessionId);
+			writeFileSync(
+				join(decoyDir, getTaintSnapshotPath(sessionId).split("/").pop() as string),
+				`${JSON.stringify(valid, null, 2)}\n`,
+				{ mode: 0o600 },
+			);
+
+			symlinkSync(decoyDir, getTaintDir());
+
+			expect(readTaintSnapshot(sessionId)).toBeNull();
+		});
+
+		it("write throws when the snapshot path is a symlink", () => {
+			const taintDir = getTaintDir();
+			mkdirSync(taintDir, { recursive: true, mode: 0o700 });
+
+			const decoy = join(tmpDir, "write-decoy.json");
+			writeFileSync(decoy, "{}\n", { mode: 0o600 });
+			symlinkSync(decoy, getTaintSnapshotPath(sessionId));
+
+			expect(() => writeTaintSnapshot(createSnapshot(sessionId))).toThrow(
+				/symlink/i,
+			);
+			// The decoy must be untouched — the refusal happens before any write.
+			expect(readdirSync(tmpDir)).toContain("write-decoy.json");
+			expect(JSON.parse(readFileSync(decoy, "utf-8"))).toEqual({});
+		});
+
+		it("write throws when the taint directory is a symlink", () => {
+			const decoyDir = join(tmpDir, "write-decoy-dir");
+			mkdirSync(decoyDir, { recursive: true, mode: 0o700 });
+			mkdirSync(join(tmpDir, ".patchwork"), { recursive: true, mode: 0o700 });
+			symlinkSync(decoyDir, getTaintDir());
+
+			expect(() => writeTaintSnapshot(createSnapshot(sessionId))).toThrow(
+				/symlink/i,
+			);
+			// Nothing was written through the redirected directory.
+			expect(readdirSync(decoyDir)).toEqual([]);
+		});
+
+		it("a normal (non-symlink) snapshot still round-trips", () => {
+			const snap = createSnapshot(sessionId);
+			writeTaintSnapshot(snap);
+			const read = readTaintSnapshot(sessionId);
+			expect(read).not.toBeNull();
+			expect(read?.session_id).toBe(sessionId);
+		});
+	});
+
 });

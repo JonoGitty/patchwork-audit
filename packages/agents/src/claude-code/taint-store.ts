@@ -40,6 +40,8 @@ import {
 import {
 	chmodSync,
 	existsSync,
+	fsyncSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	closeSync,
@@ -48,6 +50,7 @@ import {
 	statSync,
 	unlinkSync,
 	writeFileSync,
+	writeSync,
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -116,6 +119,53 @@ function reconcileMode(path: string, targetMode: number): void {
 }
 
 /**
+ * F3: is `path` a symlink?
+ *
+ * Returns `false` only when the path is genuinely absent, `true` when it
+ * is a symlink, and `null` when we could not determine it (permissions,
+ * I/O error). `null` is deliberately distinct from `false`: an
+ * indeterminate answer about a security-relevant path must not be read
+ * as "safe".
+ *
+ * `lstatSync` is used rather than `existsSync` + `statSync` because
+ * `existsSync` follows symlinks, so a dangling symlink reports absent
+ * and the check would be skipped entirely.
+ */
+function symlinkState(path: string): boolean | null {
+	try {
+		return lstatSync(path).isSymbolicLink();
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+		return null;
+	}
+}
+
+/**
+ * F3 (mirrors the installer.ts `.claude/` + settings.json defence):
+ * refuse to follow symlinks on taint-store paths.
+ *
+ * Without this, an agent that can create a symlink in its own home
+ * directory can redirect the taint store:
+ *
+ *   - a symlink AT the snapshot path makes `readFileSync` return an
+ *     attacker-chosen file, so the agent picks the taint state the sink
+ *     classifier will see;
+ *   - a symlink at the taint DIRECTORY redirects every snapshot, pending
+ *     marker and lockfile at once, and on the write side redirects where
+ *     the temp file lands.
+ *
+ * Returns true if either the snapshot path or its parent directory is a
+ * symlink, or if either could not be determined.
+ */
+function taintPathIsUnsafe(snapshotPath: string): boolean {
+	const dirState = symlinkState(dirname(snapshotPath));
+	if (dirState !== false) return true;
+	const fileState = symlinkState(snapshotPath);
+	if (fileState !== false) return true;
+	return false;
+}
+
+/**
  * Read the persisted snapshot for `sessionId`. Returns `null` for any
  * state the reader can't trust:
  *   - missing file                                      (fresh session)
@@ -136,6 +186,11 @@ export function readTaintSnapshot(
 		? `${overridePath}.pending`
 		: getTaintPendingPath(sessionId);
 	try {
+		// F3: a symlink anywhere on the taint path means the file we are
+		// about to read is not necessarily the file we wrote. Collapse to
+		// null, which commit 8 turns into "all kinds active" — the same
+		// conservative path every other form of doubt takes.
+		if (taintPathIsUnsafe(p)) return null;
 		// R1-002: a stale snapshot after a failed PostToolUse write looks
 		// indistinguishable from a current one without an external signal.
 		// The `.pending` marker IS that signal: PostToolUse touches it
@@ -176,16 +231,53 @@ export function writeTaintSnapshot(
 	const p =
 		overridePath ?? getTaintSnapshotPath(snapshot.session_id);
 	const dir = dirname(p);
+	// F3: refuse to write through a symlink. Unlike the read side, which
+	// fails closed by returning null, a failed write must be loud: the
+	// PostToolUse caller already wraps this in try/catch, and silently
+	// writing taint state to an attacker-chosen location is worse than
+	// the hook reporting a storage failure.
+	if (taintPathIsUnsafe(p)) {
+		throw new Error(
+			`Refusing to write taint snapshot: ${p} or its parent directory is a symlink, or could not be checked. Resolve it manually before continuing.`,
+		);
+	}
 	if (!existsSync(dir)) {
 		mkdirSync(dir, { recursive: true, mode: TAINT_DIR_MODE });
 	} else {
 		reconcileMode(dir, TAINT_DIR_MODE);
 	}
 	const tmpPath = `${p}.${randomBytes(4).toString("hex")}.tmp`;
-	writeFileSync(tmpPath, JSON.stringify(snapshot, null, 2) + "\n", {
-		mode: TAINT_FILE_MODE,
-	});
+	const payload = `${JSON.stringify(snapshot, null, 2)}\n`;
+	// F2 (R1-011): durable write. tmp + rename gives atomicity but not
+	// durability — without fsync, a crash or power loss between the write
+	// and the OS flushing its page cache can leave the snapshot absent or
+	// truncated. A reader that then finds an older-but-still-valid
+	// snapshot silently rolls taint BACKWARDS, which is the dangerous
+	// direction: taint that was recorded disappears and a sink that
+	// should deny allows.
+	const fd = openSync(tmpPath, "w", TAINT_FILE_MODE);
+	try {
+		writeSync(fd, payload);
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
 	renameSync(tmpPath, p);
+	// Also fsync the directory, so the rename itself survives a crash.
+	// Best-effort: not every platform permits opening a directory (this
+	// throws EISDIR/EPERM on Windows). The file fsync above is the
+	// load-bearing half; a lost rename leaves the previous snapshot
+	// intact, which the reader already handles.
+	try {
+		const dirFd = openSync(dir, "r");
+		try {
+			fsyncSync(dirFd);
+		} finally {
+			closeSync(dirFd);
+		}
+	} catch {
+		// directory fsync unsupported on this platform
+	}
 }
 
 /** Grace window after which a lockfile is considered stale and may be

@@ -231,6 +231,15 @@ export {
 	type RelayDivergenceMarker,
 } from "./relay/client.js";
 export {
+	assessRelayHealth,
+	relayHealthExitCode,
+	DEFAULT_MAX_SILENCE_MS,
+	DEFAULT_DIVERGENCE_WINDOW_MS,
+	type RelayHealthStatus,
+	type RelayHealthReport,
+	type AssessRelayHealthInput,
+} from "./relay/health.js";
+export {
 	RELAY_SOCKET_PATH,
 	RELAY_LOG_PATH,
 	RELAY_DAEMON_LOG_PATH,
