@@ -185,6 +185,27 @@ Add this rule under `commands.deny:` in
   reason: "Administrative CLI — must be run by the human user in their own terminal"
 ```
 
+::: warning Known limitation: this rule matches command *text*, not parsed commands
+The rule is a regular expression evaluated against the raw command string,
+so it has no way to tell an actual invocation from the phrase merely
+appearing in the text. It will therefore also deny commands such as:
+
+- writing documentation or code comments that mention `patchwork approve`
+- `git commit -m "..."` whose message describes the admin CLI
+- `grep` or `rg` searching your codebase for those verb names
+- test fixtures containing them
+
+This fails closed, which is the safe direction, and the in-process check
+(`isAdminCliInvocation`) is argv-aware and does not have this problem.
+But it is a real nuisance, most of all if you work *on* Patchwork itself.
+
+Until it is narrowed to require command position, the workaround is to
+avoid the literal phrase in a command — for example build it from parts
+in a script file and run the script by name, rather than typing it on the
+command line. Tracked for a fix that evaluates policy against parsed
+argv rather than text.
+:::
+
 Confirm it took effect with `patchwork policy show | grep clear-taint`,
 and confirm the immutable flag is restored with `ls -lO`.
 
