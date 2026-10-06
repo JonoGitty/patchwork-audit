@@ -25,7 +25,7 @@ Patchwork follows the defence-in-depth principle: no single layer is trusted to 
 └─────────────────────────────────────────────┘
 ```
 
-See [Tamper-Proof Layers](/concepts/tamper-proof-layers) for a user-friendly explanation of each layer.
+See [Tamper-Evident Layers](/concepts/tamper-proof-layers) for a user-friendly explanation of each layer.
 
 ## Cryptographic Primitives
 

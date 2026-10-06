@@ -132,10 +132,18 @@ own GitHub, DNS encoding, etc.).
 ```sh
 npm install -g patchwork-audit@0.6.11
 
-# Refresh hooks and system policy
+# Refresh hooks
 patchwork init
-sudo patchwork init --upgrade   # adds the admin-CLI deny rule
 ```
+
+The admin-CLI deny rule must then be added to
+`/Library/Patchwork/policy.yml` by hand. There is no `--upgrade`
+flag, and `patchwork init` does not refresh an existing system
+policy. On a system-level install the policy file is flagged
+immutable, so the edit needs `chflags noschg` first and `chflags
+schg` afterwards. See the [migration guide](/v0.6.11/migration) for
+the exact rule and the full sequence, and check the result with
+`patchwork policy show | grep clear-taint` rather than assuming.
 
 Audit data is forward + backward compatible — JSONL events, SQLite
 events, DSSE attestations, and seal chains are all stable across the

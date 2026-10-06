@@ -108,7 +108,7 @@ packages/team/
 
 Runs as a background daemon (launchd/systemd/Task Scheduler) alongside the relay daemon. Reads from the relay's append-only log and pushes batches to the team server.
 
-**Reads from relay log, not user log.** The relay log at `/Library/Patchwork/events.relay.jsonl` is root-owned and tamper-proof. A malicious user cannot modify it.
+**Reads from relay log, not user log.** The relay log at `/Library/Patchwork/events.relay.jsonl` is root-owned, so a process running as the user cannot modify it, and the hash chain makes any edit to an accepted event detectable. It does not protect against events that were never submitted, or against fabricated events submitted over the socket by a same-UID process.
 
 **Sync cursor** persisted at `/Library/Patchwork/team/sync-cursor.json`:
 ```json

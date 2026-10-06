@@ -15,7 +15,7 @@ hero:
 
 features:
   - title: See Everything
-    details: Every file edit, command, and web request logged with tamper-proof SHA-256 hash chains. Nothing gets past unrecorded.
+    details: Every file edit, command, and web request logged with tamper-evident SHA-256 hash chains. Nothing gets past unrecorded.
     icon:
       src: /icons/search.svg
   - title: Enforce Rules
@@ -26,8 +26,8 @@ features:
     details: Generate reports mapped to SOC 2, ISO 27001, the EU AI Act, NIST AI RMF, and more. 7 frameworks, 31 controls.
     icon:
       src: /icons/clipboard.svg
-  - title: Tamper-Proof
-    details: A 5-layer architecture — from hash chains to a root-owned relay daemon — makes it impossible for the AI to disable its own monitoring.
+  - title: Tamper-Evident
+    details: A 5-layer architecture, from hash chains to a root-owned relay daemon, makes tampering with the audit trail detectable. Hook-level enforcement is advisory today; OS-level containment arrives in Protected Mode.
     icon:
       src: /icons/lock.svg
   - title: Local-First

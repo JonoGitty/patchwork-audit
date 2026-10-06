@@ -72,7 +72,7 @@ const PROFILES: SetupProfile[] = [
 	},
 	{
 		name: "Developer workstation",
-		description: "Full tamper-proof setup. Relay daemon, locked hooks, strict policy.",
+		description: "Full tamper-evident setup. Relay daemon, locked hooks, strict policy.",
 		policyMode: "fail-closed",
 		strictProfile: true,
 		relay: true,
@@ -81,7 +81,7 @@ const PROFILES: SetupProfile[] = [
 	},
 	{
 		name: "Managed / compliance",
-		description: "Enterprise-grade. Tamper-proof, fail-closed, system-level enforcement.",
+		description: "Enterprise-grade. Tamper-evident, fail-closed, system-level enforcement.",
 		policyMode: "fail-closed",
 		strictProfile: true,
 		relay: true,
@@ -109,7 +109,7 @@ export const setupCommand = new Command("setup")
 		console.log(chalk.bold.cyan("\n  Patchwork Setup\n"));
 		console.log(chalk.dim("  The audit trail for AI coding agents.\n"));
 		console.log(chalk.dim("  This wizard will configure hooks, policy,"));
-		console.log(chalk.dim("  and optionally the tamper-proof relay daemon.\n"));
+		console.log(chalk.dim("  and optionally the tamper-evident relay daemon.\n"));
 
 		// ---------------------------------------------------------------
 		// Step 1: Detect environment
@@ -156,7 +156,7 @@ export const setupCommand = new Command("setup")
 			profile.strictProfile = modeIdx === 1;
 
 			if (platform !== "win32") {
-				profile.relay = await confirm("Install relay daemon? (tamper-proof root-owned audit copy, needs sudo)");
+				profile.relay = await confirm("Install relay daemon? (tamper-evident root-owned audit copy, needs sudo)");
 				profile.systemInstall = await confirm("Lock hooks with system-level enforcement? (prevents AI from disabling monitoring, needs sudo)");
 			}
 			profile.dashboard = await confirm("Enable web dashboard?");

@@ -33,7 +33,7 @@ cd packages/cli && npm link && cd ../..
 - **Operating system:** macOS, Linux, or Windows
 - **AI agent:** Claude Code (more agents coming soon)
 
-## System-Level Install (Tamper-Proof)
+## System-Level Install (Tamper-Evident)
 
 For managed machines where non-admin users should not be able to disable auditing:
 
@@ -62,7 +62,17 @@ The system install deploys:
 - A **watchdog** that ensures hooks can't be silently removed
 - **Immutable policy files** that non-admin users cannot modify
 
-See [Tamper-Proof Layers](/concepts/tamper-proof-layers) for details on what each layer protects.
+See [Tamper-Evident Layers](/concepts/tamper-proof-layers) for details on what each layer protects.
+
+::: warning Editing a system-level policy later
+The system install flags `/Library/Patchwork/policy.yml` immutable
+(`chflags schg` on macOS, `chattr +i` on Linux, `attrib +R` on Windows).
+That is deliberate, but it means **even `root` cannot edit the policy**
+until the flag is cleared, and a write attempt fails with
+`Operation not permitted` rather than a permissions message. Clear the
+flag, edit, then set it again — and verify with `ls -lO` that it is back,
+because leaving it cleared silently downgrades the install.
+:::
 
 ## Next Steps
 

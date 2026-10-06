@@ -191,6 +191,6 @@ This gives auditors cryptographic evidence that the audit trail is complete and 
 
 ## Next Steps
 
-- [Tamper-Proof Layers](/concepts/tamper-proof-layers) — how seals fit into the 5-layer architecture
+- [Tamper-Evident Layers](/concepts/tamper-proof-layers) — how seals fit into the 5-layer architecture
 - [Compliance](/concepts/compliance) — how Patchwork maps to regulatory frameworks
 - [Relay Protocol](/reference/relay-protocol) — technical details of the relay and seal system

@@ -77,7 +77,7 @@ The EU AI Act (Articles 12-15) requires AI systems to maintain logs of their ope
 | Art. 12(2) | Traceability of AI operations | Hash-chained events with session tracking and project context |
 | Art. 13(1) | Transparency of AI operation | Web dashboard, event search, session replay |
 | Art. 14(1) | Human oversight capability | Policy enforcement blocks dangerous actions before execution |
-| Art. 15(1) | Accuracy and robustness | Tamper-proof logging with 5-layer integrity architecture |
+| Art. 15(1) | Accuracy and robustness | Tamper-evident logging: hash chain, root-owned relay copy, HMAC seals. Detection, not prevention; see the [threat model](/security/threat-model) |
 
 ## Gap Analysis
 

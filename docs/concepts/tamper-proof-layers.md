@@ -1,6 +1,11 @@
-# Tamper-Proof Layers
+# Tamper-Evident Layers
 
-Patchwork uses a 5-layer defence-in-depth architecture to ensure audit logs cannot be tampered with — even by the AI agent itself or a compromised user account.
+> This page was titled "Tamper-Proof Layers" before v0.6.12. The URL is unchanged so existing
+> links keep working, but the claim has been corrected: these layers make tampering **detectable**,
+> they do not make it impossible. See the [threat model](/security/threat-model) for the
+> Advisory versus Protected distinction.
+
+Patchwork uses a 5-layer defence-in-depth architecture so that tampering with an audit log is detectable, including tampering by the AI agent itself or by a compromised user account.
 
 ## Why 5 Layers?
 

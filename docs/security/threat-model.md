@@ -1,5 +1,13 @@
 # Threat Model
 
+> **Security model, read this first.** Patchwork v0.6.x runs as **Advisory / tamper-evident**.
+> Enforcement happens in hooks that run at the *same privilege as the agent*, which makes tampering
+> *detectable* and stops the obvious attacks, but a determined same-UID process can route around
+> hook-level policy via alternate interpreters, child processes or direct network calls. Patchwork is
+> not an OS sandbox and should not be relied on as tamper-*resistant* against a hostile or fully
+> autonomous agent. True tamper-resistance, a root-owned supervisor that launches the agent inside
+> OS-level containment, is **Protected Mode (v0.7)**.
+
 This page describes what Patchwork is designed to protect against, what it cannot protect against, and the assumptions it makes.
 
 ## What Patchwork Protects Against
@@ -8,7 +16,16 @@ This page describes what Patchwork is designed to protect against, what it canno
 
 **Threat:** An AI agent attempts to disable its own monitoring, delete audit logs, or weaken security policies.
 
-**Mitigation:** The hook scripts run in a separate process from the AI agent. The agent cannot access or modify the hook configuration, the audit log, or the policy files. With the relay daemon (Layer 2), even deleting the user-level log doesn't destroy the audit trail.
+**Mitigation (partial, and honestly bounded):** The hook scripts run in a separate process from the AI
+agent, and the system policy at `/Library/Patchwork/policy.yml` is root-owned, so an agent running as
+the user cannot weaken it. With the relay daemon (Layer 2), deleting the user-level log does not
+destroy the audit trail, and the hash chain makes any edit to an accepted event detectable.
+
+**What this does NOT do:** the hooks run at the agent's own UID, so an agent can modify its own
+user-level hook configuration, and it can perform actions the hooks never observe at all, such as
+work done by a grandchild process of an approved command, a package lifecycle script, or an
+interpreter invoked as `python -c`. Patchwork proves the log was not edited. It does not yet prove
+the log is complete. Closing that gap requires OS-level containment, which is Protected Mode (v0.7).
 
 ### 2. Log Tampering (Non-Root User)
 

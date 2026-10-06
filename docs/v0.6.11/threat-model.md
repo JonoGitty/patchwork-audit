@@ -1,5 +1,17 @@
 # Patchwork v0.6.11 threat model
 
+> **Note added 2026-10-06.** The forward-looking "v0.6.12 will introduce a
+> root-owned approval daemon" claims below are **superseded**. A daemon that
+> receives requests from a same-privilege hook is tamper-*evident* logging, not
+> an enforcement boundary: the agent can route around any same-UID hook via
+> child processes, alternate interpreters or direct sockets. The enforcement
+> boundary is OS-level containment, with the daemon as the control plane that
+> configures it, and that ships as **Protected Mode in v0.7**. v0.6.12 itself
+> ships the R6-002 admin-CLI identity fix plus an honest restatement of the
+> security model. Everything this document says about v0.6.11's *current*
+> behaviour, and about the residuals, still stands.
+
+
 The shift from **v0.6.10 (audit trail)** to **v0.6.11 (safety layer)** is a
 threat-model shift, not just a feature addition. v0.6.10 told you *what
 happened*; v0.6.11 refuses some classes of *what could happen*. This document

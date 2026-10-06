@@ -1,6 +1,15 @@
 import { defineConfig } from "vitepress";
 
 export default defineConfig({
+	// TEST_LOG.md is a generated record, not a page, and is not linked from
+	// the nav or sidebar. VitePress still compiles every .md under docs/
+	// through the Vue compiler, which chokes on angle-bracket tokens that
+	// occur naturally in test names (placeholders such as <id> or <X> read
+	// as unclosed HTML) and then fails the whole build with a misleading
+	// "Element is missing end tag" pointing at an unrelated line. Excluding
+	// it stops `pnpm test:log:write` from being able to break the docs
+	// deploy every time the test corpus gains such a name.
+	srcExclude: ["**/TEST_LOG.md"],
 	title: "Patchwork",
 	description: "The audit trail for AI coding agents",
 	base: "/patchwork-audit/",
@@ -58,7 +67,7 @@ export default defineConfig({
 							link: "/concepts/risk-classification",
 						},
 						{
-							text: "Tamper-Proof Layers",
+							text: "Tamper-Evident Layers",
 							link: "/concepts/tamper-proof-layers",
 						},
 						{

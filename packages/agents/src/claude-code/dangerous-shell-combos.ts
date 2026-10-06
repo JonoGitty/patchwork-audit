@@ -35,6 +35,7 @@
  * existing first-match-wins order then drives the verdict.
  */
 
+import { realpathSync } from "node:fs";
 import type { SinkMatch, SinkClass } from "@patchwork/core";
 import type {
 	ShellParsedCommand,
@@ -128,6 +129,65 @@ function basenameOf(p: string): string {
 	return i < 0 ? p : p.substring(i + 1);
 }
 
+/**
+ * R6-002 — admin-CLI identity via realpath canonicalisation.
+ *
+ * Resolve the canonical realpath of the currently-running Patchwork CLI.
+ * Used to detect alternate-name invocations of the same binary that the
+ * basename check would otherwise miss:
+ *
+ *   ln -s "$(command -v patchwork)" ./pw       # then ./pw approve <id>
+ *
+ * Tests inject a canonical via the `PATCHWORK_CANONICAL_REALPATH`
+ * environment variable so the helper can be exercised without spawning
+ * the real CLI. In production this is set to `process.argv[1]` (the
+ * script the current process was started with) and resolved through
+ * `realpathSync` so symlinked install paths still match.
+ *
+ * Limitations (documented for honesty — these remain residual until a
+ * root-owned approval authority replaces argv-based identity in
+ * Protected Mode, v0.7):
+ *
+ *   - Literal binary COPIES (`cp $(which patchwork) /tmp/pw`) are not
+ *     detected: their realpath is themselves, not the canonical CLI.
+ *   - Wrapper scripts that `exec patchwork "$@"` from another file are
+ *     not detected: their realpath is the wrapper, not patchwork.
+ *
+ * Closes the symlink + alternate-rename case, which is the cheapest path
+ * for an autonomous agent and was the concrete bypass example in the
+ * 2026-05-12 R6 audit
+ * (REVIEWS/2026-05-12-gpt55-v0.6.11-impl-audit-round6.json).
+ */
+function patchworkCanonicalRealpath(): string | null {
+	const candidate =
+		process.env.PATCHWORK_CANONICAL_REALPATH ?? process.argv[1];
+	if (!candidate) return null;
+	try {
+		return realpathSync(candidate);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * True when `headPath` (the parsed argv[0], post-modifier-peel) refers
+ * to the Patchwork CLI by basename OR by realpath identity. The
+ * basename check is the always-on cheap path (covers
+ * `patchwork`, `./patchwork`, `/usr/local/bin/patchwork`). The realpath
+ * check catches the alternate-name symlink case (`./pw`, `/tmp/pw`,
+ * etc.) by canonicalising both sides.
+ */
+function isPatchworkExecutable(headPath: string): boolean {
+	if (basenameOf(headPath) === "patchwork") return true;
+	const canonical = patchworkCanonicalRealpath();
+	if (canonical === null) return false;
+	try {
+		return realpathSync(headPath) === canonical;
+	} catch {
+		return false;
+	}
+}
+
 function peelModifierFlags(
 	argv: readonly string[],
 	originalHead: string | undefined,
@@ -157,9 +217,15 @@ function peelModifierFlags(
  *     `"patchwork" approve ...`, `p'atch'work approve ...`
  *   - shell command modifiers (R6-001): `command patchwork approve`,
  *     `exec patchwork approve`, `exec -a foo patchwork approve`
+ *   - R6-002: alternate-name SYMLINKS to the
+ *     installed Patchwork binary, e.g. `./pw approve <id>` where
+ *     `./pw → /usr/local/bin/patchwork`. Detected via realpath identity
+ *     comparison in `isPatchworkExecutable`. Literal binary copies and
+ *     wrapper scripts remain residual until the root-owned approval
+ *     daemon (planned v0.6.12 P0c) replaces argv-based identity.
  *
- * Also returns true when argv is unresolved but resolved_head's
- * basename is `patchwork` — the parser's best-effort first word covers
+ * Also returns true when argv is unresolved but resolved_head matches
+ * the Patchwork identity — the parser's best-effort first word covers
  * cases where the argv as a whole couldn't be resolved.
  */
 function isAdminCliInvocation(node: ShellParsedCommand): boolean {
@@ -167,11 +233,11 @@ function isAdminCliInvocation(node: ShellParsedCommand): boolean {
 	if (argv === "unresolved") {
 		const head = node.resolved_head;
 		if (typeof head !== "string") return false;
-		return basenameOf(head) === "patchwork";
+		return isPatchworkExecutable(head);
 	}
 	const peeled = peelModifierFlags(argv, node.resolved_head);
 	if (peeled.length < 2) return false;
-	if (basenameOf(peeled[0]) !== "patchwork") return false;
+	if (!isPatchworkExecutable(peeled[0])) return false;
 	return ADMIN_CLI_VERBS.has(peeled[1]);
 }
 
