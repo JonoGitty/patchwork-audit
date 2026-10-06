@@ -247,7 +247,7 @@ export function writeTaintSnapshot(
 		reconcileMode(dir, TAINT_DIR_MODE);
 	}
 	const tmpPath = `${p}.${randomBytes(4).toString("hex")}.tmp`;
-	const payload = JSON.stringify(snapshot, null, 2) + "\n";
+	const payload = `${JSON.stringify(snapshot, null, 2)}\n`;
 	// F2 (R1-011): durable write. tmp + rename gives atomicity but not
 	// durability — without fsync, a crash or power loss between the write
 	// and the OS flushing its page cache can leave the snapshot absent or

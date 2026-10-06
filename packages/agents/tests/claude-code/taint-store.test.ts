@@ -236,7 +236,7 @@ describe("taint-store", () => {
 			// A perfectly valid snapshot, parked somewhere the agent chose.
 			const decoy = join(tmpDir, "decoy-snapshot.json");
 			const valid = createSnapshot(sessionId);
-			writeFileSync(decoy, JSON.stringify(valid, null, 2) + "\n", {
+			writeFileSync(decoy, `${JSON.stringify(valid, null, 2)}\n`, {
 				mode: 0o600,
 			});
 
@@ -254,7 +254,7 @@ describe("taint-store", () => {
 			const valid = createSnapshot(sessionId);
 			writeFileSync(
 				join(decoyDir, getTaintSnapshotPath(sessionId).split("/").pop() as string),
-				JSON.stringify(valid, null, 2) + "\n",
+				`${JSON.stringify(valid, null, 2)}\n`,
 				{ mode: 0o600 },
 			);
 
