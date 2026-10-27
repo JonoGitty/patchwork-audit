@@ -55,19 +55,19 @@ inputs:
 outputs:
   pass:
     description: "Whether verification passed (true/false)"
-    value: ${{ steps.verify.outputs.pass }}
+    value: ${{ steps.verify.outputs.pass || steps.verify-fallback.outputs.pass }}
   total-events:
     description: "Total number of audit events"
-    value: ${{ steps.verify.outputs.total-events }}
+    value: ${{ steps.verify.outputs.total-events || steps.verify-fallback.outputs.total-events }}
   chained-events:
     description: "Number of hash-chained events"
-    value: ${{ steps.verify.outputs.chained-events }}
+    value: ${{ steps.verify.outputs.chained-events || steps.verify-fallback.outputs.chained-events }}
   attestation-path:
     description: "Path to the generated attestation artifact"
     value: ${{ steps.attest.outputs.attestation-path }}
   verify-json:
     description: "Full verification result as JSON"
-    value: ${{ steps.verify.outputs.verify-json }}
+    value: ${{ steps.verify.outputs.verify-json || steps.verify-fallback.outputs.verify-json }}
 
 runs:
   using: "composite"
